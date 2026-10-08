@@ -134,8 +134,15 @@ int main(int argc, char** argv) {
         "V2 provider count/version");
     require(snapshot_v2.desired.frame_generation == 0,
         "standalone frame generation remains OFXR");
+    auto dlss_settings = snapshot_v2.desired;
+    dlss_settings.frame_generation = 1;
+    require(request_control_v2(&dlss_settings) != 0, "native DLSS FG option accepted");
+    OFXR_ControlSnapshotV2 dlss_snapshot{};
+    require(get_control_v2(&dlss_snapshot) != 0 && dlss_snapshot.desired.frame_generation == 1,
+        "native DLSS FG option retained");
+    require(request_control_v2(&snapshot_v2.desired) != 0, "restore OFXR generation");
     auto unsupported_settings = snapshot_v2.desired;
-    unsupported_settings.frame_generation = 1;
+    unsupported_settings.frame_generation = 2;
     require(request_control_v2(&unsupported_settings) == 0,
         "external frame-generation request rejected");
 

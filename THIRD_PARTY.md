@@ -108,6 +108,30 @@ matches. The FidelityFX backend retains its single packed-stereo dispatch. The
 full SDK package, programming guide, samples and license agreement are
 development inputs and are not bridge release artifacts.
 
+## NVIDIA DLSS Frame Generation (optional)
+
+The `XRFG_NATIVE_DLSSG` build uses NVIDIA/DLSS SDK 310.5.3 at commit
+`982b0d19f9e35fef8e1b3109efa6b95470563866`. The SDK checkout is a build input
+outside the repository. This option statically links the NGX D3D12 interface
+and distributes the unmodified production `nvngx_dlssg.dll` feature runtime
+beside the layer. It does not distribute the SDK source, tools or development
+runtime. The SDK's license is preserved in `licenses/NVIDIA-DLSS.txt` and
+included with native-enabled builds. See `docs/BUILDING.md` for setup and the
+guide-input requirements.
+
+Native-enabled layers independently capture the application's public NGX
+upscaler inputs. The interceptor statically links SafetyHook v0.6.9 at
+`c3f3f306a0f12d1811c0b713ad2ed2a8ddc6cf55` (Boost Software License 1.0),
+Zydis 4.1.0 and Zycore (MIT). Notices are preserved in
+`licenses/SafetyHook-Boost-1.0.txt`, `licenses/Zydis-MIT.txt` and
+`licenses/Zycore-MIT.txt`.
+
+`include/xrfg/third_party/uevr_api.h` is UEVR's public SDK 2.41 header from
+`11ad244a9911ee213b79c254a7e1254fb0e84a5f`. That header is separately licensed
+under MIT; its notice is preserved in the header and `licenses/UEVR-API-MIT.txt`.
+The bridge uses the exported SDK to read renderer projection metadata. No UEVR
+implementation source or OptiScaler source is incorporated into this capture.
+
 ## Candidate: Khronos OpenXR-SDK-Source API layer scaffold
 
 Not copied. `XRFG-V001` through `XRFG-V003` follow the public loader/API-layer

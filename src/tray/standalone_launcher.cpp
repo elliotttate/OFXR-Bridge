@@ -184,7 +184,10 @@ LauncherSettings parse_settings(std::string_view text) {
                     std::string_view(line).substr(0, equals)));
                 const std::string value = trim_ascii(
                     std::string_view(line).substr(equals + 1));
-                if (key == "backend") {
+                if (key == "frame_generation") {
+                    settings.frame_generation = lower_ascii(value) == "dlss"
+                        ? FrameGeneration::native_dlss : FrameGeneration::ofxr;
+                } else if (key == "backend") {
                     settings.backend = lower_ascii(value) == "nvidia"
                         ? FlowBackend::nvidia
                         : FlowBackend::fidelity_fx;
@@ -252,6 +255,7 @@ LauncherSettings parse_settings(std::string_view text) {
 
 std::string serialize_settings(const LauncherSettings& settings) {
     return "[tray]\r\nbackend=" + backend_ini_value(settings.backend) +
+           "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\nnvidia_preset=" +
            nvidia_preset_ini_value(settings.nvidia_preset) +
            "\r\nnvidia_input_scale=" +
@@ -487,6 +491,7 @@ std::string build_runtime_ini(
     unsigned max_file_mb,
     bool flush_each_event) {
     return "[ofxr]\r\nbackend=" + backend_ini_value(settings.backend) +
+           "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\nmotion_vectors=dlss" +
            "\r\nnvidia_preset=" +
            nvidia_preset_ini_value(settings.nvidia_preset) +

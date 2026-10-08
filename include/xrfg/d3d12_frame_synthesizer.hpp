@@ -103,6 +103,8 @@ enum class D3D12OpticalFlowInputScale {
 // The name the NVIDIA options and the tray settings already use.
 using D3D12NvidiaInputScale = D3D12OpticalFlowInputScale;
 
+enum class D3D12FrameGeneration { ofxr, native_dlss };
+
 struct D3D12NvidiaOpticalFlowOptions {
     D3D12NvidiaPerformancePreset preset{
         D3D12NvidiaPerformancePreset::medium};
@@ -112,6 +114,7 @@ struct D3D12NvidiaOpticalFlowOptions {
     D3D12OpticalFlowInputScale input_scale{
         D3D12OpticalFlowInputScale::half};
     bool bidirectional{};
+    D3D12FrameGeneration frame_generation{D3D12FrameGeneration::ofxr};
 };
 
 // A second synthetic produced from the same pair, for a session that hands

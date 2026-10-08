@@ -16,6 +16,7 @@ enum class FlowBackend {
     fidelity_fx,
     nvidia,
 };
+enum class FrameGeneration { ofxr, native_dlss };
 
 enum class NvidiaPerformancePreset {
     slow,
@@ -30,6 +31,7 @@ enum class NvidiaInputScale {
 };
 
 struct LauncherSettings {
+    FrameGeneration frame_generation{FrameGeneration::ofxr};
     // NVIDIA optical flow, medium, is the default: the layer falls back to
     // FidelityFX on its own where NVIDIA cannot initialise, so the default
     // can be the better backend without a GPU check here.

@@ -67,6 +67,10 @@ enum class ConfiguredFlowBackend {
     nvidia,
 };
 
+enum class ConfiguredFrameGeneration { ofxr, native_dlss };
+[[nodiscard]] ConfiguredFrameGeneration read_frame_generation(
+    const std::filesystem::path& module_directory) noexcept;
+
 enum class ConfiguredNvidiaPerformancePreset {
     slow,
     medium,

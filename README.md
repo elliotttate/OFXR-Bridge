@@ -16,6 +16,19 @@ only (see below).
 Technically, OFXR Bridge is an experimental OpenXR API layer. It uses
 optical flow to generate frames between the ones the game renders.
 
+The working **V439 experimental build** also offers **NVIDIA DLSS Frame
+Generation** in the tray. It runs the native NVIDIA NGX feature with separate
+eye histories, engine motion and depth, alongside the existing OFXR option.
+It can capture guides directly from a D3D12 DLSS or Ray Reconstruction upscaler,
+or accept a cooperating producer through the V2 guide API. UEVR's public
+projection API supplies the depth convention when OpenXR depth metadata is
+absent. It needs an NGX-supported GPU/driver. Missing or reset guides show the
+current frame. GPU regressions cover array and side-by-side stereo on an RTX
+5090; live Galactic Racer tests on the Steam Frame verify guide capture and
+native generation. Headset image quality and comparative performance remain
+under evaluation. See
+[building the native option](docs/BUILDING.md#native-nvidia-dlss-frame-generation).
+
 Current release: **v0.2.13.1 (internal build V438)**.
 See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 is a
 performance and stability release: it fixes the higher latency and the

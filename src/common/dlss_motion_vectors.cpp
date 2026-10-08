@@ -135,7 +135,8 @@ HRESULT snapshot_resource(
     ID3D12GraphicsCommandList* producer_command_list,
     ID3D12CommandQueue* producer_queue,
     ID3D12Device* verified_producer_device,
-    ComPtr<ID3D12Resource>* snapshot) noexcept {
+    ComPtr<ID3D12Resource>* snapshot,
+    bool depth = false) noexcept {
     if (source == nullptr || producer_command_list == nullptr ||
         producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
     snapshot->Reset();
@@ -173,11 +174,25 @@ HRESULT snapshot_resource(
         properties.Type = D3D12_HEAP_TYPE_DEFAULT;
         properties.CreationNodeMask = 1;
         properties.VisibleNodeMask = 1;
+        auto allocation_description = description;
+        if (depth) {
+            // A typed DSV resource cannot be read through a float SRV. Keep a
+            // bit-exact copy in its typeless family and permit shader reads.
+            switch (description.Format) {
+            case DXGI_FORMAT_D32_FLOAT: allocation_description.Format=DXGI_FORMAT_R32_TYPELESS; break;
+            case DXGI_FORMAT_D24_UNORM_S8_UINT: allocation_description.Format=DXGI_FORMAT_R24G8_TYPELESS; break;
+            case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: allocation_description.Format=DXGI_FORMAT_R32G8X24_TYPELESS; break;
+            case DXGI_FORMAT_D16_UNORM: allocation_description.Format=DXGI_FORMAT_R16_TYPELESS; break;
+            default: break;
+            }
+            allocation_description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+                allocation_description.Flags & ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+        }
         ComPtr<ID3D12Resource> resource;
         result = allocation_device->CreateCommittedResource(
             &properties,
             D3D12_HEAP_FLAG_NONE,
-            &description,
+            &allocation_description,
             D3D12_RESOURCE_STATE_COMMON,
             nullptr,
             IID_PPV_ARGS(resource.GetAddressOf()));
@@ -268,7 +283,7 @@ void publish_dlss_motion_vectors(
                     publication.depth_resource_state,
                     publication.producer_command_list,
                     publication.producer_queue,
-                    publication.verified_producer_device, &depth_snapshot))) {
+                    publication.verified_producer_device, &depth_snapshot, true))) {
                 ++state.statistics.snapshot_failures;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
                 return;
@@ -408,7 +423,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
             return {};
         }
-        const std::uint32_t eye_count = std::min<std::uint32_t>(
+        std::uint32_t eye_count = std::min<std::uint32_t>(
             std::max<std::uint32_t>(description.DepthOrArraySize, 1U),
             kDlssMotionVectorEyeCount);
 
@@ -423,6 +438,36 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 candidates.push_back(
                     {stream.first_publication, stream.latest, stream.previous});
             }
+        }
+
+        // UEVR submits double-wide colour after independent mono DLSS calls.
+        // Preserve both eye streams and remap their output coordinate systems
+        // onto the packed XR image. Motion/depth stay in each NGX input's own
+        // coordinates; the native pack shader applies this output mapping.
+        bool packed_stereo = false;
+        if (eye_count == 1 && description.Width % 2 == 0) {
+            std::vector<Candidate> packed;
+            for (const auto& candidate : candidates) {
+                const auto& f = candidate.frame;
+                if (f->output_x == 0 && f->output_y == 0 &&
+                    std::uint64_t(f->output_width) * 2 == description.Width &&
+                    f->output_height == description.Height) packed.push_back(candidate);
+            }
+            if (packed.size() >= 2) {
+                candidates = std::move(packed);
+                eye_count = 2;
+                packed_stereo = true;
+            }
+        }
+
+        if (!packed_stereo && eye_count == 1) {
+            // Composition/UI swapchains share the scene queue but are not the
+            // upscaler output. Never attach unrelated scene guides to them.
+            std::erase_if(candidates, [&](const Candidate& c) {
+                return c.frame->output_x != 0 || c.frame->output_y != 0 ||
+                    c.frame->output_width != description.Width ||
+                    c.frame->output_height != description.Height;
+            });
         }
 
         // Alternating-eye renderers such as Ghost of Tsushima's AER path reuse
@@ -491,7 +536,13 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         auto result = std::make_shared<DlssMotionVectorSet>();
         result->eye_count = eye_count;
         for (std::uint32_t eye = 0; eye < eye_count; ++eye) {
-            result->eyes[eye] = candidates[eye].frame;
+            if (packed_stereo) {
+                auto frame = std::make_shared<DlssMotionVectorFrame>(*candidates[eye].frame);
+                frame->output_x = eye * frame->output_width;
+                result->eyes[eye] = std::move(frame);
+            } else {
+                result->eyes[eye] = candidates[eye].frame;
+            }
         }
         ++state.statistics.matched;
         return result;

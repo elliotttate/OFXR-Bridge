@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(XRFrameGenerationBridge VERSION 0.438.0 LANGUAGES CXX)
+project(XRFrameGenerationBridge VERSION 0.439.0 LANGUAGES CXX)
 
 if(MSVC)
     # API layers are injected into hosts that can preload an older game-local
@@ -12,6 +12,9 @@ endif()
 option(XRFG_BUILD_LAYER "Build the Windows OpenXR API layer" ON)
 option(XRFG_BUILD_TESTS "Build the core test executable" ON)
 option(XRFG_BUILD_STANDALONE "Build the Windows standalone tray launcher" ON)
+option(XRFG_NATIVE_DLSSG "Build the experimental native NVIDIA DLSS Frame Generation option" OFF)
+set(XRFG_DLSS_SDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/external/DLSS" CACHE PATH
+    "NVIDIA DLSS SDK with include and lib/Windows_x86_64")
 
 set(XRFG_OPENXR_SDK_ROOT
     "${CMAKE_CURRENT_SOURCE_DIR}/external/OpenXR-SDK"
@@ -197,6 +200,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/vulkan/vulkan_d3d12_interop.cpp
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_frame_synthesizer.cpp
+        src/d3d12/d3d12_native_dlssg.cpp
         src/common/dlss_motion_vectors.cpp
         "${XRFG_PACK_INPUT_HEADER}"
         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
@@ -215,6 +219,46 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_FIDELITYFX_INCLUDE_DIR}"
             "${XRFG_NVIDIA_OPTICAL_FLOW_INCLUDE_DIR}")
     target_compile_features(xrfg_d3d12_history PUBLIC cxx_std_20)
+    if(XRFG_NATIVE_DLSSG)
+        include(FetchContent)
+        set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "" FORCE)
+        FetchContent_Declare(ofxr_safetyhook
+            GIT_REPOSITORY https://github.com/cursey/safetyhook.git
+            GIT_TAG c3f3f306a0f12d1811c0b713ad2ed2a8ddc6cf55)
+        FetchContent_MakeAvailable(ofxr_safetyhook)
+        set(XRFG_DLSSG_RUNTIME "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/rel/nvngx_dlssg.dll")
+        if(NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/include/nvsdk_ngx_helpers_dlssg.h" OR
+           NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib" OR
+           NOT EXISTS "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib" OR
+           NOT EXISTS "${XRFG_DLSSG_RUNTIME}")
+            message(FATAL_ERROR "XRFG_NATIVE_DLSSG requires a complete NVIDIA DLSS SDK at XRFG_DLSS_SDK_ROOT")
+        endif()
+        foreach(stage pack vertex pixel)
+            set(header "${XRFG_GENERATED_SHADER_DIR}/native_dlssg_${stage}_shader.hpp")
+            if(stage STREQUAL "pack")
+                set(profile cs_5_1)
+                set(entry PackNativeDlssG)
+            elseif(stage STREQUAL "vertex")
+                set(profile vs_5_1)
+                set(entry NativeDlssGVS)
+            else()
+                set(profile ps_5_1)
+                set(entry NativeDlssGPS)
+            endif()
+            add_custom_command(OUTPUT "${header}"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+                COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ${profile} /E ${entry}
+                    /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect /Fh "${header}"
+                    /Vn g_xrfg_native_dlssg_${stage}_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/native_dlssg.hlsl"
+                DEPENDS src/d3d12/native_dlssg.hlsl VERBATIM)
+            target_sources(xrfg_d3d12_history PRIVATE "${header}")
+        endforeach()
+        target_include_directories(xrfg_d3d12_history PRIVATE "${XRFG_DLSS_SDK_ROOT}/include")
+        target_link_libraries(xrfg_d3d12_history PUBLIC
+            optimized "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib"
+            debug "${XRFG_DLSS_SDK_ROOT}/lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib")
+        target_compile_definitions(xrfg_d3d12_history PUBLIC XRFG_NATIVE_DLSSG)
+    endif()
     target_link_libraries(xrfg_d3d12_history PUBLIC
         xrfg_core
         d3d11
@@ -296,6 +340,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/common/embedded_control.cpp
         src/layer/openxr_layer.cpp
         src/layer/provider_api.cpp)
+    target_sources(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE src/layer/ngx_guide_capture.cpp)
+    if(XRFG_NATIVE_DLSSG)
+        target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE "${XRFG_DLSS_SDK_ROOT}/include")
+        target_link_libraries(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE safetyhook)
+    endif()
     target_include_directories(XR_APILAYER_XRFrameBridge_diagnostic PRIVATE
         include
         "${XRFG_OPENXR_SDK_ROOT}/include")
@@ -324,6 +373,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/layer/ofxr_bridge.ini"
             "$<TARGET_FILE_DIR:XR_APILAYER_XRFrameBridge_diagnostic>/ofxr_bridge.ini")
+    if(XRFG_NATIVE_DLSSG)
+        add_custom_command(TARGET XR_APILAYER_XRFrameBridge_diagnostic POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${XRFG_DLSSG_RUNTIME}"
+                "$<TARGET_FILE_DIR:XR_APILAYER_XRFrameBridge_diagnostic>/nvngx_dlssg.dll")
+    endif()
 
     # The Vulkan implicit layer that serialises queue submissions; see the
     # comment at the top of its source. Links nothing but the CRT.
@@ -370,6 +424,22 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             shell32
             user32)
         target_compile_features(OFXRBridgeTray PRIVATE cxx_std_20)
+        if(XRFG_NATIVE_DLSSG)
+            target_compile_definitions(OFXRBridgeTray PRIVATE XRFG_NATIVE_DLSSG)
+            add_custom_command(TARGET OFXRBridgeTray POST_BUILD
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr"
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${XRFG_DLSSG_RUNTIME}"
+                    "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/nvngx_dlssg.dll"
+                COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:OFXRBridgeTray>/licenses"
+                COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/licenses/NVIDIA-DLSS.txt"
+                    "$<TARGET_FILE_DIR:OFXRBridgeTray>/licenses/NVIDIA-DLSS.txt")
+            foreach(notice SafetyHook-Boost-1.0 Zydis-MIT Zycore-MIT UEVR-API-MIT)
+                add_custom_command(TARGET OFXRBridgeTray POST_BUILD
+                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                        "${CMAKE_CURRENT_SOURCE_DIR}/licenses/${notice}.txt"
+                        "$<TARGET_FILE_DIR:OFXRBridgeTray>/licenses/${notice}.txt")
+            endforeach()
+        endif()
         target_compile_definitions(OFXRBridgeTray PRIVATE
             XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR}
             NOMINMAX
@@ -948,6 +1018,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 WIN32_LEAN_AND_MEAN)
         endif()
         add_test(NAME xrfg_d3d12_history_tests COMMAND xrfg_d3d12_history_tests)
+        if(XRFG_NATIVE_DLSSG)
+            add_test(NAME xrfg_native_dlssg_tests COMMAND xrfg_d3d12_history_tests)
+            set_tests_properties(xrfg_native_dlssg_tests PROPERTIES
+                ENVIRONMENT "XRFG_TEST_NATIVE_DLSSG=1" LABELS "needs_gpu_timing" TIMEOUT 180)
+        endif()
 
         add_executable(xrfg_vertical_fov_tests tests/vertical_fov_tests.cpp)
         target_include_directories(xrfg_vertical_fov_tests PRIVATE include)

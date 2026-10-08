@@ -54,6 +54,136 @@ ofxr/
 
 Do not distribute PDBs, static libraries, test executables or the NVIDIA SDK.
 
+## Native NVIDIA DLSS Frame Generation
+
+V439 adds an optional native NGX DLSS FG path. The default build keeps this
+option off. Obtain the NVIDIA DLSS SDK and configure its root explicitly.
+Native builds also fetch pinned SafetyHook v0.6.9 and its Zydis dependency:
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DXRFG_NATIVE_DLSSG=ON -DXRFG_DLSS_SDK_ROOT=E:/Github/DLSS
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure -LE needs_gpu_timing
+ctest --test-dir build -C Release -R '^xrfg_native_dlssg_tests$' --output-on-failure
+```
+
+The native GPU test needs an adapter and driver for which NGX reports frame
+generation available. The implementation was tested with SDK 310.5.3 at commit
+`982b0d19f9e35fef8e1b3109efa6b95470563866` of NVIDIA/DLSS and
+driver 616.56 on an RTX 5090. SDK directories must contain
+`include/nvsdk_ngx_helpers_dlssg.h`, `lib/Windows_x86_64/x64/nvsdk_ngx_d.lib`,
+`lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib`,
+and `lib/Windows_x86_64/rel/nvngx_dlssg.dll`.
+
+The build copies the production feature DLL next to the layer and into
+`build/Release/ofxr`. Keep `nvngx_dlssg.dll` with the other files in `ofxr`
+when copying the tray build, together with `licenses/NVIDIA-DLSS.txt`.
+The tray installs that DLL beside its cached layer. In the tray, select
+**NVIDIA DLSS Frame Generation (experimental)** before starting a new OpenXR
+session. **OFXR frame generation** restores the existing algorithm. The
+corresponding configuration is `[tray] frame_generation=dlss` in the saved
+tray settings, or `[ofxr] frame_generation=dlss` for a directly loaded layer.
+The V2 provider control uses `frame_generation=1`; zero selects OFXR.
+
+Native generation requires complete, continuous guide publications for both
+source frames: motion, depth, their exact output/resource rectangles, jitter,
+scales, and valid near/far and reversed/infinite depth conventions. The V2
+guide publication API supplies these inputs. Native builds can also capture
+these resources directly from a D3D12 DLSS/Ray Reconstruction upscaler.
+Capture uses the NGX feature's rectangles, motion scale, jitter and depth flags;
+camera depth metadata comes from OpenXR depth submissions or UEVR's public
+SDK projection matrix. Both reversed, infinite UEVR eye projections must be
+valid and agree before publication. Separate upscaler eyes can map onto a
+single side-by-side OpenXR texture. Other depth conventions still require
+explicit metadata or the V2 publication API. A motion-only V1 producer can
+continue using OFXR; the native path shows the current frame until depth is
+available. Its motion statistics report `waiting_for_depth` (status 7).
+An unavailable native feature fails initialization and reports the session
+error; it does not silently switch algorithms. If NGX later refuses to create
+or evaluate a feature, that pair shows the current frame, the statistics
+report `native_unavailable` (status 8), and creation is retried after 120
+pairs instead of disabling generation. Separate OpenXR composition layers
+continue through the existing layer path.
+
+A DLSS feature the game created before the capture hook was installed is
+recovered from its evaluation parameters, which normally still hold its
+creation flags. Without them, capture assumes render-resolution motion and
+takes the depth convention from the camera metadata.
+
+OFXR never shuts NGX down. The driver keeps one NGX instance per adapter for
+the whole process, and `NVSDK_NGX_D3D12_Shutdown1` shuts down every loaded
+feature module for that device, including the game's own DLSS upscaler.
+
+Each logical eye has an independent native feature at its submitted viewport
+size. A is rotationally mapped into B's camera plane; the same mapping removes
+tracked rotation/FOV motion from engine vectors, and transforms A depth into
+that plane. When that alignment moves any pixel by more than a tenth of a
+pixel, the feature is reseeded with the aligned A before evaluating B; a still
+head or a translation alone keeps the history. This preserves OFXR's current
+B pose/FOV contract and its bit-exact real-frame copy. On an RTX 5090 at
+2064x2208 per eye, a stereo pair takes about 1.7 ms of GPU time at 2X and
+2.4 ms at 3X, and reseeding adds about 0.3 ms. Set
+`XRFG_TEST_NATIVE_DLSSG_BENCH=1` and run `xrfg_d3d12_history_tests` to repeat
+that measurement.
+
+NGX receives motion in pixels and colour display-encoded, as its programming
+guide requires. sRGB swapchains are encoded by the pack shader into 10-bit
+private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
+and decoded again when the generated image is written; unchanged pixels
+round-trip exactly. Resize retirement polls the previous completion
+fence, and frame submission does not wait on the CPU. Generated pixels remain
+inside the submitted rectangles. NGX's disable-interpolation output is checked
+on the GPU before presenting a generated image.
+
+For a live diagnostic run, set `XRFG_TEST_NATIVE_DLSSG_DECISIONS=1` before
+launching the game. This adds asynchronous readback of those GPU decisions to
+`ofxr-native-decisions-pid*-instance*.log` beside the layer DLL. Each completed
+record identifies the guide publication, eye count, output count and flags.
+A zero low byte selects generated pixels; a nonzero low byte selects the
+current frame. Inspect the file contents while the game runs: Windows can
+report a stale directory-entry file size until the writer closes it. This
+diagnostic is off by default and is not a frame-rate benchmark.
+
+NGX uses fixed interpolation fractions: one generated image at 1/2, or two at
+1/3 and 2/3 for OFXR's 3X setting, subject to the native feature's capabilities.
+The layer uses those fractions in native mode. OFXR's cadence-derived arbitrary
+fractions remain available with its original algorithm. Native mode is most
+appropriate when the application holds half or a third of the display rate:
+away from that cadence each generated image is shown at the wrong instant and
+motion judders, which the OFXR algorithm corrects for. 3X needs NGX
+multi-frame generation; on adapters without it, native mode stays at 2X, and
+a 3X request that reaches the feature anyway reports
+`multi_frame_unsupported` (status 9).
+The optical-flow preset, scale and bidirectional controls configure the
+original OFXR algorithm; they do not tune NVIDIA's neural feature.
+
+Native mode skips the original optical-flow contexts, scratch textures and
+extra command lists. Fully covered outputs also skip the preliminary current
+frame copy; cropped outputs retain it to preserve pixels outside the viewports.
+The real-frame copy is recorded separately and can be deferred until after the
+generated image is submitted. Packing the aligned previous-frame seed omits
+motion-vector depth dilation. These changes preserve the input resolution and
+camera alignment. Completed native pairs resolve GPU timestamps for the total
+synthesis span; the per-stage optical-flow timings do not describe NGX internals.
+
+The game's FPS counter measures source frames. OFXR's generated frames are
+submitted through OpenXR and do not increment that counter. At 120 Hz, 2X mode
+paces source frames toward 60 FPS, subject to rendering and generation cost.
+Compare on/off in the same scene and resolution, with diagnostic recording off
+and an active headset. SteamVR standby and its dashboard can throttle the source
+to roughly 100 ms waits; discard those samples. Compositor presents also include
+reprojection, so they alone do not establish the rate of unique generated images.
+
+The hardware test checks translated stereo quality against a same-pixel blend,
+3X output order, cropped view bounds, rotational camera isolation, command-list
+reuse, real-frame copies, explicit resets, and missing-depth fallback. The
+shared tests also verify typed depth snapshots preserve values while allowing
+shader reads. These small synthetic tests do not establish headset-resolution
+cost, headset comfort, or behavior in a particular game. Full camera translation
+reprojection and separate baked-in HUD/UI guides remain future work; the bridge
+still has its existing limitation for camera translation.
+
 ## Continuous integration
 
 `.github/workflows/build.yml` runs the same steps on a clean `windows-2022`

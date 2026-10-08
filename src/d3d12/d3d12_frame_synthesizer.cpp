@@ -1,5 +1,6 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/d3d12_native_dlssg.hpp"
 
 #include <windows.h>
 #include <wrl/client.h>
@@ -490,6 +491,22 @@ static_assert(kSynthesisConstantCount + 2U <= 64U);
         : rect;
 }
 
+[[nodiscard]] bool views_cover_resource(
+    std::span<const D3D12ReprojectionView> views,
+    UINT width, UINT height, UINT array_size) noexcept {
+    if (!valid_view_layout(views, width, height, array_size)) return false;
+    std::array<std::uint64_t, kMaxReprojectionViews> area{};
+    for (std::size_t i = 0; i < views.size(); ++i) {
+        const auto r = resolved_rect(views[i].image_rect, width, height);
+        area[resolved_array_slice(views[i], i, views.size(), array_size)] +=
+            std::uint64_t(r.width) * r.height;
+    }
+    // The layout validation establishes bounded, non-overlapping rectangles.
+    // Equal area therefore establishes coverage of every physical slice.
+    return std::all_of(area.begin(), area.begin() + array_size,
+        [&](std::uint64_t value) { return value == std::uint64_t(width) * height; });
+}
+
 void set_viewport_and_scissor(
     ID3D12GraphicsCommandList* command_list,
     const D3D12ImageRect& image_rect,
@@ -836,6 +853,8 @@ struct D3D12FrameSynthesizer::Impl {
     std::uint32_t next_timing_slot{};
     D3D12OpticalFlowBackend backend{D3D12OpticalFlowBackend::fidelity_fx};
     D3D12NvidiaOpticalFlowOptions nvidia_options{};
+    std::unique_ptr<D3D12NativeDlssG> native_dlss;
+    bool native_pair_generated{};
     bool synthesis_enabled{};
     bool completion_unknown{};
     bool ffx_context_created{};
@@ -1700,7 +1719,8 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) {
                 return result;
             }
-            if (backend == D3D12OpticalFlowBackend::nvidia) {
+            if (backend == D3D12OpticalFlowBackend::nvidia &&
+                nvidia_options.frame_generation != D3D12FrameGeneration::native_dlss) {
                 result = device->CreateCommandAllocator(
                     D3D12_COMMAND_LIST_TYPE_DIRECT,
                     IID_PPV_ARGS(slot.synthesis_allocator.GetAddressOf()));
@@ -1977,7 +1997,9 @@ struct D3D12FrameSynthesizer::Impl {
             input_queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT ||
             !same_device(input_device, input_queue) ||
             (input_backend != D3D12OpticalFlowBackend::fidelity_fx &&
-             input_backend != D3D12OpticalFlowBackend::nvidia)) {
+             input_backend != D3D12OpticalFlowBackend::nvidia) ||
+            (input_nvidia_options.frame_generation != D3D12FrameGeneration::ofxr &&
+             input_nvidia_options.frame_generation != D3D12FrameGeneration::native_dlss)) {
             return E_INVALIDARG;
         }
 
@@ -2158,9 +2180,14 @@ struct D3D12FrameSynthesizer::Impl {
             return HRESULT_FROM_WIN32(
                 error == ERROR_SUCCESS ? ERROR_NOT_ENOUGH_MEMORY : error);
         }
-        result = backend == D3D12OpticalFlowBackend::nvidia
-                     ? create_nvidia_resources(node_mask)
-                     : create_fidelityfx_resources(node_mask);
+        // Native NGX owns its own optical flow. Retain the shared composition
+        // pipelines for repeated frames, but allocate no OFA/FFX contexts or
+        // their otherwise-unused packed inputs, flow surfaces and scratch.
+        result = nvidia_options.frame_generation == D3D12FrameGeneration::native_dlss
+                     ? S_OK
+                     : backend == D3D12OpticalFlowBackend::nvidia
+                           ? create_nvidia_resources(node_mask)
+                           : create_fidelityfx_resources(node_mask);
         if (FAILED(result)) {
             return result;
         }
@@ -2178,6 +2205,11 @@ struct D3D12FrameSynthesizer::Impl {
         result = create_rtv_heap(node_mask);
         if (FAILED(result)) {
             return result;
+        }
+        if (nvidia_options.frame_generation == D3D12FrameGeneration::native_dlss) {
+            native_dlss = std::make_unique<D3D12NativeDlssG>();
+            result = native_dlss->initialize(device.Get(), queue.Get(), image_description, view_format);
+            if (FAILED(result)) return result;
         }
         synthesis_enabled = true;
         return S_OK;
@@ -2252,7 +2284,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.cached_timing.gpu_end_qpc = timestamp_qpc(values[kSpanEnd]);
         slot.cached_timing.total_microseconds = timestamp_microseconds(
             values[kSpanBegin], values[kSpanEnd]);
-        if (backend != D3D12OpticalFlowBackend::nvidia) {
+        if (backend != D3D12OpticalFlowBackend::nvidia || native_dlss) {
             slot.timing_pending = false;
             slot.timing_cached = true;
             return S_OK;
@@ -2906,7 +2938,7 @@ struct D3D12FrameSynthesizer::Impl {
             synthesis_enabled = false;
             return result;
         }
-        if (backend == D3D12OpticalFlowBackend::nvidia) {
+        if (slot.synthesis_allocator) {
             result = slot.synthesis_allocator->Reset();
             if (FAILED(result)) {
                 synthesis_enabled = false;
@@ -2926,7 +2958,11 @@ struct D3D12FrameSynthesizer::Impl {
         WorkSlot& slot,
         const RollingSource& source,
         ID3D12Resource* destination) noexcept {
-        if (backend == D3D12OpticalFlowBackend::nvidia) {
+        if (native_dlss) {
+            native_pair_generated = false;
+            native_dlss->reset();
+        }
+        if (backend == D3D12OpticalFlowBackend::nvidia || native_dlss) {
             dred_marker(slot.command_list.Get(), "OFXR NVIDIA prime copy");
             const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy{
                 transition_barrier(
@@ -2956,7 +2992,7 @@ struct D3D12FrameSynthesizer::Impl {
                 static_cast<UINT>(after_copy.size()),
                 after_copy.data());
             dred_marker(slot.command_list.Get(), "OFXR NVIDIA prime complete");
-            return slot.synthesis_command_list->Close();
+            return slot.synthesis_command_list ? slot.synthesis_command_list->Close() : S_OK;
         }
 
         dred_marker(slot.command_list.Get(), "OFXR FidelityFX prime begin");
@@ -3514,6 +3550,94 @@ struct D3D12FrameSynthesizer::Impl {
         bool* used_game_motion) noexcept {
         if (used_game_motion == nullptr) return E_POINTER;
         *used_game_motion = false;
+        if (native_dlss) {
+            native_pair_generated = false;
+            if (nvidia_gpu_timing_enabled) {
+                slot.timing_metadata = {};
+                slot.timing_metadata.previous_serial = previous_source.ticket.serial;
+                slot.timing_metadata.current_serial = current_source.ticket.serial;
+                slot.timing_metadata.eye_count = current_source.view_count;
+            }
+            const auto current_views = std::span(current_source.views.data(), current_source.view_count);
+            const bool full_coverage = views_cover_resource(current_views,
+                static_cast<UINT>(image_description.Width), image_description.Height,
+                image_description.DepthOrArraySize);
+            // Cropped outputs need B outside the submitted rectangles. Fully
+            // covered outputs are written by composition and need no pre-copy.
+            auto* b = current_source.resource.Get();
+            const auto copy = [&](ID3D12GraphicsCommandList* list, ID3D12Resource* destination) {
+                const std::array<D3D12_RESOURCE_BARRIER, 2> before{
+                    transition_barrier(b, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE),
+                    transition_barrier(destination, release_state, D3D12_RESOURCE_STATE_COPY_DEST)};
+                list->ResourceBarrier(2, before.data());
+                list->CopyResource(destination, b);
+                const std::array<D3D12_RESOURCE_BARRIER, 2> after{
+                    transition_barrier(b, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON),
+                    transition_barrier(destination, D3D12_RESOURCE_STATE_COPY_DEST, release_state)};
+                list->ResourceBarrier(2, after.data());
+            };
+            std::array<D3D12NativeDlssG::Output, 2> outputs{};
+            for (UINT output=0; output<synthetic_output_count(); ++output) {
+                outputs[output].image = synthetic_destinations[
+                    synthetic_output_destination(output, synthetic_destination_index)].resource.Get();
+                if (!full_coverage) copy(slot.command_list.Get(), outputs[output].image);
+            }
+            const UINT work_slot = static_cast<UINT>(&slot - work_slots.data());
+            const HRESULT generated = native_dlss->record(slot.command_list.Get(), work_slot,
+                previous_source.resource.Get(), b,
+                {previous_source.views.data(), previous_source.view_count},
+                {current_source.views.data(), current_source.view_count},
+                previous_source.motion_vectors.get(), current_source.motion_vectors.get(),
+                {outputs.data(), synthetic_output_count()}, release_state);
+            if (FAILED(generated)) return generated;
+            native_pair_generated = generated == S_OK;
+            if (!native_pair_generated) {
+                // A skipped pair never writes the outputs; show the current frame.
+                if (full_coverage) for (UINT output = 0; output < synthetic_output_count(); ++output)
+                    copy(slot.command_list.Get(), outputs[output].image);
+                switch (native_dlss->last_skip()) {
+                case D3D12NativeDlssG::Skip::resizing:
+                    break;
+                case D3D12NativeDlssG::Skip::multi_frame_unsupported:
+                    report_dlss_motion_vector_status(DlssMotionVectorStatus::multi_frame_unsupported);
+                    break;
+                case D3D12NativeDlssG::Skip::feature_unavailable:
+                case D3D12NativeDlssG::Skip::evaluate_failed:
+                    report_dlss_motion_vector_status(DlssMotionVectorStatus::native_unavailable);
+                    break;
+                default: {
+                    bool missing_depth = false;
+                    for (const auto* guides : {previous_source.motion_vectors.get(), current_source.motion_vectors.get()}) {
+                        if (!guides) continue;
+                        for (UINT eye=0; eye<std::min(guides->eye_count,kDlssMotionVectorEyeCount); ++eye)
+                            missing_depth |= guides->eyes[eye] && !guides->eyes[eye]->depth;
+                    }
+                    report_dlss_motion_vector_status(missing_depth ? DlssMotionVectorStatus::waiting_for_depth :
+                        current_source.motion_vectors ? DlssMotionVectorStatus::invalid_input :
+                            DlssMotionVectorStatus::waiting_for_dlss);
+                    break;
+                }
+                }
+            }
+            if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+                slot.command_list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                    slot.timing_query_base + kSpanEnd);
+                // Native mode writes only the two span timestamps.
+                slot.command_list->ResolveQueryData(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                    slot.timing_query_base + kSpanBegin, 2, nvidia_timestamp_readback.Get(),
+                    UINT64(slot.timing_query_base + kSpanBegin) * sizeof(std::uint64_t));
+            }
+            // This list is submitted after the synthetic when requested by the
+            // presenter. Keeping the real copy out of the synthesis span also
+            // makes its timing and completion fence reflect the actual order.
+            copy(slot.current_copy_command_list.Get(), current_destinations[current_destination_index].resource.Get());
+            if (slot.synthesis_command_list) {
+                const HRESULT closed=slot.synthesis_command_list->Close();
+                if (FAILED(closed)) return closed;
+            }
+            *used_game_motion = true; // execute the direct list, bypass OFA
+            return S_OK;
+        }
         if (valid_game_motion_pair(previous_source, current_source)) {
             const HRESULT result = record_game_motion_pair(slot, previous_source,
                 current_source, target_views, synthetic_destination_index,
@@ -3813,6 +3937,7 @@ struct D3D12FrameSynthesizer::Impl {
         std::uint32_t synthetic_destination_index,
         std::uint32_t current_destination_index,
         const std::optional<OverlayPlacement>& debug_marker) noexcept {
+        if (native_dlss) native_pair_generated = false;
         ID3D12Resource* const source = retained_source.resource.Get();
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
@@ -4019,7 +4144,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.fence_value = value;
         // Both backends now write timestamps, so both must mark the slot as
         // having a resolve waiting to be read back.
-        slot.timing_pending = nvidia_gpu_timing_enabled;
+        slot.timing_pending = nvidia_gpu_timing_enabled && (!native_dlss || native_pair_generated);
         last_submitted_fence_value = value;
         *output_fence_value = value;
         return S_OK;
@@ -4618,7 +4743,10 @@ struct D3D12FrameSynthesizer::Impl {
             }
             return result;
         }
-        if (used_game_motion) report_dlss_motion_vector_use();
+        // A skipped pair can still hold NGX history work, so every native
+        // pair's fence guards the eye resources a later resize releases.
+        if (native_dlss) native_dlss->submitted(fence.Get(), fence_value);
+        if (used_game_motion && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
 
         next.last_use_fence_value = fence_value;
         result = history->retire_consumer(

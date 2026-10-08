@@ -25,6 +25,7 @@ struct Control {
     Control() {
         const auto options = implicit_layer::read_nvidia_options(directory());
         settings.backend = static_cast<int>(implicit_layer::read_flow_backend(directory()));
+        settings.frame_generation = static_cast<int>(implicit_layer::read_frame_generation(directory()));
         settings.preset = static_cast<int>(options.preset);
         settings.scale = static_cast<int>(options.input_scale);
         settings.backward = options.bidirectional;
@@ -55,7 +56,7 @@ Snapshot snapshot() {
 bool request(Settings s) {
     if (s.backend < 0 || s.backend > 1 || s.preset < 0 || s.preset > 2 ||
         s.scale < 0 || s.scale > 2 || s.motion_vectors < 0 || s.motion_vectors > 1 ||
-        s.frame_generation != 0) return false;
+        s.frame_generation < 0 || s.frame_generation > 1) return false;
     auto& c = control(); std::scoped_lock lock(c.mutex);
     const auto old = c.settings;
     bool ok = true;
@@ -68,6 +69,7 @@ bool request(Settings s) {
     if (old.scale != s.scale) ok &= write(L"ofxr", L"nvidia_input_scale", scales[s.scale]);
     if (old.backward != s.backward) ok &= write(L"ofxr", L"nvidia_bidirectional", s.backward ? L"1" : L"0");
     if (old.motion_vectors != s.motion_vectors) ok &= write(L"ofxr", L"motion_vectors", s.motion_vectors ? L"dlss" : L"off");
+    if (old.frame_generation != s.frame_generation) ok &= write(L"ofxr", L"frame_generation", s.frame_generation ? L"dlss" : L"ofxr");
     if (old != s) { c.settings = s; ++c.revision; }
     return ok;
 }

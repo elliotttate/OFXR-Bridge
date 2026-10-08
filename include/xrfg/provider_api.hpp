@@ -75,7 +75,7 @@ struct OFXR_ControlSettingsV2 {
     std::int32_t scale{2};
     std::int32_t backward{};
     std::int32_t motion_vectors{};
-    std::int32_t frame_generation{};
+    std::int32_t frame_generation{}; // 0 OFXR, 1 native NVIDIA DLSS FG
 };
 
 struct OFXR_ControlSnapshotV2 {

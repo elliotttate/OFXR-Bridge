@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include "xrfg/d3d12_frame_synthesizer.hpp"
+#include "xrfg/d3d12_native_dlssg.hpp"
 
 #include <windows.h>
 #include <d3d12.h>
@@ -331,9 +332,13 @@ private:
     // on a queue of its own, because that is the state D3D12 wants at a queue
     // ownership transfer. A destination created in any other state would not
     // match the first barrier those command lists record.
-    D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET) {
+    D3D12_RESOURCE_STATES initial_state = D3D12_RESOURCE_STATE_RENDER_TARGET,
+    UINT16 slices = kEyeCount,
+    DXGI_FORMAT format = kFormat) {
     const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
-    const D3D12_RESOURCE_DESC description = stereo_texture_description(width, height);
+    D3D12_RESOURCE_DESC description = stereo_texture_description(width, height);
+    description.DepthOrArraySize = slices;
+    description.Format = format;
     ComPtr<ID3D12Resource> texture;
     require_hresult(
         fixture.device()->CreateCommittedResource(
@@ -2785,6 +2790,15 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
             resolved->eyes[1]->output_slice == 0,
         "two DLSS streams were not associated with the XR stereo image");
 
+    const auto packed_xr_output = create_texture(width*2, height, 1);
+    const auto packed = xrfg::resolve_dlss_motion_vectors(packed_xr_output.Get(),fixture.queue());
+    require(packed && packed->eye_count==2 && packed->eyes[0]->stream==101 &&
+        packed->eyes[1]->stream==202 && packed->eyes[0]->output_x==0 &&
+        packed->eyes[1]->output_x==width && packed->eyes[1]->output_width==width &&
+        packed->eyes[1]->motion_x==0 && packed->eyes[1]->motion_width==width/2 &&
+        resolved->eyes[1]->output_x==0,
+        "double-wide UEVR colour did not retain independent mono eye guide mappings");
+
     // Publish in the opposite order. Eye assignment must remain tied to the
     // stable first-seen stream order, not to this frame's evaluation order.
     fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
@@ -2807,10 +2821,13 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
 
     const auto tracked = xrfg::dlss_motion_vector_statistics();
     require(tracked.published == 4 && tracked.snapshot_copies == 4 &&
-            tracked.snapshot_failures == 0 && tracked.matched == 2 &&
+            tracked.snapshot_failures == 0 && tracked.matched == 3 &&
             tracked.resolve_missing_streams == 0 &&
             tracked.resolve_stale_pairs == 0,
         "DLSS stream diagnostics did not account for the stereo pair");
+    const auto unrelated_ui = create_texture(width/2,height/2,1);
+    require(!xrfg::resolve_dlss_motion_vectors(unrelated_ui.Get(),fixture.queue()),
+        "scene depth/motion were incorrectly associated with an unrelated UI swapchain");
     xrfg::report_dlss_motion_vector_use();
     const auto used = xrfg::dlss_motion_vector_statistics();
     require(used.status == xrfg::DlssMotionVectorStatus::used && used.used == 1 &&
@@ -2870,18 +2887,98 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(101);
     xrfg::retire_dlss_motion_vector_stream(202);
     xrfg::retire_dlss_motion_vector_stream(303);
+
+    // A game can publish a typed depth/stencil resource with shader reads
+    // disabled. Its retained snapshot must be both bit-exact and SRV-readable.
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    auto typed_depth=create_depth_source_texture(fixture,D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+    auto depth_left=create_texture(kWidth,kHeight,1),depth_right=create_texture(kWidth,kHeight,1);
+    auto depth_xr=create_texture(kWidth,kHeight,2);
+    auto depth_motion=create_and_upload_game_motion(fixture,kWidth,kHeight,{0,0});
+    D3D12_DESCRIPTOR_HEAP_DESC hd{}; hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_DSV; hd.NumDescriptors=1;
+    ComPtr<ID3D12DescriptorHeap> dsv;
+    require_hresult(fixture.device()->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&dsv)),"typed depth DSV heap");
+    D3D12_DEPTH_STENCIL_VIEW_DESC dd{}; dd.Format=DXGI_FORMAT_D32_FLOAT;
+    dd.ViewDimension=D3D12_DSV_DIMENSION_TEXTURE2DARRAY; dd.Texture2DArray.ArraySize=2;
+    fixture.device()->CreateDepthStencilView(typed_depth.Get(),&dd,dsv->GetCPUDescriptorHandleForHeapStart());
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        list->ClearDepthStencilView(dsv->GetCPUDescriptorHandleForHeapStart(),D3D12_CLEAR_FLAG_DEPTH,0.5F,0,0,nullptr);
+        for(UINT eye=0;eye<2;++eye) {
+            xrfg::DlssMotionVectorPublication pub{};
+            pub.stream=901+eye; pub.output=eye?depth_right.Get():depth_left.Get();
+            pub.motion_vectors=depth_motion.Get(); pub.producer_queue=fixture.queue(); pub.producer_command_list=list;
+            pub.output_width=pub.motion_width=pub.depth_width=kWidth;
+            pub.output_height=pub.motion_height=pub.depth_height=kHeight;
+            pub.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            pub.depth=typed_depth.Get(); pub.depth_resource_state=D3D12_RESOURCE_STATE_DEPTH_WRITE;
+            xrfg::publish_dlss_motion_vectors(pub);
+        }
+    });
+    const auto depth_set=xrfg::resolve_dlss_motion_vectors(depth_xr.Get(),fixture.queue());
+    require(depth_set && depth_set->eye_count==2,"typed depth guides did not resolve");
+    hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    ComPtr<ID3D12DescriptorHeap> srv_heap;
+    require_hresult(fixture.device()->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&srv_heap)),"typed depth SRV heap");
+    D3D12_SHADER_RESOURCE_VIEW_DESC sd{}; sd.Format=DXGI_FORMAT_R32_FLOAT;
+    sd.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY; sd.Texture2DArray.ArraySize=2; sd.Texture2DArray.MipLevels=1;
+    sd.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    for(const auto& frame:depth_set->eyes) {
+        require(frame && frame->depth && frame->depth.Get()!=typed_depth.Get() &&
+            frame->depth->GetDesc().Format==DXGI_FORMAT_R32_TYPELESS &&
+            !(frame->depth->GetDesc().Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE),"typed depth snapshot cannot be sampled");
+        fixture.device()->CreateShaderResourceView(frame->depth.Get(),&sd,srv_heap->GetCPUDescriptorHandleForHeapStart());
+        const auto copied=readback_pattern(fixture,frame->depth.Get(),frame->depth_resource_state);
+        for(const auto& eye:copied) for(SIZE_T byte=0;byte<eye.size();byte+=4) {
+            float value{}; std::memcpy(&value,eye.data()+byte,4);
+            require(value==0.5F,"typed depth snapshot changed the depth values");
+        }
+    }
+    xrfg::retire_dlss_motion_vector_stream(901); xrfg::retire_dlss_motion_vector_stream(902);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+}
+
+[[nodiscard]] ComPtr<ID3D12Resource> create_native_test_depth(D3D12WarpFixture& fixture, UINT width, UINT height) {
+    ComPtr<ID3D12Resource> native_depth;
+    auto description = stereo_texture_description(width,height);
+    description.Format=DXGI_FORMAT_R32_FLOAT; description.Flags=D3D12_RESOURCE_FLAG_NONE;
+    const auto hp=heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+    require_hresult(fixture.device()->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,
+        &description,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&native_depth)),"native depth creation");
+    std::array<D3D12_PLACED_SUBRESOURCE_FOOTPRINT,kEyeCount> fp{};
+    std::array<UINT,kEyeCount> rows{}; std::array<UINT64,kEyeCount> sizes{}; UINT64 total{};
+    fixture.device()->GetCopyableFootprints(&description,0,kEyeCount,0,fp.data(),rows.data(),sizes.data(),&total);
+    auto upload=create_buffer(fixture,D3D12_HEAP_TYPE_UPLOAD,total,D3D12_RESOURCE_STATE_GENERIC_READ);
+    void* mapped{}; require_hresult(upload->Map(0,nullptr,&mapped),"map native depth");
+    for(UINT eye=0;eye<kEyeCount;++eye) for(UINT y=0;y<height;++y) {
+        auto* row=reinterpret_cast<float*>(static_cast<std::byte*>(mapped)+fp[eye].Offset+SIZE_T(y)*fp[eye].Footprint.RowPitch);
+        std::fill_n(row,width,0.5F);
+    }
+    upload->Unmap(0,nullptr);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list){
+        for(UINT eye=0;eye<kEyeCount;++eye) {
+            D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource=native_depth.Get(); dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dst.SubresourceIndex=eye;
+            D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource=upload.Get(); src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; src.PlacedFootprint=fp[eye];
+            list->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        }
+        auto barrier=transition_barrier(native_depth.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
+        list->ResourceBarrier(1,&barrier);
+    });
+    return native_depth;
 }
 
 void test_dlss_motion_vector_gpu_ingress(
     D3D12WarpFixture& fixture,
     xrfg::D3D12OpticalFlowBackend backend =
-        xrfg::D3D12OpticalFlowBackend::fidelity_fx) {
+        xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+    bool native_dlss = false, bool triple = false, bool cropped = false, bool deferred = false) {
     constexpr UINT width = 256;
     constexpr UINT height = 128;
     constexpr UINT motion_width = width / 2;
     constexpr UINT motion_height = height / 2;
     constexpr UINT margin = 16;
-    const std::array<int, kEyeCount> translation{8, -8};
+    // 3X moves 12 pixels so its thirds, like the 2X midpoint, are whole pixels.
+    const std::array<int, kEyeCount> translation =
+        triple ? std::array<int, kEyeCount>{12, -12} : std::array<int, kEyeCount>{8, -8};
 
     std::array<ComPtr<ID3D12Resource>, 2> sources{
         create_source_texture(fixture, width, height),
@@ -2908,6 +3005,7 @@ void test_dlss_motion_vector_gpu_ingress(
     const StereoPattern same_pixel_blend = midpoint_pattern(previous, current);
     upload_pattern(fixture, sources[0].Get(), previous);
     upload_pattern(fixture, sources[1].Get(), current);
+    if (deferred) upload_pattern(fixture, current_destinations[1].Get(), previous);
     ComPtr<ID3D12Resource> game_motion = create_and_upload_game_motion(
         fixture,
         motion_width,
@@ -2922,11 +3020,17 @@ void test_dlss_motion_vector_gpu_ingress(
             D3D12_RESOURCE_STATE_RENDER_TARGET)),
         "DLSS-motion history initialization failed");
     xrfg::D3D12FrameSynthesizer synthesizer;
+    xrfg::D3D12NvidiaOpticalFlowOptions options;
+    if (native_dlss) options.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
+    auto extra_image = triple ? create_source_texture(fixture,width,height) : ComPtr<ID3D12Resource>{};
+    std::vector<ID3D12Resource*> output_images{synthetic_destination_pointers[0]};
+    if(triple) output_images.push_back(extra_image.Get());
+    const auto extra_output = triple ? std::optional<xrfg::D3D12ExtraSynthetic>({1,2.0F/3.0F}) : std::nullopt;
     require(
         operation_succeeded(synthesizer.initialize(
             fixture.device(), fixture.queue(), history,
-            current_destination_pointers, synthetic_destination_pointers,
-            kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET, backend)),
+            current_destination_pointers, output_images,
+            kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET, backend, options, native_dlss)),
         "DLSS-motion synthesizer initialization failed");
 
     auto frame_a = std::make_shared<xrfg::DlssMotionVectorFrame>();
@@ -2940,13 +3044,20 @@ void test_dlss_motion_vector_gpu_ingress(
     frame_a->motion_width = motion_width;
     frame_a->motion_height = motion_height;
     frame_a->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if (native_dlss) {
+        frame_a->depth=create_native_test_depth(fixture,width,height);
+        frame_a->depth_width=width; frame_a->depth_height=height;
+        frame_a->depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
+    }
     auto frame_b = std::make_shared<xrfg::DlssMotionVectorFrame>(*frame_a);
     frame_b->previous_serial = 1;
     frame_b->serial = 2;
     auto frame_a_right = std::make_shared<xrfg::DlssMotionVectorFrame>(*frame_a);
     frame_a_right->motion_slice = 1;
+    frame_a_right->output_slice = 1;
     auto frame_b_right = std::make_shared<xrfg::DlssMotionVectorFrame>(*frame_b);
     frame_b_right->motion_slice = 1;
+    frame_b_right->output_slice = 1;
     auto set_a = std::make_shared<xrfg::DlssMotionVectorSet>();
     set_a->eye_count = kEyeCount;
     set_a->eyes = {frame_a, frame_a_right};
@@ -2954,7 +3065,8 @@ void test_dlss_motion_vector_gpu_ingress(
     set_b->eye_count = kEyeCount;
     set_b->eyes = {frame_b, frame_b_right};
 
-    const ReprojectionViews views = make_reprojection_views();
+    ReprojectionViews views = make_reprojection_views();
+    if(cropped) for(auto& view:views) view.image_rect={16,8,width-32,height-16};
     xrfg::D3D12HistoryCaptureTicket capture_a{};
     require(
         operation_succeeded(history->capture(0, &capture_a)) &&
@@ -2976,9 +3088,18 @@ void test_dlss_motion_vector_gpu_ingress(
     xrfg::D3D12FrameSynthesisTicket pair{};
     require(
         operation_succeeded(synthesizer.submit_pair(
-            capture_b, views, views, 0, 1, &pair, std::nullopt, set_b)),
+            capture_b, views, views, 0, 1, &pair, std::nullopt, set_b, deferred,
+            triple ? 1.0F/3.0F : 0.5F, extra_output)),
         "DLSS-motion pair failed");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    if (deferred) {
+        require(readback_pattern(fixture, current_destinations[1].Get(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET) == previous,
+            "native real copy executed before deferred submission");
+        require_hresult(synthesizer.flush_current_copy(fixture.queue(), pair.fence_value),
+            "native deferred real-copy flush");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    }
     const auto statistics_after = xrfg::dlss_motion_vector_statistics();
     require(
         statistics_after.used == statistics_before.used + 1 &&
@@ -2988,6 +3109,38 @@ void test_dlss_motion_vector_gpu_ingress(
     const StereoPattern actual = readback_pattern(
         fixture, synthetic_destinations[0].Get(),
         D3D12_RESOURCE_STATE_RENDER_TARGET);
+    if (native_dlss) {
+        xrfg::D3D12NvidiaGpuTiming timing{};
+        require(synthesizer.consume_nvidia_gpu_timing(&timing) == S_OK &&
+            timing.previous_serial == capture_a.serial && timing.current_serial == capture_b.serial &&
+            timing.eye_count == kEyeCount && timing.total_microseconds > 0 &&
+            timing.gpu_end_qpc > timing.gpu_begin_qpc,
+            "native GPU timing did not resolve the completed stereo pair");
+        std::cout << "native stereo gpu total_us=" << timing.total_microseconds << '\n';
+        require(actual != current && actual != previous, "native DLSS did not produce an intermediate frame");
+        require(readback_pattern(fixture,current_destinations[1].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==current,
+            "native DLSS changed the real output");
+        if(triple) {
+            const auto second=readback_pattern(fixture,extra_image.Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+            require(second!=actual && second!=current && second!=previous,"native 3X did not produce two distinct intermediate frames");
+            const auto second_expected = translated_motion_pattern(width, height, {8, -8});
+            for(UINT eye=0;eye<kEyeCount;++eye) {
+                const double second_error = mean_absolute_rgb_error(second, second_expected, width, height, eye, margin);
+                std::cout << "native 3X second eye=" << eye << " synthetic_mae=" << second_error << '\n';
+                require(second_error < 0.02, "native 3X second frame was not at two thirds for eye " + std::to_string(eye));
+            }
+            for(UINT eye=0;eye<kEyeCount;++eye) {
+                require(mean_absolute_rgb_error(actual,previous,width,height,eye,margin) < mean_absolute_rgb_error(second,previous,width,height,eye,margin),
+                    "native 3X output order incorrect");
+            }
+        }
+        if(cropped) for(UINT eye=0;eye<kEyeCount;++eye) for(UINT y=0;y<height;++y) for(UINT x=0;x<width;++x) {
+            if(x>=16 && x<width-16 && y>=8 && y<height-8) continue;
+            const SIZE_T offset=(SIZE_T(y)*width+x)*4;
+            require(std::equal(actual[eye].begin()+offset,actual[eye].begin()+offset+4,current[eye].begin()+offset),
+                "native DLSS wrote outside the projection viewport");
+        }
+    }
     // The normal backend invocation above proves shader sampling. The NVIDIA
     // fixture reuses this case specifically to exercise its extra work-list
     // lifetime while game motion bypasses OFA; rounding can make its confidence
@@ -3012,14 +3165,24 @@ void test_dlss_motion_vector_gpu_ingress(
                   << " unscaled_mae=" << unscaled_error
                   << " blend_mae=" << blend_error << '\n';
         require(
-            actual_error < 0.05 && actual_error < unscaled_error &&
+            actual_error < (native_dlss ? (cropped ? 0.15 : 0.02) : 0.05) && actual_error < unscaled_error &&
                 actual_error < previous_error && actual_error < current_error,
             "DLSS-motion low-resolution vectors were not exactly converted to output space for eye " +
                 std::to_string(eye));
+        if (native_dlss) require(actual_error < blend_error,
+            "native DLSS did not improve on same-pixel blending for eye " + std::to_string(eye));
     }
 
-    // Exercise enough advancing pairs to reuse a work slot. NVIDIA owns an
-    // additional OFA command list per slot even though this path bypasses OFA.
+    if (native_dlss) {
+        require_hresult(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
+            std::nullopt, set_b, false, triple ? 1.0F/3.0F : 0.5F, extra_output),
+            "native repeated-frame pair");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+        require(readback_pattern(fixture, synthetic_destinations[0].Get(),
+            D3D12_RESOURCE_STATE_RENDER_TARGET) == current,
+            "native repeated frame depended on unused optical-flow resources");
+    }
+    // Exercise enough advancing pairs to reuse a work slot.
     std::uint64_t guide_serial = frame_b->serial;
     for (UINT iteration = 0; iteration < 3; ++iteration) {
         const std::uint32_t source_index = iteration % 2U;
@@ -3033,6 +3196,7 @@ void test_dlss_motion_vector_gpu_ingress(
         guide_left->serial = ++guide_serial;
         auto guide_right = std::make_shared<xrfg::DlssMotionVectorFrame>(*guide_left);
         guide_right->motion_slice = 1;
+        guide_right->output_slice = 1;
         auto guide = std::make_shared<xrfg::DlssMotionVectorSet>();
         guide->eye_count = kEyeCount;
         guide->eyes = {guide_left, guide_right};
@@ -3040,17 +3204,346 @@ void test_dlss_motion_vector_gpu_ingress(
         require(
             operation_succeeded(synthesizer.submit_pair(
                 capture, views, views, 0, source_index, &advancing,
-                std::nullopt, guide)),
+                std::nullopt, guide, false, triple ? 1.0F/3.0F : 0.5F, extra_output)),
             "DLSS-motion work-slot reuse failed");
         fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     }
-    require(
-        operation_succeeded(synthesizer.wait_for_idle()),
-        "DLSS-motion final drain failed");
-    require(
-        operation_succeeded(history->invalidate()),
-        "DLSS-motion history invalidate failed");
+    if (native_dlss) {
+        require_frame_start_gate(synthesizer,"native DLSS second pair gate");
+        upload_pattern(fixture,sources[0].Get(),current);
+        xrfg::D3D12HistoryCaptureTicket capture_c{};
+        require_hresult(history->capture(0,&capture_c),"native reset capture");
+        require_hresult(history->commit(capture_c),"native reset commit");
+        auto cut_left=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame_b);
+        auto cut_right=std::make_shared<xrfg::DlssMotionVectorFrame>(*frame_b_right);
+        cut_left->serial=cut_right->serial=guide_serial+1;
+        cut_left->previous_serial=cut_right->previous_serial=guide_serial;
+        cut_left->reset=cut_right->reset=true;
+        auto cut=std::make_shared<xrfg::DlssMotionVectorSet>(); cut->eye_count=kEyeCount; cut->eyes={cut_left,cut_right};
+        require_hresult(synthesizer.submit_pair(capture_c,views,views,0,0,&pair,std::nullopt,cut,false,0.5F,extra_output),"native reset pair");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*){});
+        require(readback_pattern(fixture,synthetic_destinations[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==current,
+            "native explicit reset did not show the current frame");
+        require_frame_start_gate(synthesizer,"native missing-depth gate");
+        xrfg::D3D12HistoryCaptureTicket capture_d{};
+        require_hresult(history->capture(1,&capture_d),"native missing-depth capture");
+        require_hresult(history->commit(capture_d),"native missing-depth commit");
+        auto missing_left=std::make_shared<xrfg::DlssMotionVectorFrame>(*cut_left);
+        auto missing_right=std::make_shared<xrfg::DlssMotionVectorFrame>(*cut_right);
+        missing_left->reset=missing_right->reset=false;
+        missing_left->previous_serial=missing_right->previous_serial=guide_serial+1;
+        missing_left->serial=missing_right->serial=guide_serial+2; missing_left->depth.Reset(); missing_right->depth.Reset();
+        auto missing=std::make_shared<xrfg::DlssMotionVectorSet>(); missing->eye_count=kEyeCount; missing->eyes={missing_left,missing_right};
+        require_hresult(synthesizer.submit_pair(capture_d,views,views,0,1,&pair,std::nullopt,missing,false,0.5F,extra_output),"native missing-depth pair");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*){});
+        require(readback_pattern(fixture,synthetic_destinations[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==current,
+            "native missing depth fabricated an interpolated frame");
+        require(xrfg::dlss_motion_vector_statistics().status==xrfg::DlssMotionVectorStatus::waiting_for_depth,
+            "native missing depth did not report the waiting state");
+    }
+    require(operation_succeeded(synthesizer.wait_for_idle()), "DLSS-motion final drain failed");
+    require(operation_succeeded(history->invalidate()), "DLSS-motion history invalidate failed");
 }
+
+#ifdef XRFG_NATIVE_DLSSG
+// An sRGB format exercises the encode before NGX and the decode after it:
+// the generated bytes must still match the byte-space expectation.
+void test_native_dlss_packed_stereo(D3D12WarpFixture& fixture, bool cropped,
+                                    DXGI_FORMAT format = kFormat) {
+    constexpr UINT width = 256, height = 128, margin = 16;
+    const auto previous = translated_motion_pattern(width, height, {0, 0});
+    const auto current = translated_motion_pattern(width, height, {8, -8});
+    const auto expected = translated_motion_pattern(width, height, {4, -4});
+    const auto blend = midpoint_pattern(previous, current);
+    std::array<ComPtr<ID3D12Resource>, 2> stereo{
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              kEyeCount, format),
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                              kEyeCount, format)};
+    upload_pattern(fixture, stereo[0].Get(), previous);
+    upload_pattern(fixture, stereo[1].Get(), current);
+    std::array<ComPtr<ID3D12Resource>, 2> packed{
+        create_source_texture(fixture, width * 2, height, D3D12_RESOURCE_STATE_COMMON, 1, format),
+        create_source_texture(fixture, width * 2, height, D3D12_RESOURCE_STATE_COMMON, 1, format)};
+    auto output = create_source_texture(
+        fixture, width * 2, height, D3D12_RESOURCE_STATE_RENDER_TARGET, 1, format);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        for (UINT frame = 0; frame < 2; ++frame) {
+            std::array barriers{
+                transition_barrier(stereo[frame].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                   D3D12_RESOURCE_STATE_COPY_SOURCE),
+                transition_barrier(packed[frame].Get(), D3D12_RESOURCE_STATE_COMMON,
+                                   D3D12_RESOURCE_STATE_COPY_DEST)};
+            list->ResourceBarrier(UINT(barriers.size()), barriers.data());
+            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+                src.pResource = stereo[frame].Get();
+                src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                src.SubresourceIndex = eye;
+                dst.pResource = packed[frame].Get();
+                dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                list->CopyTextureRegion(&dst, eye * width, 0, 0, &src, nullptr);
+            }
+            for (auto& barrier : barriers)
+                std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            list->ResourceBarrier(UINT(barriers.size()), barriers.data());
+        }
+        // Native composition preserves pixels outside each projection rectangle.
+        auto source = transition_barrier(packed[1].Get(), D3D12_RESOURCE_STATE_COMMON,
+                                         D3D12_RESOURCE_STATE_COPY_SOURCE);
+        auto destination = transition_barrier(output.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                              D3D12_RESOURCE_STATE_COPY_DEST);
+        list->ResourceBarrier(1, &source);
+        list->ResourceBarrier(1, &destination);
+        list->CopyResource(output.Get(), packed[1].Get());
+        std::swap(source.Transition.StateBefore, source.Transition.StateAfter);
+        std::swap(destination.Transition.StateBefore, destination.Transition.StateAfter);
+        list->ResourceBarrier(1, &source);
+        list->ResourceBarrier(1, &destination);
+    });
+    auto motion = create_and_upload_game_motion(fixture, width / 2, height / 2, {-4, 4});
+    auto depth = create_native_test_depth(fixture, width, height);
+    xrfg::DlssMotionVectorSet a_guides{}, b_guides{};
+    a_guides.eye_count = b_guides.eye_count = kEyeCount;
+    auto views = make_reprojection_views();
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        auto a = std::make_shared<xrfg::DlssMotionVectorFrame>();
+        a->stream = 17 + eye;
+        a->epoch = 3;
+        a->serial = 1;
+        a->motion_vectors = motion;
+        a->depth = depth;
+        a->producer_queue = fixture.queue();
+        a->output_x = eye * width;
+        a->output_width = a->depth_width = width;
+        a->output_height = a->depth_height = height;
+        a->motion_width = width / 2;
+        a->motion_height = height / 2;
+        a->motion_slice = a->output_slice = eye;
+        a->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+        auto b = std::make_shared<xrfg::DlssMotionVectorFrame>(*a);
+        b->serial = 2;
+        b->previous_serial = 1;
+        a_guides.eyes[eye] = a;
+        b_guides.eyes[eye] = b;
+        views[eye].array_slice = 0;
+        views[eye].image_rect = {
+            eye * width + (cropped ? 3U : 0U), cropped ? 1U : 0U,
+            cropped ? width - 6 : width, cropped ? height - 2 : height};
+    }
+    xrfg::D3D12NativeDlssG native;
+    require_hresult(native.initialize(fixture.device(), fixture.queue(), packed[0]->GetDesc(),
+                                      format), "packed native initialization");
+    const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        require(native.record(list, 0, packed[0].Get(), packed[1].Get(), views, views,
+                              &a_guides, &b_guides, outputs,
+                              D3D12_RESOURCE_STATE_RENDER_TARGET) == S_OK,
+                "packed native generation did not consume both eye guides");
+    });
+    auto unpacked = create_source_texture(fixture, width, height,
+                                          D3D12_RESOURCE_STATE_RENDER_TARGET, kEyeCount, format);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        std::array barriers{
+            transition_barrier(output.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                               D3D12_RESOURCE_STATE_COPY_SOURCE),
+            transition_barrier(unpacked.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                               D3D12_RESOURCE_STATE_COPY_DEST)};
+        list->ResourceBarrier(UINT(barriers.size()), barriers.data());
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            D3D12_TEXTURE_COPY_LOCATION src{}, dst{};
+            src.pResource = output.Get();
+            src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.pResource = unpacked.Get();
+            dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = eye;
+            const D3D12_BOX box{eye * width, 0, 0, (eye + 1) * width, height, 1};
+            list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+        }
+        for (auto& barrier : barriers)
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        list->ResourceBarrier(UINT(barriers.size()), barriers.data());
+    });
+    const auto actual = readback_pattern(fixture, unpacked.Get(),
+                                         D3D12_RESOURCE_STATE_RENDER_TARGET);
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        const double error = mean_absolute_rgb_error(actual, expected, width, height, eye, margin);
+        const double blend_error = mean_absolute_rgb_error(blend, expected, width, height, eye, margin);
+        std::cout << "Native packed stereo eye=" << eye << " cropped=" << cropped
+                  << " srgb=" << (format != kFormat) << " synthetic_mae=" << error
+                  << " blend_mae=" << blend_error << '\n';
+        require(error < 0.02 && error < blend_error,
+                "native packed stereo did not interpolate eye " + std::to_string(eye));
+        if (cropped) for (UINT y = 0; y < height; ++y) for (UINT x = 0; x < width; ++x) {
+            if (x >= 3 && x < width - 3 && y >= 1 && y < height - 1) continue;
+            const SIZE_T offset = (SIZE_T(y) * width + x) * 4;
+            require(std::equal(actual[eye].begin() + offset, actual[eye].begin() + offset + 4,
+                               current[eye].begin() + offset),
+                    "native packed stereo wrote outside the eye viewport");
+        }
+    }
+    fixture.require_no_debug_errors();
+}
+
+// The native history is reseeded only when aligning A into B's camera moves a
+// pixel: not for a still head, a translation or a sub-pixel tracking change.
+void test_native_dlss_reseeds_only_for_camera_motion(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 256, height = 128;
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON),
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON)};
+    auto output = create_source_texture(fixture, width, height);
+    auto motion = create_and_upload_game_motion(fixture, width / 2, height / 2, {0, 0});
+    auto depth = create_native_test_depth(fixture, width, height);
+    const std::uint32_t frames = xrfg::native_dlssg_max_generated_frames(fixture.device());
+    std::cout << "native max generated frames=" << frames << '\n';
+    require(frames >= 1, "native frame generation reported unavailable");
+    xrfg::D3D12NativeDlssG native;
+    require_hresult(native.initialize(fixture.device(), fixture.queue(), sources[0]->GetDesc(),
+                                      kFormat), "reseed native initialization");
+    const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+    std::uint64_t serial = 1;
+    const auto pair = [&](const ReprojectionViews& a_views, const ReprojectionViews& b_views) {
+        xrfg::DlssMotionVectorSet a_guides{}, b_guides{};
+        a_guides.eye_count = b_guides.eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            for (const UINT next : {0U, 1U}) {
+                auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                f->stream = 61 + eye;
+                f->epoch = 1;
+                f->serial = serial + next;
+                f->previous_serial = serial + next - 1;
+                f->motion_vectors = motion;
+                f->depth = depth;
+                f->producer_queue = fixture.queue();
+                f->output_width = f->depth_width = width;
+                f->output_height = f->depth_height = height;
+                f->motion_width = width / 2;
+                f->motion_height = height / 2;
+                f->motion_slice = f->output_slice = eye;
+                f->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+                (next ? b_guides : a_guides).eyes[eye] = f;
+            }
+        }
+        ++serial;
+        HRESULT recorded = E_FAIL;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            recorded = native.record(list, 0, sources[0].Get(), sources[1].Get(), a_views,
+                                     b_views, &a_guides, &b_guides, outputs,
+                                     D3D12_RESOURCE_STATE_RENDER_TARGET);
+        });
+        require(recorded == S_OK, "reseed native pair was not generated");
+        return native.reseeds();
+    };
+    const auto still = make_reprojection_views();
+    require(pair(still, still) == kEyeCount, "the first native pair did not seed each eye");
+    require(pair(still, still) == kEyeCount, "a still camera reseeded the native history");
+    auto moved = still;
+    for (auto& view : moved) view.pose.position.z += 0.05F;
+    require(pair(still, moved) == kEyeCount, "a translation alone reseeded the native history");
+    require(pair(still, make_reprojection_views(0.000001F)) == kEyeCount,
+            "a sub-pixel rotation reseeded the native history");
+    require(pair(still, make_reprojection_views(0.01F)) == 2 * kEyeCount,
+            "a turning camera did not reseed the native history");
+    fixture.require_no_debug_errors();
+}
+
+// Opt-in with XRFG_TEST_NATIVE_DLSSG_BENCH: GPU time of one native stereo pair
+// at a headset-class eye size, with engine guides at a DLSS-quality render
+// size. A still head keeps NGX history; a turning head changes the camera on
+// every pair. Each case runs at 2X and 3X.
+void bench_native_dlss_pairs(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 2064, height = 2208;
+    constexpr UINT render_width = 1376, render_height = 1472;
+    constexpr UINT warmup = 8, measured = 96;
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON),
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON)};
+    std::array<ComPtr<ID3D12Resource>, 2> images{
+        create_source_texture(fixture, width, height),
+        create_source_texture(fixture, width, height)};
+    auto motion = create_and_upload_game_motion(fixture, render_width, render_height, {-3, 3});
+    auto depth = create_native_test_depth(fixture, render_width, render_height);
+    ComPtr<ID3D12QueryHeap> queries;
+    D3D12_QUERY_HEAP_DESC query_description{};
+    query_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    query_description.Count = 2;
+    require_hresult(fixture.device()->CreateQueryHeap(&query_description, IID_PPV_ARGS(&queries)),
+                    "native bench query heap");
+    auto readback = create_buffer(fixture, D3D12_HEAP_TYPE_READBACK, 2 * sizeof(UINT64),
+                                  D3D12_RESOURCE_STATE_COPY_DEST);
+    UINT64 frequency{};
+    require_hresult(fixture.queue()->GetTimestampFrequency(&frequency), "native bench frequency");
+    const auto frame = [&](UINT eye, std::uint64_t serial) {
+        auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+        f->stream = 41 + eye;
+        f->epoch = 1;
+        f->serial = serial;
+        f->previous_serial = serial - 1;
+        f->motion_vectors = motion;
+        f->depth = depth;
+        f->producer_queue = fixture.queue();
+        f->output_width = width;
+        f->output_height = height;
+        f->motion_width = f->depth_width = render_width;
+        f->motion_height = f->depth_height = render_height;
+        f->motion_slice = f->output_slice = eye;
+        f->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+        return f;
+    };
+    for (const UINT output_count : {1U, 2U}) {
+        for (const bool turning : {false, true}) {
+            xrfg::D3D12NativeDlssG native;
+            require_hresult(native.initialize(fixture.device(), fixture.queue(),
+                                              sources[0]->GetDesc(), kFormat),
+                            "native bench initialization");
+            std::vector<xrfg::D3D12NativeDlssG::Output> outputs;
+            for (UINT output = 0; output < output_count; ++output)
+                outputs.push_back({images[output].Get()});
+            std::vector<double> samples;
+            for (UINT pair = 1; pair <= warmup + measured; ++pair) {
+                xrfg::DlssMotionVectorSet a_guides{}, b_guides{};
+                a_guides.eye_count = b_guides.eye_count = kEyeCount;
+                for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                    a_guides.eyes[eye] = frame(eye, pair);
+                    b_guides.eyes[eye] = frame(eye, pair + 1);
+                }
+                const auto a_views = make_reprojection_views(turning ? 0.01F * pair : 0.0F);
+                const auto b_views = make_reprojection_views(turning ? 0.01F * (pair + 1) : 0.0F);
+                HRESULT recorded = E_FAIL;
+                fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                    list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+                    recorded = native.record(list, 0, sources[pair & 1].Get(),
+                                             sources[(pair + 1) & 1].Get(), a_views, b_views,
+                                             &a_guides, &b_guides, outputs,
+                                             D3D12_RESOURCE_STATE_RENDER_TARGET);
+                    list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+                    list->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+                                           readback.Get(), 0);
+                });
+                require(recorded == S_OK, "native bench pair was not generated");
+                void* mapped{};
+                const D3D12_RANGE range{0, 2 * sizeof(UINT64)};
+                require_hresult(readback->Map(0, &range, &mapped), "native bench readback");
+                const auto* stamps = static_cast<const UINT64*>(mapped);
+                const double microseconds =
+                    double(stamps[1] - stamps[0]) * 1000000.0 / double(frequency);
+                const D3D12_RANGE no_write{0, 0};
+                readback->Unmap(0, &no_write);
+                if (pair > warmup) samples.push_back(microseconds);
+            }
+            // Other GPU work inflates single samples; the low percentile is
+            // the steadier comparison between runs.
+            std::sort(samples.begin(), samples.end());
+            std::cout << "native bench " << width << "x" << height << " per eye, "
+                      << (output_count + 1) << "X, " << (turning ? "turning" : "still")
+                      << " head: p10_us=" << samples[samples.size() / 10]
+                      << " median_us=" << samples[samples.size() / 2] << '\n';
+        }
+    }
+    fixture.require_no_debug_errors();
+}
+#endif
 
 void test_dlss_motion_vector_strafe_rejects_double_edges(
     D3D12WarpFixture& fixture) {
@@ -3305,7 +3798,8 @@ void test_rotation_aware_synthesis_beats_uncompensated_flow(
                 kFormat,
                 D3D12_RESOURCE_STATE_RENDER_TARGET,
                 backend,
-                nvidia_options)),
+                motion_a && motion_b ? nvidia_options : xrfg::D3D12NvidiaOpticalFlowOptions{
+                    nvidia_options.preset,nvidia_options.input_scale,nvidia_options.bidirectional})),
             std::string(label) + " synthesizer initialization failed");
         xrfg::D3D12HistoryCaptureTicket capture_a{};
         require(
@@ -3455,15 +3949,22 @@ void test_rotation_aware_synthesis_beats_uncompensated_flow(
     game_frame_a->motion_width = kRotationWidth;
     game_frame_a->motion_height = kRotationHeight;
     game_frame_a->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    if(nvidia_options.frame_generation==xrfg::D3D12FrameGeneration::native_dlss) {
+        game_frame_a->depth=create_native_test_depth(fixture,kRotationWidth,kRotationHeight);
+        game_frame_a->depth_width=kRotationWidth; game_frame_a->depth_height=kRotationHeight;
+        game_frame_a->depth_resource_state=D3D12_RESOURCE_STATE_COMMON;
+    }
     auto game_frame_b = std::make_shared<xrfg::DlssMotionVectorFrame>(*game_frame_a);
     game_frame_b->previous_serial = 1;
     game_frame_b->serial = 2;
     auto game_frame_a_right = std::make_shared<xrfg::DlssMotionVectorFrame>(*game_frame_a);
     game_frame_a_right->stream = 32;
     game_frame_a_right->motion_slice = 1;
+    game_frame_a_right->output_slice = 1;
     auto game_frame_b_right = std::make_shared<xrfg::DlssMotionVectorFrame>(*game_frame_b);
     game_frame_b_right->stream = 32;
     game_frame_b_right->motion_slice = 1;
+    game_frame_b_right->output_slice = 1;
     auto game_set_a = std::make_shared<xrfg::DlssMotionVectorSet>();
     game_set_a->eye_count = kEyeCount;
     game_set_a->eyes = {game_frame_a, game_frame_a_right};
@@ -3991,6 +4492,34 @@ int main() {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+#ifdef XRFG_NATIVE_DLSSG
+        if (std::getenv("XRFG_TEST_NATIVE_DLSSG_BENCH")) {
+            D3D12WarpFixture bench_fixture(true);
+            bench_native_dlss_pairs(bench_fixture);
+            return 0;
+        }
+        if (std::getenv("XRFG_TEST_NATIVE_DLSSG")) {
+            D3D12WarpFixture native_fixture(true);
+            test_native_dlss_packed_stereo(native_fixture, false);
+            test_native_dlss_packed_stereo(native_fixture, true);
+            test_native_dlss_packed_stereo(native_fixture, false, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+            test_native_dlss_packed_stereo(native_fixture, true, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+            test_native_dlss_reseeds_only_for_camera_motion(native_fixture);
+            test_dlss_motion_vector_gpu_ingress(native_fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,true);
+            test_dlss_motion_vector_gpu_ingress(native_fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,true,true);
+            test_dlss_motion_vector_gpu_ingress(native_fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,true,false,true);
+            test_dlss_motion_vector_gpu_ingress(native_fixture,xrfg::D3D12OpticalFlowBackend::nvidia,true);
+            test_dlss_motion_vector_gpu_ingress(native_fixture,xrfg::D3D12OpticalFlowBackend::fidelity_fx,true,false,false,true);
+            test_dlss_motion_vector_gpu_ingress(native_fixture,xrfg::D3D12OpticalFlowBackend::nvidia,true,false,true,true);
+            xrfg::D3D12NvidiaOpticalFlowOptions native_options;
+            native_options.frame_generation=xrfg::D3D12FrameGeneration::native_dlss;
+            test_rotation_aware_synthesis_beats_uncompensated_flow(native_fixture,
+                xrfg::D3D12OpticalFlowBackend::fidelity_fx,native_options);
+            native_fixture.require_no_debug_errors();
+            std::cout << "Native DLSS FG stereo, real-copy, reset and missing-depth tests passed\n";
+            return 0;
+        }
+#endif
         if (GetEnvironmentVariableA("XRFG_TEST_NVIDIA_QUALITY", nullptr, 0)) {
             run_nvidia_fast_controls();
             return 0;

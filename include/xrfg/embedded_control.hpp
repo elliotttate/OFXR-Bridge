@@ -10,7 +10,7 @@ struct Settings {
     int scale{2}; // 0 full, 1 three-quarter, 2 half
     bool backward{};
     int motion_vectors{}; // 0 optical flow, 1 DLSS ingress
-    int frame_generation{}; // ABI compatibility: standalone accepts only 0.
+    int frame_generation{}; // 0 OFXR, 1 native NVIDIA DLSS Frame Generation.
     bool operator==(const Settings&) const = default;
 };
 struct Snapshot {

@@ -57,6 +57,8 @@ enum MenuCommand : UINT {
     toggle_deep_pipeline = 118,
     toggle_triple_frame_gen = 119,
     toggle_lower_vram = 126,
+    generation_ofxr = 127,
+    generation_dlss = 128,
     toggle_diagnostics = 120,
     overlay_off = 121,
     overlay_upper_left = 122,
@@ -326,6 +328,13 @@ void log_lifecycle(const std::filesystem::path& local_directory,
             if (error) *error = last_error_message(L"Installing the runtime layer");
             return false;
         }
+#ifdef XRFG_NATIVE_DLSSG
+        const auto source_dlss = state.executable_directory / L"ofxr" / L"nvngx_dlssg.dll";
+        if (!xrfg::standalone::install_runtime_layer_dll(source_dlss, directory / L"nvngx_dlssg.dll")) {
+            if (error) *error = L"Installing the bundled NVIDIA DLSS Frame Generation runtime failed.";
+            return false;
+        }
+#endif
 
         static std::uint64_t last_arm_id = 0;
         last_arm_id = std::max<std::uint64_t>(last_arm_id + 1, GetTickCount64());
@@ -523,6 +532,8 @@ void log_lifecycle(const std::filesystem::path& local_directory,
     } else if (state.settings.deep_pipeline) {
         tooltip += L" - prefer FPS";
     }
+    if (state.settings.frame_generation == xrfg::standalone::FrameGeneration::native_dlss)
+        tooltip += L" - native DLSS FG";
     if (state.settings.vulkan_support) {
         tooltip += L" - Vulkan";
     }
@@ -921,6 +932,12 @@ void show_context_menu(AppState& state) {
             ? L"Disarm bridge"
             : L"Arm bridge until manual disarm");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (state.settings.frame_generation == xrfg::standalone::FrameGeneration::ofxr ? MF_CHECKED : 0),
+        generation_ofxr, L"OFXR frame generation");
+#ifdef XRFG_NATIVE_DLSSG
+    AppendMenuW(menu, MF_STRING | (state.settings.frame_generation == xrfg::standalone::FrameGeneration::native_dlss ? MF_CHECKED : 0),
+        generation_dlss, L"NVIDIA DLSS Frame Generation (experimental)");
+#endif
     AppendMenuW(
         menu,
         MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
@@ -1133,6 +1150,12 @@ void handle_command(AppState& state, UINT command) {
         break;
     case change_pause_key:
         change_pause_hotkey(state);
+        break;
+    case generation_ofxr:
+    case generation_dlss:
+        state.settings.frame_generation = command == generation_dlss
+            ? xrfg::standalone::FrameGeneration::native_dlss : xrfg::standalone::FrameGeneration::ofxr;
+        update_runtime_options(state, L"The frame-generation algorithm will be used by the next OpenXR session.");
         break;
     case backend_fidelity_fx:
         state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;

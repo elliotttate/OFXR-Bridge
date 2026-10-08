@@ -110,6 +110,11 @@ enum class DlssMotionVectorStatus : std::uint32_t {
     invalid_input,
     temporal_mismatch,
     used,
+    waiting_for_depth,
+    // Native DLSS FG could not create or evaluate its NGX feature.
+    native_unavailable,
+    // 3X was requested from a native feature that generates one frame.
+    multi_frame_unsupported,
 };
 
 struct DlssMotionVectorStatistics {

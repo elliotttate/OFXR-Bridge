@@ -1,6 +1,8 @@
 #include "xrfg/d3d12_history.hpp"
 #include "xrfg/d3d12_frame_synthesizer.hpp"
+#include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/dlss_motion_vectors.hpp"
+#include "xrfg/ngx_guide_capture.hpp"
 #include "xrfg/d3d11_bridge.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/vulkan_d3d12_interop.hpp"
@@ -4735,6 +4737,13 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
     return result;
 }
 
+// Native DLSS FG makes 3X only where NGX generates two frames per pair. On
+// other adapters the session stays at a pair instead of showing repeats.
+[[nodiscard]] bool native_triple_limited(const SessionState& state) noexcept {
+    return state.nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss &&
+        xrfg::native_dlssg_max_generated_frames(state.d3d12_device.Get()) < 2U;
+}
+
 XrResult layer_create_session_impl(
     XrInstance instance,
     const XrSessionCreateInfo* create_info,
@@ -4754,7 +4763,8 @@ XrResult layer_create_session_impl(
     state->nvidia_options = {
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
-        initial_control.desired.backward};
+        initial_control.desired.backward,
+        static_cast<xrfg::D3D12FrameGeneration>(initial_control.desired.frame_generation)};
     // One display period of extra depth, bought with one display period of
     // latency: every synthetic is held until it is a period old, so synthesis
     // gets a period to finish instead of the gap the game leaves. On by
@@ -4774,7 +4784,7 @@ XrResult layer_create_session_impl(
     state->pause_applied = state->manual_control.pause_requested();
     state->recorder_applied = xrfg::bridge_flight_logger().enabled();
     state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
-    state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1;
+    state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1 || initial_control.desired.frame_generation == 1;
     state->control_revision = initial_control.revision;
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
     XrStructureType binding_structure_type = XR_TYPE_UNKNOWN;
@@ -4998,12 +5008,16 @@ XrResult layer_create_session_impl(
         state->graphics_binding == SessionGraphicsBinding::d3d12 ||
         state->graphics_binding == SessionGraphicsBinding::vulkan;
     state->deep_pipeline_configured = state->deep_pipeline;
-    if (triple_requested && triple_binding) {
+    // A 3X request the native feature cannot meet keeps the 3X ring, so the
+    // OFXR algorithm can still be switched to 3X live.
+    const bool triple_limited =
+        triple_requested && triple_binding && native_triple_limited(*state);
+    if (triple_requested && triple_binding && !triple_limited) {
         state->frames_per_application_frame = 3;
         state->deep_pipeline = false;
     }
     state->two_slot_synthetic_ring =
-        state->deep_pipeline || state->frames_per_application_frame > 2;
+        state->deep_pipeline || state->frames_per_application_frame > 2 || triple_limited;
     state->triple_switchable =
         triple_binding && state->two_slot_synthetic_ring;
     if (triple_binding && !state->triple_switchable) {
@@ -5166,6 +5180,9 @@ XrResult layer_create_session_impl(
         dispatch->destroy_session(created_session);
         return XR_ERROR_RUNTIME_FAILURE;
     }
+    xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(),
+        state->graphics_binding == SessionGraphicsBinding::d3d12 && state->menu_enabled &&
+        state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss);
     *session = created_session;
     return result;
 }
@@ -5176,6 +5193,7 @@ XrResult layer_destroy_session_impl(XrSession session) {
         return XR_ERROR_HANDLE_INVALID;
     }
 
+    xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
     stop_continuous_presenter(state);
     state->fps_overlay.reset();
     for (const auto& swapchain_state : find_swapchains(state)) {
@@ -10621,7 +10639,8 @@ struct PreparedProjectionFrame {
         // inline both halves are written and signalled together, and the
         // consumer-queue join for the current image is not needed at all.
         const bool defer_current_copy = generation->interop == nullptr &&
-            !state->session->deep_pipeline;
+            !state->session->deep_pipeline &&
+            state->session->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::ofxr;
         xrfg::D3D12FrameSynthesisTicket ticket{};
         const auto debug_marker = request_pair && xrfg::bridge_flight_logger().enabled() &&
                 state->session->fps_overlay
@@ -11500,6 +11519,7 @@ void apply_embedded_control(
         use_continuous_presenter &&
         XR_FAILED(wait_for_presenter_idle(state))) return;
     state->menu_enabled = false;
+    xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
     {
         std::scoped_lock lock(state->presenter_mutex);
         state->presenter_last_frame.reset();
@@ -11516,16 +11536,18 @@ void apply_embedded_control(
     }
     const xrfg::D3D12NvidiaOpticalFlowOptions options{
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
-        static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward};
+        static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
+        static_cast<xrfg::D3D12FrameGeneration>(control.desired.frame_generation)};
     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
-        options.bidirectional != state->nvidia_options.bidirectional;
+        options.bidirectional != state->nvidia_options.bidirectional ||
+        options.frame_generation != state->nvidia_options.frame_generation;
     // Enumeration is excluded by frame_call_mutex, so newly created contexts
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
-    state->dlss_motion_vectors = control.desired.motion_vectors == 1;
+    state->dlss_motion_vectors = control.desired.motion_vectors == 1 || control.desired.frame_generation == 1;
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);
         // The same gates the enumeration path applies, and for the same reason.
@@ -11662,6 +11684,9 @@ void apply_embedded_control(
     state->pause_applied = paused;
     state->recorder_applied = recording;
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled && !paused;
+    xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(),
+        state->graphics_binding == SessionGraphicsBinding::d3d12 && state->menu_enabled &&
+        state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss);
     if (state->menu_enabled && state->presenter_restore_after_pause) {
         state->presenter_restore_after_pause = false;
         if (!presenter_forbidden(*state)) {
@@ -11803,7 +11828,8 @@ void apply_live_frame_multiplier(
         }
         state->triple_poll_at = now + std::chrono::milliseconds(250);
         const std::uint32_t target =
-            xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory())
+            xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory()) &&
+                    !native_triple_limited(*state)
                 ? 3U
                 : 2U;
         if (target == state->frames_per_application_frame) {
@@ -11907,6 +11933,21 @@ XrResult layer_end_frame_impl(
         return XR_ERROR_HANDLE_INVALID;
     }
     PrivateDepthStrip private_depth_strip;
+    if (end_info && end_info->layers) {
+        for (uint32_t l=0;l<end_info->layerCount;++l) {
+            const auto* header=end_info->layers[l];
+            if (!header || header->type!=XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+            const auto* projection=reinterpret_cast<const XrCompositionLayerProjection*>(header);
+            for (uint32_t v=0;projection->views && v<projection->viewCount;++v) {
+                auto* next=static_cast<const XrBaseInStructure*>(projection->views[v].next);
+                for (;next;next=next->next) {
+                    if (next->type!=XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR) continue;
+                    const auto* depth=reinterpret_cast<const XrCompositionLayerDepthInfoKHR*>(next);
+                    xrfg::update_ngx_guide_depth(depth->nearZ,depth->farZ,depth->minDepth,depth->maxDepth);
+                }
+            }
+        }
+    }
     end_info = strip_private_depth(*state, end_info, private_depth_strip);
 
     // Releasable, because the once-per-pair hold at the end of this function
@@ -12302,7 +12343,8 @@ XrResult layer_end_frame_impl(
     // constant offset nobody would see. Alternating early and late is what
     // reads as judder.
     const std::uint32_t frames_per_frame = state->frames_per_application_frame;
-    const float interpolation_fraction = synthetic_interpolation_fraction(
+    const bool native_dlss = state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss;
+    const float interpolation_fraction = native_dlss ? 1.0F / static_cast<float>(frames_per_frame) : synthetic_interpolation_fraction(
         state,
         previous_snapshot,
         current_snapshot,
@@ -12312,7 +12354,7 @@ XrResult layer_end_frame_impl(
     // the real frame.
     const std::optional<float> extra_interpolation_fraction =
         frames_per_frame > 2
-            ? std::optional<float>(synthetic_interpolation_fraction(
+            ? std::optional<float>(native_dlss ? 2.0F / static_cast<float>(frames_per_frame) : synthetic_interpolation_fraction(
                   state,
                   previous_snapshot,
                   current_snapshot,

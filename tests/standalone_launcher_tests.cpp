@@ -22,6 +22,13 @@ int main() {
 
     const LauncherSettings release_defaults;
     const std::string default_runtime_ini = build_runtime_ini(release_defaults);
+    if (release_defaults.frame_generation != FrameGeneration::ofxr ||
+        !contains(default_runtime_ini, "frame_generation=ofxr")) return 1;
+    LauncherSettings native_settings;
+    native_settings.frame_generation = FrameGeneration::native_dlss;
+    if (parse_settings(serialize_settings(native_settings)).frame_generation != FrameGeneration::native_dlss ||
+        !contains(build_runtime_ini(native_settings), "frame_generation=dlss") ||
+        parse_settings("[tray]\nframe_generation=unknown\n").frame_generation != FrameGeneration::ofxr) return 1;
     if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::upper_right ||
         !contains(default_runtime_ini, "[overlay]\r\nposition=upper_right")) return 1;
     for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,

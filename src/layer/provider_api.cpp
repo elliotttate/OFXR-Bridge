@@ -266,8 +266,7 @@ extern "C" __declspec(dllexport) int OFXR_RequestControlV2(
     const OFXR_ControlSettingsV2* input) noexcept {
     try {
         if (input == nullptr ||
-            !valid_size(input->struct_size, sizeof(OFXR_ControlSettingsV2)) ||
-            input->frame_generation != 0) {
+            !valid_size(input->struct_size, sizeof(OFXR_ControlSettingsV2))) {
             return 0;
         }
         return xrfg::embedded::request({
