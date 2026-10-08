@@ -3749,6 +3749,129 @@ void test_native_dlss_reseeds_only_for_camera_motion(D3D12WarpFixture& fixture) 
     fixture.require_no_debug_errors();
 }
 
+// A static scene with fine detail and hard edges, seen through each view.
+[[nodiscard]] StereoPattern detailed_world_pattern(UINT width, UINT height,
+                                                   const ReprojectionViews& views) {
+    StereoPattern pattern;
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        auto& bytes = pattern[eye];
+        bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+        const auto& view = views[eye];
+        const float left = std::tan(view.fov.angle_left), right = std::tan(view.fov.angle_right);
+        const float top = std::tan(view.fov.angle_up), bottom = std::tan(view.fov.angle_down);
+        for (UINT y = 0; y < height; ++y) {
+            for (UINT x = 0; x < width; ++x) {
+                const float u = (x + 0.5F) / width, v = (y + 0.5F) / height;
+                const xrfg::Vec3 ray = rotate_vector(
+                    view.pose.orientation,
+                    {left + (right - left) * u, top + (bottom - top) * v, -1.0F});
+                const float az = std::atan2(ray.x, -ray.z);
+                const float el = std::atan2(ray.y, std::sqrt(ray.x * ray.x + ray.z * ray.z));
+                const auto edge = [](float s) { return s >= 0 ? 1.0F : -1.0F; };
+                const float red = 127.5F + 60 * std::sin(az * 41 + el * 7) +
+                                  40 * edge(std::sin(az * 23) * std::sin(el * 19));
+                const float green = 127.5F + 55 * std::cos(az * 59 - el * 13) +
+                                    40 * edge(std::sin(az * 17 + 1) * std::sin(el * 29));
+                const float blue = 127.5F + 50 * std::sin(az * 73 + el * 31) +
+                                   35 * std::cos(el * 47);
+                const std::size_t offset = (std::size_t(y) * width + x) * kBytesPerPixel;
+                bytes[offset + 0] = direction_channel(red);
+                bytes[offset + 1] = direction_channel(green);
+                bytes[offset + 2] = direction_channel(blue);
+                bytes[offset + 3] = 255;
+            }
+        }
+    }
+    return pattern;
+}
+
+// Opt-in with XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP: how well native
+// generation reproduces a static, detailed scene after a small head rotation
+// (about 0.25 to 16 pixels). Every rotation reseeds the history with the
+// aligned previous frame, so the error is mostly that frame's resampling.
+// Keeping the history instead and aligning the generated image in the
+// compose pass measured two to five times worse, even with Catmull-Rom.
+void bench_native_dlss_rotation_sweep(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 512, height = 512, margin = 24;
+    const std::array<float, 7> yaws_degrees{0.05F, 0.1F, 0.2F, 0.4F, 0.8F, 1.6F, 3.2F};
+    auto depth = create_native_test_depth(fixture, width, height);
+    auto still_motion = create_and_upload_game_motion(fixture, width, height, {0, 0});
+    const auto still = make_reprojection_views();
+    const auto still_pattern = detailed_world_pattern(width, height, still);
+    std::array<ComPtr<ID3D12Resource>, 2> still_sources{
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON),
+        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON)};
+    upload_pattern(fixture, still_sources[0].Get(), still_pattern);
+    upload_pattern(fixture, still_sources[1].Get(), still_pattern);
+    auto turned_source = create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON);
+    auto output = create_source_texture(fixture, width, height);
+    const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+    const auto guides = [&](std::uint64_t serial, const ComPtr<ID3D12Resource>& motion) {
+        xrfg::DlssMotionVectorSet set{};
+        set.eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            f->stream = 81 + eye;
+            f->epoch = 1;
+            f->serial = serial;
+            f->previous_serial = serial - 1;
+            f->motion_vectors = motion;
+            f->depth = depth;
+            f->producer_queue = fixture.queue();
+            f->output_width = f->depth_width = f->motion_width = width;
+            f->output_height = f->depth_height = f->motion_height = height;
+            f->motion_slice = f->output_slice = eye;
+            f->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+            set.eyes[eye] = f;
+        }
+        return set;
+    };
+    for (const float yaw_degrees : yaws_degrees) {
+        const auto turned = make_reprojection_views(yaw_degrees * 3.14159265F / 180.0F);
+        const auto turned_pattern = detailed_world_pattern(width, height, turned);
+        upload_pattern(fixture, turned_source.Get(), turned_pattern);
+        auto motion = create_and_upload_game_motion_field(
+            fixture, width, height, [&](UINT eye, UINT x, UINT y) {
+                float sx = float(x), sy = float(y);
+                (void)target_pixel_maps_to_source(still[eye], turned[eye], width, height, x,
+                                                  y, &sx, &sy);
+                return std::array<float, 2>{sx - float(x), sy - float(y)};
+            });
+        xrfg::D3D12NativeDlssG native;
+        require_hresult(native.initialize(fixture.device(), fixture.queue(),
+                                          still_sources[0]->GetDesc(), kFormat),
+                        "rotation sweep native initialization");
+        const auto seed_a = guides(1, still_motion), seed_b = guides(2, still_motion);
+        const auto turn_b = guides(3, motion);
+        HRESULT seeded = E_FAIL, turned_pair = E_FAIL;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            seeded = native.record(list, 0, still_sources[0].Get(), still_sources[1].Get(),
+                                   still, still, &seed_a, &seed_b, outputs,
+                                   D3D12_RESOURCE_STATE_RENDER_TARGET);
+        });
+        const std::uint64_t reseeds_before = native.reseeds();
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            turned_pair = native.record(list, 0, still_sources[1].Get(), turned_source.Get(),
+                                        still, turned, &seed_b, &turn_b, outputs,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET);
+        });
+        require(seeded == S_OK && turned_pair == S_OK, "rotation sweep pair failed");
+        const auto actual =
+            readback_pattern(fixture, output.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+        std::cout << "rotation sweep yaw_deg=" << yaw_degrees
+                  << " reseeded=" << (native.reseeds() != reseeds_before);
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            std::cout << " eye" << eye << "_mae="
+                      << mean_absolute_rgb_error(actual, turned_pattern, width, height, eye,
+                                                 margin)
+                      << " eye" << eye << "_moved_mae="
+                      << mean_absolute_rgb_error(still_pattern, turned_pattern, width,
+                                                 height, eye, margin);
+        }
+        std::cout << '\n';
+    }
+}
+
 // Opt-in with XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH: GPU time of NGX for one
 // eye, two separate eyes, and both eyes as one side-by-side feature. NGX's
 // cost is sublinear in pixels, so the layouts show its fixed per-evaluation
@@ -5114,6 +5237,11 @@ int main() {
             return 0;
         }
 #ifdef XRFG_NATIVE_DLSSG
+        if (std::getenv("XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP")) {
+            D3D12WarpFixture bench_fixture(true);
+            bench_native_dlss_rotation_sweep(bench_fixture);
+            return 0;
+        }
         if (std::getenv("XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH")) {
             D3D12WarpFixture bench_fixture(true);
             bench_native_dlss_layouts(bench_fixture);

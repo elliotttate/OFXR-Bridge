@@ -106,6 +106,15 @@ report `native_unavailable` (status 8), and creation is retried after 120
 pairs instead of disabling generation. Separate OpenXR composition layers
 continue through the existing layer path.
 
+Capture runs whenever DLSS motion vectors are selected, not only for native
+generation, so OFXR's own synthesis (`motion_vectors=dlss` with
+`frame_generation=ofxr`) uses the game's vectors without a guide provider.
+Like native generation, it pairs each view of a side-by-side texture with its
+own eye's guide. In Galactic Racer under UEVR on the Meta XR Simulator
+(1440x1584 per eye) a stereo pair then costs about 0.12 ms of GPU time,
+against 0.30 ms for FidelityFX flow, 1.1 ms for native DLSS FG and 2.3 ms for
+NVIDIA medium flow.
+
 A DLSS feature the game created before the capture hook was installed is
 recovered from its evaluation parameters, which normally still hold its
 creation flags. Without them, capture assumes render-resolution motion and
@@ -130,6 +139,11 @@ that plane. When that alignment moves any pixel by more than a tenth of a
 pixel, the feature is reseeded with the aligned A before evaluating B; a still
 head or a translation alone keeps the history. A reset clears a shared
 feature's history for both eyes, so a reseed packs the aligned A of both.
+Keeping the history through small rotations instead, and aligning the
+generated image into B's camera in the compose pass, saves the reseed but
+measured two to five times the error on detailed content even at a quarter
+pixel of rotation; `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` repeats that
+quality measurement for the reseeding path.
 This preserves OFXR's current B pose/FOV contract and its bit-exact real-frame
 copy. On an RTX 5090 at 2064x2208 per eye, a stereo pair takes about 1.3 ms of
 GPU time at 2X with a still head and 1.6 ms with a turning head (2.0 ms with a
