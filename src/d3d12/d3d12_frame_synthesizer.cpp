@@ -973,11 +973,23 @@ struct D3D12FrameSynthesizer::Impl {
         parameters[2].Constants.Num32BitValues = kSynthesisConstantCount;
         parameters[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
+        // Bilinear source reads use the texture unit's filtering: one fetch
+        // instead of four loads and three blends per sample.
+        D3D12_STATIC_SAMPLER_DESC linear_clamp{};
+        linear_clamp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+        linear_clamp.AddressU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.AddressV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+        linear_clamp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+        linear_clamp.MaxLOD = D3D12_FLOAT32_MAX;
+        linear_clamp.ShaderRegister = 0;
+        linear_clamp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
         D3D12_ROOT_SIGNATURE_DESC root_description{};
         root_description.NumParameters = static_cast<UINT>(parameters.size());
         root_description.pParameters = parameters.data();
-        root_description.NumStaticSamplers = 0;
-        root_description.pStaticSamplers = nullptr;
+        root_description.NumStaticSamplers = 1;
+        root_description.pStaticSamplers = &linear_clamp;
         root_description.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
 
         ComPtr<ID3DBlob> serialized;

@@ -1,5 +1,6 @@
 Texture2DArray<float4> PreviousFrame : register(t0);
 Texture2DArray<float4> CurrentFrame : register(t1);
+SamplerState LinearClamp : register(s0);
 Texture2D<int2> BackwardFlow : register(t2);
 Texture2D<uint> FlowAuxiliary : register(t3);
 Texture2D<int2> ForwardFlow : register(t4);
@@ -224,20 +225,12 @@ float4 bilinear_previous_source(float2 coordinate, uint slice) {
         coordinate,
         float2(0.0, 0.0),
         float2(float(Width - 1), float(Height - 1)));
-    int2 top_left = int2(floor(bounded));
-    int2 bottom_right = min(
-        top_left + int2(1, 1),
-        int2(int(Width) - 1, int(Height) - 1));
-    float2 fraction = bounded - float2(top_left);
-    float4 top = lerp(
-        PreviousFrame.Load(int4(top_left, int(slice), 0)),
-        PreviousFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
-        fraction.x);
-    float4 bottom = lerp(
-        PreviousFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
-        PreviousFrame.Load(int4(bottom_right, int(slice), 0)),
-        fraction.x);
-    return lerp(top, bottom, fraction.y);
+    // The texture unit filters the four neighbours; clamp addressing matches
+    // the edge texel repeated at the last row and column.
+    return PreviousFrame.SampleLevel(
+        LinearClamp,
+        float3((bounded + 0.5) / float2(float(Width), float(Height)), float(slice)),
+        0.0);
 }
 
 float4 bilinear_current_source(float2 coordinate, uint slice) {
@@ -245,20 +238,10 @@ float4 bilinear_current_source(float2 coordinate, uint slice) {
         coordinate,
         float2(0.0, 0.0),
         float2(float(Width - 1), float(Height - 1)));
-    int2 top_left = int2(floor(bounded));
-    int2 bottom_right = min(
-        top_left + int2(1, 1),
-        int2(int(Width) - 1, int(Height) - 1));
-    float2 fraction = bounded - float2(top_left);
-    float4 top = lerp(
-        CurrentFrame.Load(int4(top_left, int(slice), 0)),
-        CurrentFrame.Load(int4(bottom_right.x, top_left.y, int(slice), 0)),
-        fraction.x);
-    float4 bottom = lerp(
-        CurrentFrame.Load(int4(top_left.x, bottom_right.y, int(slice), 0)),
-        CurrentFrame.Load(int4(bottom_right, int(slice), 0)),
-        fraction.x);
-    return lerp(top, bottom, fraction.y);
+    return CurrentFrame.SampleLevel(
+        LinearClamp,
+        float3((bounded + 0.5) / float2(float(Width), float(Height)), float(slice)),
+        0.0);
 }
 
 // The ratio the flow input was packed at, relative to the source image.
