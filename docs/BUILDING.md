@@ -125,7 +125,10 @@ B pose/FOV contract and its bit-exact real-frame copy. On an RTX 5090 at
 2064x2208 per eye, a stereo pair takes about 1.7 ms of GPU time at 2X and
 2.4 ms at 3X, and reseeding adds about 0.3 ms. Set
 `XRFG_TEST_NATIVE_DLSSG_BENCH=1` and run `xrfg_d3d12_history_tests` to repeat
-that measurement.
+that measurement. `XRFG_TEST_FG_BENCH=1` instead times every frame-generation
+method through the synthesizer (OFXR FidelityFX and NVIDIA flow, DLSS vectors,
+native 2X/3X) at 2004x2004 per eye, plus the game-side guide snapshot copies.
+Close VR games first: GPU contention makes the medians meaningless.
 
 NGX receives motion in pixels and colour display-encoded, as its programming
 guide requires. sRGB swapchains are encoded by the pack shader into 10-bit

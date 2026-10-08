@@ -725,6 +725,9 @@ struct D3D12FrameSynthesizer::Impl {
         UINT timing_query_base{};
         bool timing_pending{};
         bool timing_cached{};
+        // The pair wrote only the span marks: FidelityFX, game motion vectors
+        // and native generation never run the NVIDIA optical-flow stages.
+        bool timing_span_only{};
     };
 
     struct RollingSource {
@@ -2284,7 +2287,7 @@ struct D3D12FrameSynthesizer::Impl {
         slot.cached_timing.gpu_end_qpc = timestamp_qpc(values[kSpanEnd]);
         slot.cached_timing.total_microseconds = timestamp_microseconds(
             values[kSpanBegin], values[kSpanEnd]);
-        if (backend != D3D12OpticalFlowBackend::nvidia || native_dlss) {
+        if (slot.timing_span_only) {
             slot.timing_pending = false;
             slot.timing_cached = true;
             return S_OK;
@@ -2876,6 +2879,16 @@ struct D3D12FrameSynthesizer::Impl {
             }
         }
 
+        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            // As the other paths: the span ends before the current copy, and
+            // only the two span marks were written.
+            slot.command_list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanEnd);
+            slot.command_list->ResolveQueryData(nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP, slot.timing_query_base + kSpanBegin, 2,
+                nvidia_timestamp_readback.Get(),
+                UINT64(slot.timing_query_base + kSpanBegin) * sizeof(std::uint64_t));
+        }
         std::array<D3D12_RESOURCE_BARRIER, 5> after{};
         UINT after_count = 0;
         after[after_count++] = transition_barrier(previous_resource,
@@ -3550,6 +3563,7 @@ struct D3D12FrameSynthesizer::Impl {
         bool* used_game_motion) noexcept {
         if (used_game_motion == nullptr) return E_POINTER;
         *used_game_motion = false;
+        slot.timing_span_only = backend != D3D12OpticalFlowBackend::nvidia || native_dlss;
         if (native_dlss) {
             native_pair_generated = false;
             if (nvidia_gpu_timing_enabled) {
@@ -3644,6 +3658,13 @@ struct D3D12FrameSynthesizer::Impl {
                 current_destination_index, debug_marker);
             if (SUCCEEDED(result)) {
                 *used_game_motion = true;
+                slot.timing_span_only = true;
+                if (nvidia_gpu_timing_enabled) {
+                    slot.timing_metadata = {};
+                    slot.timing_metadata.previous_serial = previous_source.ticket.serial;
+                    slot.timing_metadata.current_serial = current_source.ticket.serial;
+                    slot.timing_metadata.eye_count = current_source.view_count;
+                }
                 return result;
             }
             report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
@@ -3839,14 +3860,15 @@ struct D3D12FrameSynthesizer::Impl {
                 slot.timing_query_base + kSpanEnd);
             // Only this path records a resolve of its own; the NVIDIA path
             // resolves on its synthesis list. Without one the span marks
-            // never reach the readback buffer at all.
+            // never reach the readback buffer at all. The NVIDIA stage marks
+            // are never written here, and resolving them is invalid.
             slot.command_list->ResolveQueryData(
                 nvidia_timestamp_heap.Get(),
                 D3D12_QUERY_TYPE_TIMESTAMP,
-                slot.timing_query_base,
-                kTimestampCount,
+                slot.timing_query_base + kSpanBegin,
+                2,
                 nvidia_timestamp_readback.Get(),
-                static_cast<UINT64>(slot.timing_query_base) *
+                static_cast<UINT64>(slot.timing_query_base + kSpanBegin) *
                     sizeof(std::uint64_t));
         }
         // The copy's own transitions travel with the copy, so the resources
@@ -3938,6 +3960,13 @@ struct D3D12FrameSynthesizer::Impl {
         std::uint32_t current_destination_index,
         const std::optional<OverlayPlacement>& debug_marker) noexcept {
         if (native_dlss) native_pair_generated = false;
+        slot.timing_span_only = true;
+        if (nvidia_gpu_timing_enabled) {
+            slot.timing_metadata = {};
+            slot.timing_metadata.previous_serial = retained_source.ticket.serial;
+            slot.timing_metadata.current_serial = retained_source.ticket.serial;
+            slot.timing_metadata.eye_count = retained_source.view_count;
+        }
         ID3D12Resource* const source = retained_source.resource.Get();
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
@@ -4067,6 +4096,15 @@ struct D3D12FrameSynthesizer::Impl {
             kShaderReadState,
             D3D12_RESOURCE_STATE_COMMON);
         slot.command_list->ResourceBarrier(1, &after_synthesis);
+        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
+            // This path copies the current frame first, so its span includes it.
+            slot.command_list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+                slot.timing_query_base + kSpanEnd);
+            slot.command_list->ResolveQueryData(nvidia_timestamp_heap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP, slot.timing_query_base + kSpanBegin, 2,
+                nvidia_timestamp_readback.Get(),
+                UINT64(slot.timing_query_base + kSpanBegin) * sizeof(std::uint64_t));
+        }
         dred_marker(slot.command_list.Get(), "OFXR repeated pair complete");
         return S_OK;
     }

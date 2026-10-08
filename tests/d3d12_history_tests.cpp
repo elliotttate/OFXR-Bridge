@@ -2937,6 +2937,158 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(false);
 }
 
+// Guide snapshots keep only what an evaluation reads: the motion rectangle of a
+// single-subresource target, and the depth plane of a depth-stencil target
+// (D3D12 copies depth-stencil subresources only whole, so that is not cropped).
+void test_dlss_guide_snapshots_copy_only_the_read_region(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 192, height = 96;
+    constexpr UINT rx = 40, ry = 20, rw = 64, rh = 32;
+    const auto make = [&](DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags,
+                          D3D12_RESOURCE_STATES state, const D3D12_CLEAR_VALUE* clear) {
+        D3D12_RESOURCE_DESC description = stereo_texture_description(width, height);
+        description.DepthOrArraySize = 1;
+        description.Format = format;
+        description.Flags = flags;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
+                            &description, state, clear, IID_PPV_ARGS(&resource)),
+                        "guide snapshot texture");
+        return resource;
+    };
+    const auto footprint = [&](ID3D12Resource* texture, UINT64* total) {
+        const auto description = texture->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout{};
+        UINT rows{};
+        UINT64 row_size{};
+        fixture.device()->GetCopyableFootprints(&description, 0, 1, 0, &layout, &rows, &row_size, total);
+        return layout;
+    };
+    const auto read = [&](ID3D12Resource* texture, D3D12_RESOURCE_STATES state) {
+        const auto description = texture->GetDesc();
+        UINT64 total{};
+        const auto layout = footprint(texture, &total);
+        auto buffer = create_buffer(fixture, D3D12_HEAP_TYPE_READBACK, total, D3D12_RESOURCE_STATE_COPY_DEST);
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            auto barrier = transition_barrier(texture, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->ResourceBarrier(1, &barrier);
+            D3D12_TEXTURE_COPY_LOCATION destination{};
+            destination.pResource = buffer.Get();
+            destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            destination.PlacedFootprint = layout;
+            D3D12_TEXTURE_COPY_LOCATION source{};
+            source.pResource = texture;
+            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+            std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+            list->ResourceBarrier(1, &barrier);
+        });
+        std::vector<std::uint32_t> texels(static_cast<std::size_t>(description.Width) * description.Height);
+        void* mapped{};
+        require_hresult(buffer->Map(0, nullptr, &mapped), "guide snapshot readback");
+        for (UINT y = 0; y < description.Height; ++y) {
+            std::memcpy(texels.data() + static_cast<std::size_t>(y) * description.Width,
+                        static_cast<const std::byte*>(mapped) + layout.Offset +
+                            static_cast<std::size_t>(y) * layout.Footprint.RowPitch,
+                        static_cast<std::size_t>(description.Width) * 4);
+        }
+        buffer->Unmap(0, nullptr);
+        return texels;
+    };
+    const auto texel = [](UINT x, UINT y) { return x | (y << 8) | ((x ^ y) << 16) | 0xFF000000U; };
+
+    auto output = make(kFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr);
+    auto motion = make(kFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                       D3D12_RESOURCE_STATE_COPY_DEST, nullptr);
+    UINT64 total{};
+    const auto layout = footprint(motion.Get(), &total);
+    auto upload = create_buffer(fixture, D3D12_HEAP_TYPE_UPLOAD, total, D3D12_RESOURCE_STATE_GENERIC_READ);
+    void* mapped{};
+    require_hresult(upload->Map(0, nullptr, &mapped), "guide snapshot upload");
+    for (UINT y = 0; y < height; ++y) {
+        auto* row = reinterpret_cast<std::uint32_t*>(static_cast<std::byte*>(mapped) + layout.Offset +
+                                                     static_cast<std::size_t>(y) * layout.Footprint.RowPitch);
+        for (UINT x = 0; x < width; ++x) row[x] = texel(x, y);
+    }
+    upload->Unmap(0, nullptr);
+    D3D12_CLEAR_VALUE clear{};
+    clear.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    clear.DepthStencil = {0.25F, 7};
+    auto depth = make(DXGI_FORMAT_R32G8X24_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                      D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
+    D3D12_DESCRIPTOR_HEAP_DESC heap_description{};
+    heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    heap_description.NumDescriptors = 1;
+    ComPtr<ID3D12DescriptorHeap> dsv;
+    require_hresult(fixture.device()->CreateDescriptorHeap(&heap_description, IID_PPV_ARGS(&dsv)),
+                    "guide snapshot DSV heap");
+    D3D12_DEPTH_STENCIL_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_D32_FLOAT_S8X24_UINT;
+    view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    fixture.device()->CreateDepthStencilView(depth.Get(), &view, dsv->GetCPUDescriptorHandleForHeapStart());
+
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = motion.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = upload.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        source.PlacedFootprint = layout;
+        list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        const auto ready = transition_barrier(motion.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        list->ResourceBarrier(1, &ready);
+        list->ClearDepthStencilView(dsv->GetCPUDescriptorHandleForHeapStart(),
+                                    D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 0.25F, 7, 0, nullptr);
+        xrfg::DlssMotionVectorPublication publication{};
+        publication.stream = 951;
+        publication.output = output.Get();
+        publication.motion_vectors = motion.Get();
+        publication.depth = depth.Get();
+        publication.producer_queue = fixture.queue();
+        publication.producer_command_list = list;
+        publication.output_width = width;
+        publication.output_height = height;
+        publication.motion_x = publication.depth_x = rx;
+        publication.motion_y = publication.depth_y = ry;
+        publication.motion_width = publication.depth_width = rw;
+        publication.motion_height = publication.depth_height = rh;
+        publication.resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        publication.depth_resource_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        xrfg::publish_dlss_motion_vectors(publication);
+    });
+    const auto set = xrfg::resolve_dlss_motion_vectors(output.Get(), fixture.queue());
+    require(set && set->eye_count == 1 && set->eyes[0], "cropped guide snapshot did not resolve");
+    const auto& frame = *set->eyes[0];
+    const auto motion_description = frame.motion_vectors->GetDesc();
+    require(motion_description.Width == rw && motion_description.Height == rh &&
+                frame.motion_x == 0 && frame.motion_y == 0 && frame.motion_width == rw,
+            "motion snapshot was not cropped to the read rectangle");
+    const auto copied = read(frame.motion_vectors.Get(), frame.resource_state);
+    for (UINT y = 0; y < rh; ++y) {
+        for (UINT x = 0; x < rw; ++x) {
+            require(copied[static_cast<std::size_t>(y) * rw + x] == texel(rx + x, ry + y),
+                    "cropped motion snapshot moved or changed the vectors");
+        }
+    }
+    const auto depth_description = frame.depth->GetDesc();
+    require(depth_description.Format == DXGI_FORMAT_R32_TYPELESS && depth_description.Width == width &&
+                !(depth_description.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) &&
+                frame.depth_x == rx && frame.depth_y == ry,
+            "depth snapshot did not keep the whole depth plane alone");
+    for (const auto value : read(frame.depth.Get(), frame.depth_resource_state)) {
+        float depth_value{};
+        std::memcpy(&depth_value, &value, sizeof(depth_value));
+        require(depth_value == 0.25F, "depth plane snapshot changed the depth values");
+    }
+    xrfg::retire_dlss_motion_vector_stream(951);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    fixture.require_no_debug_errors();
+}
+
 [[nodiscard]] ComPtr<ID3D12Resource> create_native_test_depth(D3D12WarpFixture& fixture, UINT width, UINT height) {
     ComPtr<ID3D12Resource> native_depth;
     auto description = stereo_texture_description(width,height);
@@ -4477,6 +4629,232 @@ void test_nvidia_serialized_eye_context_stress(
               << pair_count << " pairs in " << elapsed.count() << " ms\n";
 }
 
+// Opt-in with XRFG_TEST_FG_BENCH: GPU time per stereo pair for each frame
+// generation method, through the synthesizer the layer uses, at Galactic
+// Racer's per-eye size with a turning head. The span covers synthesis and the
+// real-frame copy. The second part times the game-side guide snapshots that
+// the DLSS-vector and native methods add to every game frame.
+void bench_frame_generation_methods() {
+    D3D12WarpFixture fixture(true);
+    constexpr UINT width = 2004, height = 2004;
+    constexpr UINT render_width = 1336, render_height = 1336;
+    constexpr UINT warmup = 8, measured = 48;
+    constexpr int shift = 12;
+    using Backend = xrfg::D3D12OpticalFlowBackend;
+    using Preset = xrfg::D3D12NvidiaPerformancePreset;
+    using Scale = xrfg::D3D12OpticalFlowInputScale;
+    struct Method {
+        const char* name;
+        Backend backend;
+        Preset preset;
+        Scale scale;
+        bool game_motion, native, triple;
+    };
+    const std::vector<Method> methods{
+        {"OFXR FidelityFX, half-res flow", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, false},
+        {"OFXR FidelityFX, full-res flow", Backend::fidelity_fx, Preset::medium, Scale::full, false, false, false},
+        {"OFXR NVIDIA OFA fast", Backend::nvidia, Preset::fast, Scale::half, false, false, false},
+        {"OFXR NVIDIA OFA medium", Backend::nvidia, Preset::medium, Scale::half, false, false, false},
+        {"OFXR NVIDIA OFA slow", Backend::nvidia, Preset::slow, Scale::half, false, false, false},
+        {"OFXR FidelityFX + DLSS vectors", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false},
+        {"OFXR NVIDIA + DLSS vectors", Backend::nvidia, Preset::medium, Scale::half, true, false, false},
+        {"OFXR FidelityFX 3X", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, true},
+        {"OFXR NVIDIA OFA medium 3X", Backend::nvidia, Preset::medium, Scale::half, false, false, true},
+#ifdef XRFG_NATIVE_DLSSG
+        {"Native DLSS FG 2X", Backend::nvidia, Preset::medium, Scale::half, true, true, false},
+        {"Native DLSS FG 3X", Backend::nvidia, Preset::medium, Scale::half, true, true, true},
+#endif
+    };
+    const auto a = translated_motion_pattern(width, height, {0, 0});
+    const auto b = translated_motion_pattern(width, height, {shift, -shift});
+    auto motion = create_and_upload_game_motion(fixture, render_width, render_height,
+        {-float(shift) * render_width / width, float(shift) * render_width / width});
+    auto depth = create_native_test_depth(fixture, render_width, render_height);
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    const auto report = [](const char* name, std::vector<double> samples, const std::string& note) {
+        std::sort(samples.begin(), samples.end());
+        std::cout << "fg bench " << name << ": p10_us=" << samples[samples.size() / 10]
+                  << " median_us=" << samples[samples.size() / 2] << note << '\n';
+    };
+    for (const auto& method : methods) {
+        std::array<ComPtr<ID3D12Resource>, 2> sources{
+            create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+        std::array<ComPtr<ID3D12Resource>, 2> currents{
+            create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+        std::array<ComPtr<ID3D12Resource>, 2> synthetics{
+            create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+        upload_pattern(fixture, sources[0].Get(), a);
+        upload_pattern(fixture, sources[1].Get(), b);
+        std::array<ID3D12Resource*, 2> input{sources[0].Get(), sources[1].Get()};
+        std::array<ID3D12Resource*, 2> current_out{currents[0].Get(), currents[1].Get()};
+        std::vector<ID3D12Resource*> synthetic_out{synthetics[0].Get()};
+        if (method.triple) synthetic_out.push_back(synthetics[1].Get());
+        auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+        require_hresult(history->initialize(fixture.device(), fixture.queue(), input,
+                                            D3D12_RESOURCE_STATE_RENDER_TARGET), "bench history");
+        xrfg::D3D12NvidiaOpticalFlowOptions options;
+        options.preset = method.preset;
+        options.input_scale = method.scale;
+        if (method.native) options.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
+        xrfg::D3D12FrameSynthesizer synthesizer;
+        require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history,
+                                               current_out, synthetic_out, kFormat,
+                                               D3D12_RESOURCE_STATE_RENDER_TARGET, method.backend,
+                                               options, true), "bench initialize");
+        const auto guides = [&](std::uint64_t serial) -> std::shared_ptr<const xrfg::DlssMotionVectorSet> {
+            if (!method.game_motion) return {};
+            auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+            set->eye_count = kEyeCount;
+            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                auto frame = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                frame->stream = 71 + eye;
+                frame->epoch = 1;
+                frame->serial = serial;
+                frame->previous_serial = serial - 1;
+                frame->motion_vectors = motion;
+                frame->producer_queue = fixture.queue();
+                frame->output_width = width;
+                frame->output_height = height;
+                frame->motion_width = render_width;
+                frame->motion_height = render_height;
+                frame->motion_slice = frame->output_slice = eye;
+                frame->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                if (method.native) {
+                    frame->depth = depth;
+                    frame->depth_width = render_width;
+                    frame->depth_height = render_height;
+                    frame->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+                }
+                set->eyes[eye] = frame;
+            }
+            return set;
+        };
+        xrfg::D3D12HistoryCaptureTicket capture{};
+        xrfg::D3D12FrameSynthesisTicket ticket{};
+        require_hresult(history->capture(0, &capture), "bench capture");
+        require_hresult(history->commit(capture), "bench commit");
+        require_hresult(synthesizer.submit_prime(capture, make_reprojection_views(0.0F), 0, &ticket,
+                                                 guides(1)), "bench prime");
+        fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+        const auto used_before = xrfg::dlss_motion_vector_statistics().used;
+        std::vector<double> samples;
+        std::array<std::vector<double>, 4> stages;  // NVIDIA flow: pack, eye 0, eye 1, composition
+        for (UINT pair = 1; pair <= warmup + measured; ++pair) {
+            require_frame_start_gate(synthesizer, "bench frame gate");
+            require_hresult(history->capture(pair % 2, &capture), "bench capture");
+            require_hresult(history->commit(capture), "bench commit");
+            const auto views = make_reprojection_views(0.01F * float(pair));
+            const auto extra = method.triple
+                ? std::optional<xrfg::D3D12ExtraSynthetic>(xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})
+                : std::nullopt;
+            require_hresult(synthesizer.submit_pair(capture, views, views, 0, pair % 2, &ticket,
+                                                    std::nullopt, guides(pair + 1), false,
+                                                    method.triple ? 1.0F / 3.0F : 0.5F, extra),
+                            "bench pair");
+            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+            xrfg::D3D12NvidiaGpuTiming timing{};
+            require(synthesizer.consume_nvidia_gpu_timing(&timing) == S_OK,
+                    std::string("bench timing missing for ") + method.name);
+            const double microseconds = timing.gpu_end_qpc > timing.gpu_begin_qpc
+                ? double(timing.gpu_end_qpc - timing.gpu_begin_qpc) * 1e6 / double(frequency.QuadPart)
+                : double(timing.total_microseconds);
+            if (pair > warmup) {
+                samples.push_back(microseconds);
+                const std::array<std::uint64_t, 4> stage{timing.pack_microseconds, timing.eye0_microseconds,
+                                                         timing.eye1_microseconds,
+                                                         timing.composition_microseconds};
+                for (std::size_t i = 0; i < stage.size(); ++i) stages[i].push_back(double(stage[i]));
+            }
+        }
+        require_hresult(synthesizer.wait_for_idle(), "bench drain");
+        const auto used = xrfg::dlss_motion_vector_statistics().used - used_before;
+        std::string note = method.game_motion ? " vector_pairs=" + std::to_string(used) + "/" +
+                                                    std::to_string(warmup + measured)
+                                              : std::string();
+        if (method.backend == Backend::nvidia && !method.game_motion) {
+            const char* names[]{" pack", " eye0", " eye1", " composition"};
+            for (std::size_t i = 0; i < stages.size(); ++i) {
+                std::sort(stages[i].begin(), stages[i].end());
+                note += std::string(names[i]) + "_us=" + std::to_string(int(stages[i][stages[i].size() / 2]));
+            }
+        }
+        report(method.name, samples, note);
+    }
+
+    // Game side: one DLSS evaluation per eye per game frame, each followed by
+    // a snapshot of its motion and depth. Sizes are Galactic Racer's: both
+    // eyes share 4012x3004 targets, each reading a 2004x2004 rectangle.
+    constexpr UINT target_width = 4012, target_height = 3004;
+    const auto texture = [&](DXGI_FORMAT format, D3D12_RESOURCE_FLAGS flags,
+                             D3D12_RESOURCE_STATES state) {
+        D3D12_RESOURCE_DESC description = stereo_texture_description(target_width, target_height);
+        description.DepthOrArraySize = 1;
+        description.Format = format;
+        description.Flags = flags;
+        const auto properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> resource;
+        require_hresult(fixture.device()->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
+                            &description, state, nullptr, IID_PPV_ARGS(&resource)),
+                        "bench game texture");
+        return resource;
+    };
+    auto game_output = texture(kFormat, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                               D3D12_RESOURCE_STATE_RENDER_TARGET);
+    auto game_motion = texture(DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    auto game_depth = texture(DXGI_FORMAT_R32G8X24_TYPELESS, D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    ComPtr<ID3D12QueryHeap> queries;
+    D3D12_QUERY_HEAP_DESC query_description{};
+    query_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    query_description.Count = 2;
+    require_hresult(fixture.device()->CreateQueryHeap(&query_description, IID_PPV_ARGS(&queries)),
+                    "bench query heap");
+    auto readback = create_buffer(fixture, D3D12_HEAP_TYPE_READBACK, 2 * sizeof(UINT64),
+                                  D3D12_RESOURCE_STATE_COPY_DEST);
+    UINT64 ticks{};
+    require_hresult(fixture.queue()->GetTimestampFrequency(&ticks), "bench timestamp frequency");
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    std::vector<double> snapshot_samples;
+    for (UINT frame = 0; frame < warmup + measured; ++frame) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                xrfg::DlssMotionVectorPublication publication{};
+                publication.stream = 81 + eye;
+                publication.output = game_output.Get();
+                publication.motion_vectors = game_motion.Get();
+                publication.depth = game_depth.Get();
+                publication.producer_queue = fixture.queue();
+                publication.producer_command_list = list;
+                publication.verified_producer_device = fixture.device();
+                publication.output_width = publication.motion_width = publication.depth_width = width;
+                publication.output_height = publication.motion_height = publication.depth_height = height;
+                publication.depth_inverted = true;
+                publication.depth_infinite = true;
+                xrfg::publish_dlss_motion_vectors(publication);
+            }
+            list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+            list->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, readback.Get(), 0);
+        });
+        void* mapped{};
+        const D3D12_RANGE range{0, 2 * sizeof(UINT64)};
+        require_hresult(readback->Map(0, &range, &mapped), "bench readback");
+        const auto* stamps = static_cast<const UINT64*>(mapped);
+        if (frame >= warmup) snapshot_samples.push_back(double(stamps[1] - stamps[0]) * 1e6 / double(ticks));
+        const D3D12_RANGE no_write{0, 0};
+        readback->Unmap(0, &no_write);
+    }
+    xrfg::retire_dlss_motion_vector_stream(81);
+    xrfg::retire_dlss_motion_vector_stream(82);
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    report("game-side guide snapshots per frame (2 eyes, motion + depth)", snapshot_samples,
+           " snapshot_failures=" +
+               std::to_string(xrfg::dlss_motion_vector_statistics().snapshot_failures));
+    fixture.require_no_debug_errors();
+}
+
 #include "nvidia_fast_patterns.inc"
 
 }  // namespace
@@ -4492,6 +4870,10 @@ int main() {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+        if (std::getenv("XRFG_TEST_FG_BENCH")) {
+            bench_frame_generation_methods();
+            return 0;
+        }
 #ifdef XRFG_NATIVE_DLSSG
         if (std::getenv("XRFG_TEST_NATIVE_DLSSG_BENCH")) {
             D3D12WarpFixture bench_fixture(true);
@@ -4534,6 +4916,7 @@ int main() {
         test_double_wide_single_slice_views(fixture);
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);
+        test_dlss_guide_snapshots_copy_only_the_read_region(fixture);
         test_dlss_motion_vector_gpu_ingress(fixture);
         test_dlss_motion_vector_strafe_rejects_double_edges(fixture);
         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);

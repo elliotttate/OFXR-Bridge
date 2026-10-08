@@ -24,6 +24,14 @@ struct SnapshotSlot {
     D3D12_RESOURCE_STATES state{D3D12_RESOURCE_STATE_COMMON};
 };
 
+// The part of a guide resource one publication reads.
+struct SnapshotRegion {
+    std::uint32_t x{};
+    std::uint32_t y{};
+    std::uint32_t width{};
+    std::uint32_t height{};
+};
+
 struct StreamState {
     std::uint64_t epoch{1};
     std::uint64_t serial{};
@@ -136,10 +144,13 @@ HRESULT snapshot_resource(
     ID3D12CommandQueue* producer_queue,
     ID3D12Device* verified_producer_device,
     ComPtr<ID3D12Resource>* snapshot,
-    bool depth = false) noexcept {
+    bool depth,
+    const SnapshotRegion& region,
+    bool* cropped) noexcept {
     if (source == nullptr || producer_command_list == nullptr ||
-        producer_queue == nullptr || snapshot == nullptr) return E_POINTER;
+        producer_queue == nullptr || snapshot == nullptr || cropped == nullptr) return E_POINTER;
     snapshot->Reset();
+    *cropped = false;
 
     ComPtr<ID3D12Device> source_device;
     ComPtr<ID3D12Device> command_device;
@@ -168,26 +179,52 @@ HRESULT snapshot_resource(
     }
 
     const D3D12_RESOURCE_DESC description = source->GetDesc();
+    // Engines size motion and depth targets for their largest view; each DLSS
+    // evaluation reads one rectangle of them. A single-subresource texture is
+    // copied as that rectangle alone. D3D12 copies depth-stencil subresources
+    // only whole, so from a 32-bit depth-stencil target the depth plane alone
+    // is copied, and the stencil plane the guides never read is left behind.
+    const bool single = description.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        description.DepthOrArraySize == 1 && description.MipLevels == 1 &&
+        description.SampleDesc.Count == 1;
+    const bool depth_stencil =
+        (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) != 0;
+    const bool crop = single && !depth_stencil && region.width != 0 && region.height != 0 &&
+        static_cast<std::uint64_t>(region.x) + region.width <= description.Width &&
+        static_cast<std::uint64_t>(region.y) + region.height <= description.Height &&
+        (region.width < description.Width || region.height < description.Height);
+    const bool depth_plane = depth && single &&
+        (description.Format == DXGI_FORMAT_R32G8X24_TYPELESS ||
+         description.Format == DXGI_FORMAT_D32_FLOAT_S8X24_UINT);
+    auto allocation_description = description;
+    if (crop) {
+        allocation_description.Width = region.width;
+        allocation_description.Height = region.height;
+    }
+    if (depth) {
+        // A typed DSV resource cannot be read through a float SRV. Keep a
+        // bit-exact copy in its typeless family and permit shader reads.
+        switch (description.Format) {
+        case DXGI_FORMAT_D32_FLOAT: allocation_description.Format=DXGI_FORMAT_R32_TYPELESS; break;
+        case DXGI_FORMAT_D24_UNORM_S8_UINT: allocation_description.Format=DXGI_FORMAT_R24G8_TYPELESS; break;
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: allocation_description.Format=DXGI_FORMAT_R32G8X24_TYPELESS; break;
+        case DXGI_FORMAT_D16_UNORM: allocation_description.Format=DXGI_FORMAT_R16_TYPELESS; break;
+        default: break;
+        }
+        allocation_description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+            allocation_description.Flags & ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
+        if (depth_plane) {
+            allocation_description.Format = DXGI_FORMAT_R32_TYPELESS;
+            allocation_description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
+                allocation_description.Flags & ~D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL);
+        }
+    }
     SnapshotSlot& slot = snapshots[next_snapshot];
-    if (!slot.resource || !matching_description(slot.description, description)) {
+    if (!slot.resource || !matching_description(slot.description, allocation_description)) {
         D3D12_HEAP_PROPERTIES properties{};
         properties.Type = D3D12_HEAP_TYPE_DEFAULT;
         properties.CreationNodeMask = 1;
         properties.VisibleNodeMask = 1;
-        auto allocation_description = description;
-        if (depth) {
-            // A typed DSV resource cannot be read through a float SRV. Keep a
-            // bit-exact copy in its typeless family and permit shader reads.
-            switch (description.Format) {
-            case DXGI_FORMAT_D32_FLOAT: allocation_description.Format=DXGI_FORMAT_R32_TYPELESS; break;
-            case DXGI_FORMAT_D24_UNORM_S8_UINT: allocation_description.Format=DXGI_FORMAT_R24G8_TYPELESS; break;
-            case DXGI_FORMAT_D32_FLOAT_S8X24_UINT: allocation_description.Format=DXGI_FORMAT_R32G8X24_TYPELESS; break;
-            case DXGI_FORMAT_D16_UNORM: allocation_description.Format=DXGI_FORMAT_R16_TYPELESS; break;
-            default: break;
-            }
-            allocation_description.Flags = static_cast<D3D12_RESOURCE_FLAGS>(
-                allocation_description.Flags & ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE);
-        }
         ComPtr<ID3D12Resource> resource;
         result = allocation_device->CreateCommittedResource(
             &properties,
@@ -198,7 +235,7 @@ HRESULT snapshot_resource(
             IID_PPV_ARGS(resource.GetAddressOf()));
         if (FAILED(result)) return result;
         slot.resource = std::move(resource);
-        slot.description = description;
+        slot.description = allocation_description;
         slot.state = D3D12_RESOURCE_STATE_COMMON;
     }
 
@@ -217,7 +254,21 @@ HRESULT snapshot_resource(
     if (before_count != 0) {
         producer_command_list->ResourceBarrier(before_count, before.data());
     }
-    producer_command_list->CopyResource(slot.resource.Get(), source);
+    if (crop || depth_plane) {
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = slot.resource.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION origin{};
+        origin.pResource = source;
+        origin.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;  // plane 0
+        const D3D12_BOX box{region.x, region.y, 0, region.x + region.width,
+                            region.y + region.height, 1};
+        producer_command_list->CopyTextureRegion(&destination, 0, 0, 0, &origin,
+                                                 crop ? &box : nullptr);
+    } else {
+        producer_command_list->CopyResource(slot.resource.Get(), source);
+    }
+    *cropped = crop;
 
     std::array<D3D12_RESOURCE_BARRIER, 2> after{};
     UINT after_count = 0;
@@ -265,11 +316,15 @@ void publish_dlss_motion_vectors(
         }
 
         ComPtr<ID3D12Resource> motion_snapshot;
+        bool motion_cropped = false;
         if (FAILED(snapshot_resource(stream.snapshots, stream.next_snapshot,
                 publication.motion_vectors, publication.resource_state,
                 publication.producer_command_list, publication.producer_queue,
                 publication.verified_producer_device,
-                &motion_snapshot))) {
+                &motion_snapshot, false,
+                {publication.motion_x, publication.motion_y,
+                 publication.motion_width, publication.motion_height},
+                &motion_cropped))) {
             ++state.statistics.snapshot_failures;
             state.statistics.status = DlssMotionVectorStatus::invalid_input;
             return;
@@ -277,13 +332,17 @@ void publish_dlss_motion_vectors(
         ++state.statistics.snapshot_copies;
 
         ComPtr<ID3D12Resource> depth_snapshot;
+        bool depth_cropped = false;
         if (publication.depth != nullptr) {
             if (FAILED(snapshot_resource(stream.depth_snapshots,
                     stream.next_depth_snapshot, publication.depth,
                     publication.depth_resource_state,
                     publication.producer_command_list,
                     publication.producer_queue,
-                    publication.verified_producer_device, &depth_snapshot, true))) {
+                    publication.verified_producer_device, &depth_snapshot, true,
+                    {publication.depth_x, publication.depth_y,
+                     publication.depth_width, publication.depth_height},
+                    &depth_cropped))) {
                 ++state.statistics.snapshot_failures;
                 state.statistics.status = DlssMotionVectorStatus::invalid_input;
                 return;
@@ -306,8 +365,9 @@ void publish_dlss_motion_vectors(
         frame->output_width = publication.output_width;
         frame->output_height = publication.output_height;
         frame->output_slice = 0;
-        frame->motion_x = publication.motion_x;
-        frame->motion_y = publication.motion_y;
+        // A cropped snapshot holds the rectangle at its origin.
+        frame->motion_x = motion_cropped ? 0 : publication.motion_x;
+        frame->motion_y = motion_cropped ? 0 : publication.motion_y;
         frame->motion_width = publication.motion_width;
         frame->motion_height = publication.motion_height;
         frame->motion_slice = 0;
@@ -321,8 +381,8 @@ void publish_dlss_motion_vectors(
         frame->jittered = publication.jittered;
         frame->reset = publication.reset;
         frame->depth = std::move(depth_snapshot);
-        frame->depth_x = publication.depth_x;
-        frame->depth_y = publication.depth_y;
+        frame->depth_x = depth_cropped ? 0 : publication.depth_x;
+        frame->depth_y = depth_cropped ? 0 : publication.depth_y;
         frame->depth_width = publication.depth_width;
         frame->depth_height = publication.depth_height;
         frame->depth_resource_state = kSnapshotReadState;
