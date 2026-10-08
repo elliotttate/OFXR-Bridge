@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cwchar>
 #include <share.h>
 #include <filesystem>
 #include <limits>
@@ -45,6 +46,13 @@ constexpr DXGI_FORMAT kFallbackColorFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 constexpr float kReseedPixels = 0.1F;
 // Pairs skipped before another attempt after NGX could not create a feature.
 constexpr UINT kCreateRetryPairs = 120;
+// Stereo eyes share one NGX feature, side by side: most of an evaluation's
+// cost is fixed, so one wide evaluation costs far less than one per eye. The
+// seam between them repeats each eye's edge, so neither eye's history reaches
+// the other unless its motion crosses half the seam.
+constexpr UINT kSeam = 64;
+// Root constants per dispatch or draw.
+constexpr UINT kParams = 46;
 
 struct Params {
     UINT extent[2], color_slice, guide_slice;
@@ -53,8 +61,15 @@ struct Params {
     float source_tangents[4], target_tangents[4];
     UINT motion_slice, reversed_depth, pack_previous, encode_srgb;
     float depth_convention[4];
+    UINT eye_x, cell_x, cell_width, cell_height;
+    float motion_normal[2];
 };
-static_assert(sizeof(Params) == 40 * sizeof(UINT));
+static_assert(sizeof(Params) == kParams * sizeof(UINT));
+// Where an eye sits in its feature, and the columns its pack writes: the eye
+// and its half of any seam beside it.
+struct Placement {
+    UINT feature, x, cell_x, cell_width;
+};
 
 // Batches transitions and remembers each resource's resting state, so a
 // record that stops early returns everything it touched to that state.
@@ -248,6 +263,11 @@ std::filesystem::path module_directory() {
 bool environment(const wchar_t *name) {
     return GetEnvironmentVariableW(name, nullptr, 0) != 0;
 }
+UINT environment(const wchar_t *name, UINT fallback) {
+    wchar_t value[16]{};
+    const DWORD n = GetEnvironmentVariableW(name, value, 16);
+    return n && n < 16 ? UINT(std::wcstoul(value, nullptr, 10)) : fallback;
+}
 // Initializes NGX for the device while an OFXR feature uses it. NGX is never
 // shut down here: the driver keeps one NGX instance per adapter for the whole
 // process, and NVSDK_NGX_D3D12_Shutdown1 tears it down for every client - it
@@ -342,13 +362,18 @@ struct D3D12NativeDlssG::Impl {
         std::uint64_t value{}, publication{};
         UINT eyes{}, outputs{};
     };
-    struct Eye {
+    // One NGX DLSS-G instance and its private textures, holding one eye or
+    // both side by side.
+    struct Feature {
         NVSDK_NGX_Handle *handle{};
         NVSDK_NGX_Parameter *params{};
         ComPtr<ID3D12Resource> color, motion, depth;
         std::array<ComPtr<ID3D12Resource>, kMaxOutputs> generated, disable;
-        std::uint64_t stream{}, epoch{}, serial{};
         UINT width{}, height{}, outputs{};
+    };
+    // The guide frame whose history an eye's feature continues.
+    struct EyeHistory {
+        std::uint64_t stream{}, epoch{}, serial{};
     };
     // What each descriptor block last described. Holding the resources means
     // an unchanged pointer is the same resource, never a reused address.
@@ -368,7 +393,10 @@ struct D3D12NativeDlssG::Impl {
     std::array<ComPtr<ID3D12DescriptorHeap>, kSlots> rtvs;
     std::array<std::array<Block, 2 * kBlocksPerEye>, kSlots> blocks;
     std::array<std::array<Target, 2 * kMaxOutputs>, kSlots> targets;
-    std::array<Eye, 2> eyes;
+    std::array<Feature, 2> features;
+    std::array<EyeHistory, 2> eyes;
+    bool shared_stereo{true};
+    UINT seam{kSeam};
     D3D12_RESOURCE_DESC source{};
     DXGI_FORMAT view_format{}, color_format{kColorFormat};
     UINT increment{}, rtv_increment{}, max_outputs{1};
@@ -431,13 +459,8 @@ struct D3D12NativeDlssG::Impl {
     ~Impl() {
         poll_decisions();
         if (decision_log) std::fclose(decision_log);
-        for (auto &e : eyes) {
-            if (e.handle) {
-                NVSDK_NGX_D3D12_ReleaseFeature(e.handle);
-            }
-            if (e.params) {
-                NVSDK_NGX_D3D12_DestroyParameters(e.params);
-            }
+        for (auto &f : features) {
+            release_feature(f);
         }
         if (acquired) {
             release_ngx(device.Get());
@@ -462,36 +485,36 @@ struct D3D12NativeDlssG::Impl {
                                                D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                IID_PPV_ARGS(&out));
     }
-    void release_eye(Eye &eye) noexcept {
-        if (eye.handle) {
-            NVSDK_NGX_D3D12_ReleaseFeature(eye.handle);
+    void release_feature(Feature &f) noexcept {
+        if (f.handle) {
+            NVSDK_NGX_D3D12_ReleaseFeature(f.handle);
         }
-        if (eye.params) {
-            NVSDK_NGX_D3D12_DestroyParameters(eye.params);
+        if (f.params) {
+            NVSDK_NGX_D3D12_DestroyParameters(f.params);
         }
-        eye = {};
+        f = {};
     }
-    HRESULT create_eye(ID3D12GraphicsCommandList *list, Eye &eye, UINT width, UINT height) {
-        release_eye(eye);
-        HRESULT hr = texture(color_format, eye.color, false, width, height);
+    HRESULT create_feature(ID3D12GraphicsCommandList *list, Feature &f, UINT width, UINT height) {
+        release_feature(f);
+        HRESULT hr = texture(color_format, f.color, false, width, height);
         if (FAILED(hr)) {
             return hr;
         }
-        hr = texture(DXGI_FORMAT_R16G16_FLOAT, eye.motion, false, width, height);
+        hr = texture(DXGI_FORMAT_R16G16_FLOAT, f.motion, false, width, height);
         if (FAILED(hr)) {
             return hr;
         }
-        hr = texture(DXGI_FORMAT_R32_FLOAT, eye.depth, false, width, height);
+        hr = texture(DXGI_FORMAT_R32_FLOAT, f.depth, false, width, height);
         if (FAILED(hr)) {
             return hr;
         }
-        eye.width = width;
-        eye.height = height;
-        hr = ensure_outputs(eye, 1);
+        f.width = width;
+        f.height = height;
+        hr = ensure_outputs(f, 1);
         if (FAILED(hr)) {
             return hr;
         }
-        auto result = NVSDK_NGX_D3D12_AllocateParameters(&eye.params);
+        auto result = NVSDK_NGX_D3D12_AllocateParameters(&f.params);
         if (NVSDK_NGX_FAILED(result)) {
             return E_FAIL;
         }
@@ -499,22 +522,21 @@ struct D3D12NativeDlssG::Impl {
         create.Width = create.RenderWidth = width;
         create.Height = create.RenderHeight = height;
         create.NativeBackbufferFormat = color_format;
-        result = NGX_D3D12_CREATE_DLSSG(list, 1, 1, &eye.handle, eye.params, &create);
+        result = NGX_D3D12_CREATE_DLSSG(list, 1, 1, &f.handle, f.params, &create);
         if (NVSDK_NGX_FAILED(result)) {
-            eye.handle = nullptr;
+            f.handle = nullptr;
             return DXGI_ERROR_UNSUPPORTED;
         }
         return S_OK;
     }
     // The second generated image exists only once 3X asks for it.
-    HRESULT ensure_outputs(Eye &eye, UINT count) {
-        for (; eye.outputs < count; ++eye.outputs) {
-            HRESULT hr = texture(color_format, eye.generated[eye.outputs], false, eye.width,
-                                 eye.height);
+    HRESULT ensure_outputs(Feature &f, UINT count) {
+        for (; f.outputs < count; ++f.outputs) {
+            HRESULT hr = texture(color_format, f.generated[f.outputs], false, f.width, f.height);
             if (FAILED(hr)) {
                 return hr;
             }
-            hr = texture(DXGI_FORMAT_UNKNOWN, eye.disable[eye.outputs], true, 0, 0);
+            hr = texture(DXGI_FORMAT_UNKNOWN, f.disable[f.outputs], true, 0, 0);
             if (FAILED(hr)) {
                 return hr;
             }
@@ -531,7 +553,7 @@ struct D3D12NativeDlssG::Impl {
             rp[i].DescriptorTable = {1, &ranges[i]};
         }
         rp[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        rp[2].Constants = {0, 0, 40};
+        rp[2].Constants = {0, 0, kParams};
         D3D12_ROOT_SIGNATURE_DESC rd{};
         rd.NumParameters = 3;
         rd.pParameters = rp;
@@ -594,11 +616,11 @@ struct D3D12NativeDlssG::Impl {
     }
     // A work slot is reused only after its previous submission completed, so
     // a block can be rewritten here; one that still matches is left alone.
-    void descriptors(UINT slot, UINT base, Eye &e, ID3D12Resource *color,
+    void descriptors(UINT slot, UINT base, Feature &f, ID3D12Resource *color,
                      const DlssMotionVectorFrame &g, UINT output, ID3D12Resource *fallback) {
         const std::array<ID3D12Resource *, kBlock> resources{
-            color, g.motion_vectors.Get(), g.depth.Get(), e.generated[output].Get(),
-            e.disable[output].Get(), fallback, e.color.Get(), e.motion.Get(), e.depth.Get()};
+            color, g.motion_vectors.Get(), g.depth.Get(), f.generated[output].Get(),
+            f.disable[output].Get(), fallback, f.color.Get(), f.motion.Get(), f.depth.Get()};
         const std::array<DXGI_FORMAT, 3> formats{view_format,
                                                  motion_format(g.motion_vectors->GetDesc().Format),
                                                  depth_format(g.depth->GetDesc().Format)};
@@ -690,15 +712,24 @@ struct D3D12NativeDlssG::Impl {
         }
         return p;
     }
-    void pack_input(ID3D12GraphicsCommandList *list, Transitions &t, UINT slot, UINT base,
-                    Eye &e, ID3D12Resource *color, const DlssMotionVectorFrame &g,
-                    const Params &p, ID3D12Resource *fallback) {
-        descriptors(slot, base, e, color, g, 0, fallback);
-        t.to(g.motion_vectors.Get(), g.resource_state, kRead);
-        t.to(g.depth.Get(), g.depth_resource_state, kRead);
-        for (auto *r : {e.color.Get(), e.motion.Get(), e.depth.Get()}) {
+    // The eyes of a feature pack disjoint cells, so no barrier separates
+    // their dispatches. NGX reads the inputs as non-pixel shader resources.
+    void begin_pack(Transitions &t, Feature &f) {
+        for (auto *r : {f.color.Get(), f.motion.Get(), f.depth.Get()}) {
             t.to(r, kCommon, kWrite);
         }
+    }
+    void end_pack(Transitions &t, Feature &f) {
+        for (auto *r : {f.color.Get(), f.motion.Get(), f.depth.Get()}) {
+            t.to(r, kCommon, kRead);
+        }
+    }
+    void pack_input(ID3D12GraphicsCommandList *list, Transitions &t, UINT slot, UINT base,
+                    Feature &f, ID3D12Resource *color, const DlssMotionVectorFrame &g,
+                    const Params &p, ID3D12Resource *fallback) {
+        descriptors(slot, base, f, color, g, 0, fallback);
+        t.to(g.motion_vectors.Get(), g.resource_state, kRead);
+        t.to(g.depth.Get(), g.depth_resource_state, kRead);
         t.flush();
         ID3D12DescriptorHeap *hh[]{heaps[slot].Get()};
         list->SetDescriptorHeaps(1, hh);
@@ -706,14 +737,12 @@ struct D3D12NativeDlssG::Impl {
         list->SetPipelineState(pack.Get());
         list->SetComputeRootDescriptorTable(0, gpu(slot, base));
         list->SetComputeRootDescriptorTable(1, gpu(slot, base + 6));
-        list->SetComputeRoot32BitConstants(2, 40, &p, 0);
-        list->Dispatch((p.extent[0] + 7) / 8, (p.extent[1] + 7) / 8, 1);
-        // NGX reads its inputs as non-pixel shader resources.
-        for (auto *r : {e.color.Get(), e.motion.Get(), e.depth.Get()}) {
-            t.to(r, kCommon, kRead);
-        }
+        list->SetComputeRoot32BitConstants(2, kParams, &p, 0);
+        list->Dispatch((p.cell_width + 7) / 8, (p.cell_height + 7) / 8, 1);
     }
-    HRESULT evaluate(ID3D12GraphicsCommandList *list, Transitions &t, Eye &e,
+    // One evaluation covers every eye of the feature. The camera describes
+    // the first of them; motion carries everything else.
+    HRESULT evaluate(ID3D12GraphicsCommandList *list, Transitions &t, Feature &e,
                      const D3D12ReprojectionView &b, const DlssMotionVectorFrame &gb,
                      const Params &p, UINT count, UINT index, bool reset) {
         const UINT output = index - 1;
@@ -760,10 +789,11 @@ struct D3D12NativeDlssG::Impl {
         o.cameraMotionIncluded = true;
         o.motionVectorsDilated = true;
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
-        // NGX takes motion in pixels of the motion texture. The pack writes
-        // it as a fraction of the view, so scale by the packed extent.
-        o.mvecScale[0] = float(p.extent[0]);
-        o.mvecScale[1] = float(p.extent[1]);
+        // The pack writes motion as a fraction of the feature. NGX scales it
+        // to pixels itself: handing it pixels with a unit scale instead costs
+        // measurable quality.
+        o.mvecScale[0] = float(e.width);
+        o.mvecScale[1] = float(e.height);
         o.reset = reset;
         // Colour and motion are unjittered by now, and NGX's result does not
         // depend on this offset for them. Depth still carries the render
@@ -772,8 +802,7 @@ struct D3D12NativeDlssG::Impl {
         o.jitterOffset[1] = gb.jitter_y * float(gb.output_height) / gb.depth_height;
         o.multiFrameCount = count;
         o.multiFrameIndex = index;
-        o.mvecsSubrectSize = o.depthSubrectSize =
-            o.backbufferSubrectSize = {p.extent[0], p.extent[1]};
+        o.mvecsSubrectSize = o.depthSubrectSize = o.backbufferSubrectSize = {e.width, e.height};
         const auto result = NGX_D3D12_EVALUATE_DLSSG(list, e.handle, e.params, &in, &o);
         if (NVSDK_NGX_FAILED(result)) {
             report("evaluate failed", unsigned(result));
@@ -809,6 +838,8 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->diagnostic_decisions = environment(L"XRFG_TEST_NATIVE_DLSSG_DECISIONS");
         p->capture_only = environment(L"XRFG_TEST_NATIVE_DLSSG_CAPTURE_ONLY");
         p->test_output = environment(L"XRFG_TEST_NATIVE_DLSSG");
+        p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE");
+        p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
         HRESULT hr = acquire_ngx(device);
         if (FAILED(hr)) {
             return hr;
@@ -1004,13 +1035,35 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 }
             }
         }
-        // Changing viewport dimensions destroys neural history. A previous
-        // queue submission can still own it: poll its fence, never CPU-wait.
+        // Two eyes share one feature side by side, each eye's pack cell taking
+        // the half of the seam beside it; otherwise each eye has its own.
+        const bool shared = p.shared_stereo && bv.size() == 2;
+        const UINT feature_count = shared ? 1 : UINT(bv.size());
+        std::array<D3D12ImageRect, 2> eye_rect{};
         for (UINT i = 0; i < bv.size(); ++i) {
-            const auto r = rect(bv[i], UINT(p.source.Width), p.source.Height);
-            const auto &e = p.eyes[i];
-            if (e.handle && (e.width != r.width || e.height != r.height) && p.completion &&
-                p.completion->GetCompletedValue() < p.completion_value) {
+            eye_rect[i] = rect(bv[i], UINT(p.source.Width), p.source.Height);
+        }
+        std::array<Placement, 2> place{};
+        std::array<std::array<UINT, 2>, 2> feature_size{};
+        if (shared) {
+            const UINT w0 = eye_rect[0].width, w1 = eye_rect[1].width, half = p.seam / 2;
+            feature_size[0] = {w0 + p.seam + w1, std::max(eye_rect[0].height, eye_rect[1].height)};
+            place[0] = {0, 0, 0, w0 + half};
+            place[1] = {0, w0 + p.seam, w0 + half, w1 + p.seam - half};
+        } else {
+            for (UINT i = 0; i < bv.size(); ++i) {
+                feature_size[i] = {eye_rect[i].width, eye_rect[i].height};
+                place[i] = {i, 0, 0, eye_rect[i].width};
+            }
+        }
+        // Changing a feature's dimensions destroys its neural history. A
+        // previous queue submission can still own it: poll its fence, never
+        // CPU-wait.
+        for (UINT f = 0; f < feature_count; ++f) {
+            const auto &feature = p.features[f];
+            if (feature.handle &&
+                (feature.width != feature_size[f][0] || feature.height != feature_size[f][1]) &&
+                p.completion && p.completion->GetCompletedValue() < p.completion_value) {
                 return skip(Skip::resizing);
             }
         }
@@ -1020,79 +1073,118 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             --p.create_retry;
             return skip(Skip::feature_unavailable);
         }
-        for (UINT i = 0; i < bv.size(); ++i) {
-            const auto r = rect(bv[i], UINT(p.source.Width), p.source.Height);
-            auto &e = p.eyes[i];
+        for (UINT f = 0; f < feature_count; ++f) {
+            auto &feature = p.features[f];
             HRESULT hr = S_OK;
-            const bool creating = !e.handle || e.width != r.width || e.height != r.height;
+            const bool creating = !feature.handle || feature.width != feature_size[f][0] ||
+                                  feature.height != feature_size[f][1];
             if (creating) {
-                hr = p.create_eye(list, e, r.width, r.height);
+                hr = p.create_feature(list, feature, feature_size[f][0], feature_size[f][1]);
+                // A new feature holds no eye's history.
+                for (UINT i = 0; i < bv.size(); ++i) {
+                    if (place[i].feature == f) {
+                        p.eyes[i] = {};
+                    }
+                }
             }
             if (SUCCEEDED(hr)) {
-                hr = p.ensure_outputs(e, UINT(outputs.size()));
+                hr = p.ensure_outputs(feature, UINT(outputs.size()));
             }
             if (FAILED(hr)) {
                 p.report("feature creation failed", unsigned(hr));
-                // An existing eye may still be in use by a submitted pair;
-                // only a feature that failed to come up is torn down.
-                if (creating) p.release_eye(e);
-                p.create_retry = kCreateRetryPairs;
+                // An existing feature may still be in use by a submitted pair;
+                // only one that failed to come up is torn down.
+                if (creating) p.release_feature(feature);
+                // NGX may refuse the double-width feature; fall back to one per
+                // eye on the next pair instead of pausing.
+                if (shared) {
+                    p.shared_stereo = false;
+                } else {
+                    p.create_retry = kCreateRetryPairs;
+                }
                 return skip(Skip::feature_unavailable);
             }
         }
         Transitions t(list);
         t.to(a, kCommon, kAnyRead);
         t.to(b, kCommon, kAnyRead);
+        // Align A and the engine backward motion into B's camera plane. The
+        // NGX outputs can then keep the existing OpenXR B pose/FOV contract,
+        // instead of presenting midpoint-camera pixels as B.
+        const auto set_mapping = [&](Params &v, UINT i) {
+            XMStoreFloat4(reinterpret_cast<XMFLOAT4 *>(v.rotation), b_to_a(av[i], bv[i]));
+            const auto at = tangents(av[i].fov), bt = tangents(bv[i].fov);
+            std::copy(at.begin(), at.end(), v.source_tangents);
+            std::copy(bt.begin(), bt.end(), v.target_tangents);
+            v.eye_x = place[i].x;
+            v.cell_x = place[i].cell_x;
+            v.cell_width = place[i].cell_width;
+            v.cell_height = p.features[place[i].feature].height;
+            v.motion_normal[0] = 1.0F / p.features[place[i].feature].width;
+            v.motion_normal[1] = 1.0F / p.features[place[i].feature].height;
+        };
         std::array<Params, 2> eye_params{};
-        for (UINT i = 0; i < bv.size(); ++i) {
-            auto &e = p.eyes[i];
-            const UINT sl = guide_index(i);
-            const auto &ga = *ag->eyes[sl];
-            const auto &gb = *bg->eyes[sl];
-            const UINT base = i * kBlocksPerEye * kBlock;
-            // Align A and the engine backward motion into B's camera plane.
-            // The NGX outputs can then keep the existing OpenXR B pose/FOV
-            // contract, instead of presenting midpoint-camera pixels as B.
-            const auto set_mapping = [&](Params &v) {
-                XMStoreFloat4(reinterpret_cast<XMFLOAT4 *>(v.rotation), b_to_a(av[i], bv[i]));
-                const auto at = tangents(av[i].fov), bt = tangents(bv[i].fov);
-                std::copy(at.begin(), at.end(), v.source_tangents);
-                std::copy(bt.begin(), bt.end(), v.target_tangents);
-            };
-            auto &params = eye_params[i];
-            params = p.parameters(bv[i], gb, i, UINT(bv.size()));
-            set_mapping(params);
-            const bool continuous = e.serial == ga.serial && e.stream == ga.stream &&
-                                    e.epoch == ga.epoch;
-            if (!continuous ||
-                alignment_pixels(av[i], bv[i], params.extent[0], params.extent[1]) >
-                    kReseedPixels) {
-                auto pa = p.parameters(av[i], ga, i, UINT(av.size()));
-                set_mapping(pa);
-                pa.pack_previous = 1;
-                p.pack_input(list, t, slot, base, e, a, ga, pa, b);
-                if (FAILED(p.evaluate(list, t, e, bv[i], ga, pa, 1, 1, true))) {
+        for (UINT f = 0; f < feature_count; ++f) {
+            auto &feature = p.features[f];
+            const UINT first = shared ? 0 : f, last = shared ? 1 : f;
+            bool reseed = false;
+            for (UINT i = first; i <= last; ++i) {
+                const auto &ga = *ag->eyes[guide_index(i)];
+                const auto &gb = *bg->eyes[guide_index(i)];
+                auto &params = eye_params[i];
+                params = p.parameters(bv[i], gb, i, UINT(bv.size()));
+                set_mapping(params, i);
+                const auto &e = p.eyes[i];
+                reseed = reseed || e.serial != ga.serial || e.stream != ga.stream ||
+                         e.epoch != ga.epoch ||
+                         alignment_pixels(av[i], bv[i], params.extent[0], params.extent[1]) >
+                             kReseedPixels;
+            }
+            // A reset clears the whole feature's history, so a reseed packs the
+            // aligned A of every eye in it.
+            if (reseed) {
+                p.begin_pack(t, feature);
+                Params first_params{};
+                for (UINT i = first; i <= last; ++i) {
+                    const auto &ga = *ag->eyes[guide_index(i)];
+                    auto pa = p.parameters(av[i], ga, i, UINT(av.size()));
+                    set_mapping(pa, i);
+                    pa.pack_previous = 1;
+                    p.pack_input(list, t, slot, i * kBlocksPerEye * kBlock, feature, a, ga, pa, b);
+                    if (i == first) {
+                        first_params = pa;
+                    }
+                }
+                p.end_pack(t, feature);
+                if (FAILED(p.evaluate(list, t, feature, bv[first], *ag->eyes[guide_index(first)],
+                                      first_params, 1, 1, true))) {
                     t.restore();
                     return skip(Skip::evaluate_failed);
                 }
-                t.uav(e.generated[0].Get());
-                t.uav(e.disable[0].Get());
-                ++p.reseeds;
+                t.uav(feature.generated[0].Get());
+                t.uav(feature.disable[0].Get());
+                p.reseeds += last - first + 1;
             }
-            p.pack_input(list, t, slot, base + kBlock, e, b, gb, params, b);
+            p.begin_pack(t, feature);
+            for (UINT i = first; i <= last; ++i) {
+                p.pack_input(list, t, slot, i * kBlocksPerEye * kBlock + kBlock, feature, b,
+                             *bg->eyes[guide_index(i)], eye_params[i], b);
+            }
+            p.end_pack(t, feature);
             for (UINT output = 0; output < outputs.size(); ++output) {
-                if (FAILED(p.evaluate(list, t, e, bv[i], gb, params, UINT(outputs.size()),
-                                      output + 1, false))) {
+                if (FAILED(p.evaluate(list, t, feature, bv[first], *bg->eyes[guide_index(first)],
+                                      eye_params[first], UINT(outputs.size()), output + 1,
+                                      false))) {
                     t.restore();
                     return skip(Skip::evaluate_failed);
                 }
             }
         }
         // Every evaluation succeeded; only now are the outputs written.
-        for (UINT i = 0; i < bv.size(); ++i) {
+        for (UINT f = 0; f < feature_count; ++f) {
             for (UINT output = 0; output < outputs.size(); ++output) {
-                t.to(p.eyes[i].generated[output].Get(), kCommon, kPixelRead);
-                t.to(p.eyes[i].disable[output].Get(), kCommon, kPixelRead);
+                t.to(p.features[f].generated[output].Get(), kCommon, kPixelRead);
+                t.to(p.features[f].disable[output].Get(), kCommon, kPixelRead);
             }
         }
         for (const auto &output : outputs) {
@@ -1106,14 +1198,14 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         for (UINT output = 0; output < outputs.size(); ++output) {
             for (UINT i = 0; i < bv.size(); ++i) {
-                auto &e = p.eyes[i];
+                auto &feature = p.features[place[i].feature];
                 const auto &gb = *bg->eyes[guide_index(i)];
                 const auto &params = eye_params[i];
                 const UINT outbase = i * kBlocksPerEye * kBlock + (output + 2) * kBlock;
-                p.descriptors(slot, outbase, e, b, gb, output, b);
+                p.descriptors(slot, outbase, feature, b, gb, output, b);
                 list->SetGraphicsRootDescriptorTable(0, p.gpu(slot, outbase));
                 list->SetGraphicsRootDescriptorTable(1, p.gpu(slot, outbase + 6));
-                list->SetGraphicsRoot32BitConstants(2, 40, &params, 0);
+                list->SetGraphicsRoot32BitConstants(2, kParams, &params, 0);
                 const auto rh = p.target(slot, i * kMaxOutputs + output, outputs[output].image,
                                          params.color_slice);
                 list->OMSetRenderTargets(1, &rh, FALSE, nullptr);
@@ -1131,18 +1223,19 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             }
         }
         if (p.diagnostic_decisions) {
-            for (UINT i = 0; i < bv.size(); ++i) {
+            for (UINT f = 0; f < feature_count; ++f) {
                 for (UINT output = 0; output < outputs.size(); ++output) {
-                    t.to(p.eyes[i].disable[output].Get(), kCommon,
+                    t.to(p.features[f].disable[output].Get(), kCommon,
                          D3D12_RESOURCE_STATE_COPY_SOURCE);
                 }
             }
             t.flush();
+            // Eyes of a shared feature report its one decision.
             for (UINT i = 0; i < bv.size(); ++i) {
                 for (UINT output = 0; output < outputs.size(); ++output) {
                     list->CopyBufferRegion(p.decisions[slot].buffer.Get(),
-                        (i * 2 + output) * sizeof(UINT), p.eyes[i].disable[output].Get(), 0,
-                        sizeof(UINT));
+                        (i * 2 + output) * sizeof(UINT),
+                        p.features[place[i].feature].disable[output].Get(), 0, sizeof(UINT));
                 }
             }
             p.recorded_slot = slot;

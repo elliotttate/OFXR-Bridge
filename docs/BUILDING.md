@@ -115,23 +115,36 @@ OFXR never shuts NGX down. The driver keeps one NGX instance per adapter for
 the whole process, and `NVSDK_NGX_D3D12_Shutdown1` shuts down every loaded
 feature module for that device, including the game's own DLSS upscaler.
 
-Each logical eye has an independent native feature at its submitted viewport
-size. A is rotationally mapped into B's camera plane; the same mapping removes
+Both eyes of a stereo pair share one native feature, side by side, with a
+64-pixel seam between them that repeats each eye's edge. Most of an NGX
+evaluation's cost is fixed, so one double-width evaluation costs far less than
+one per eye; the seam keeps either eye's history from reaching the other.
+A single eye, or `XRFG_NATIVE_DLSSG_PER_EYE=1`, gives each eye its own feature
+at its submitted viewport size, and a shared feature NGX refuses falls back to
+that automatically. `XRFG_NATIVE_DLSSG_SEAM` overrides the seam width for
+experiments; without a seam the eyes visibly bleed into each other.
+
+A is rotationally mapped into B's camera plane; the same mapping removes
 tracked rotation/FOV motion from engine vectors, and transforms A depth into
 that plane. When that alignment moves any pixel by more than a tenth of a
 pixel, the feature is reseeded with the aligned A before evaluating B; a still
-head or a translation alone keeps the history. This preserves OFXR's current
-B pose/FOV contract and its bit-exact real-frame copy. On an RTX 5090 at
-2064x2208 per eye, a stereo pair takes about 1.7 ms of GPU time at 2X and
-2.4 ms at 3X, and reseeding adds about 0.3 ms. Set
-`XRFG_TEST_NATIVE_DLSSG_BENCH=1` and run `xrfg_d3d12_history_tests` to repeat
-that measurement. `XRFG_TEST_FG_BENCH=1` instead times every frame-generation
-method through the synthesizer (OFXR FidelityFX and NVIDIA flow, DLSS vectors,
-native 2X/3X) at 2004x2004 per eye, plus the game-side guide snapshot copies.
-Close VR games first: GPU contention makes the medians meaningless.
+head or a translation alone keeps the history. A reset clears a shared
+feature's history for both eyes, so a reseed packs the aligned A of both.
+This preserves OFXR's current B pose/FOV contract and its bit-exact real-frame
+copy. On an RTX 5090 at 2064x2208 per eye, a stereo pair takes about 1.3 ms of
+GPU time at 2X with a still head and 1.6 ms with a turning head (2.0 ms with a
+feature per eye), and 1.9/2.2 ms at 3X. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
+and run `xrfg_d3d12_history_tests` to repeat that measurement;
+`XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH=1` times NGX alone for one eye, two
+features and one shared feature. `XRFG_TEST_FG_BENCH=1` instead times every
+frame-generation method through the synthesizer (OFXR FidelityFX and NVIDIA
+flow, DLSS vectors, native 2X/3X) at 2004x2004 per eye, plus the game-side
+guide snapshot copies. Close VR games first: GPU contention makes the medians
+meaningless.
 
-NGX receives motion in pixels and colour display-encoded, as its programming
-guide requires. sRGB swapchains are encoded by the pack shader into 10-bit
+NGX receives colour display-encoded, as its programming guide requires, and
+motion as a fraction of the feature with the feature's size as its motion
+scale. The same vectors in pixels with a unit scale measurably lose quality. sRGB swapchains are encoded by the pack shader into 10-bit
 private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
 and decoded again when the generated image is written; unchanged pixels
 round-trip exactly. Resize retirement polls the previous completion

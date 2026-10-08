@@ -3600,6 +3600,96 @@ void test_native_dlss_reseeds_only_for_camera_motion(D3D12WarpFixture& fixture) 
     fixture.require_no_debug_errors();
 }
 
+// Opt-in with XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH: GPU time of NGX for one
+// eye, two separate eyes, and both eyes as one side-by-side feature. NGX's
+// cost is sublinear in pixels, so the layouts show its fixed per-evaluation
+// share. Still head, 2X, so no reseeding.
+void bench_native_dlss_layouts(D3D12WarpFixture& fixture) {
+    constexpr UINT eye_width = 2004, height = 2004, warmup = 8, measured = 32;
+    struct Layout {
+        const char* name;
+        UINT width, slices, views;
+    };
+    const std::array<Layout, 3> layouts{{{"one eye, one feature", eye_width, 1, 1},
+                                         {"two eyes, two features", eye_width, 2, 2},
+                                         {"two eyes side by side, one feature", eye_width * 2, 1, 1}}};
+    ComPtr<ID3D12QueryHeap> queries;
+    D3D12_QUERY_HEAP_DESC query_description{};
+    query_description.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    query_description.Count = 2;
+    require_hresult(fixture.device()->CreateQueryHeap(&query_description, IID_PPV_ARGS(&queries)),
+                    "layout bench query heap");
+    auto readback = create_buffer(fixture, D3D12_HEAP_TYPE_READBACK, 2 * sizeof(UINT64),
+                                  D3D12_RESOURCE_STATE_COPY_DEST);
+    UINT64 frequency{};
+    require_hresult(fixture.queue()->GetTimestampFrequency(&frequency), "layout bench frequency");
+    for (const auto& layout : layouts) {
+        std::array<ComPtr<ID3D12Resource>, 2> sources{
+            create_source_texture(fixture, layout.width, height, D3D12_RESOURCE_STATE_COMMON, UINT16(layout.slices)),
+            create_source_texture(fixture, layout.width, height, D3D12_RESOURCE_STATE_COMMON, UINT16(layout.slices))};
+        auto image = create_source_texture(fixture, layout.width, height,
+                                           D3D12_RESOURCE_STATE_RENDER_TARGET, UINT16(layout.slices));
+        auto motion = create_and_upload_game_motion(fixture, layout.width * 2 / 3, height * 2 / 3, {-3, 3});
+        auto depth = create_native_test_depth(fixture, layout.width * 2 / 3, height * 2 / 3);
+        xrfg::D3D12NativeDlssG native;
+        require_hresult(native.initialize(fixture.device(), fixture.queue(), sources[0]->GetDesc(), kFormat),
+                        "layout bench initialization");
+        const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{image.Get()}}};
+        auto views = make_reprojection_views();
+        for (UINT view = 0; view < layout.views; ++view) {
+            views[view].image_rect = {0, 0, layout.width, height};
+            views[view].array_slice = view;
+        }
+        std::vector<double> samples;
+        for (UINT pair = 1; pair <= warmup + measured; ++pair) {
+            xrfg::DlssMotionVectorSet a_guides{}, b_guides{};
+            a_guides.eye_count = b_guides.eye_count = layout.views;
+            for (UINT eye = 0; eye < layout.views; ++eye) {
+                for (const UINT next : {0U, 1U}) {
+                    auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                    f->stream = 91 + eye;
+                    f->epoch = 1;
+                    f->serial = pair + next;
+                    f->previous_serial = pair + next - 1;
+                    f->motion_vectors = motion;
+                    f->depth = depth;
+                    f->producer_queue = fixture.queue();
+                    f->output_width = layout.width;
+                    f->output_height = height;
+                    f->motion_width = f->depth_width = layout.width * 2 / 3;
+                    f->motion_height = f->depth_height = height * 2 / 3;
+                    f->motion_slice = f->output_slice = eye;
+                    f->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+                    (next ? b_guides : a_guides).eyes[eye] = f;
+                }
+            }
+            HRESULT recorded = E_FAIL;
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+                recorded = native.record(list, 0, sources[pair & 1].Get(), sources[(pair + 1) & 1].Get(),
+                                         std::span(views.data(), layout.views),
+                                         std::span(views.data(), layout.views), &a_guides, &b_guides,
+                                         outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+                list->EndQuery(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
+                list->ResolveQueryData(queries.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, readback.Get(), 0);
+            });
+            require(recorded == S_OK, std::string("layout bench pair not generated: ") + layout.name);
+            void* mapped{};
+            const D3D12_RANGE range{0, 2 * sizeof(UINT64)};
+            require_hresult(readback->Map(0, &range, &mapped), "layout bench readback");
+            const auto* stamps = static_cast<const UINT64*>(mapped);
+            if (pair > warmup) samples.push_back(double(stamps[1] - stamps[0]) * 1e6 / double(frequency));
+            const D3D12_RANGE no_write{0, 0};
+            readback->Unmap(0, &no_write);
+        }
+        std::sort(samples.begin(), samples.end());
+        std::cout << "layout bench " << layout.name << " (" << layout.width << "x" << height
+                  << "): p10_us=" << samples[samples.size() / 10]
+                  << " median_us=" << samples[samples.size() / 2] << '\n';
+    }
+    fixture.require_no_debug_errors();
+}
+
 // Opt-in with XRFG_TEST_NATIVE_DLSSG_BENCH: GPU time of one native stereo pair
 // at a headset-class eye size, with engine guides at a DLSS-quality render
 // size. A still head keeps NGX history; a turning head changes the camera on
@@ -4875,6 +4965,11 @@ int main() {
             return 0;
         }
 #ifdef XRFG_NATIVE_DLSSG
+        if (std::getenv("XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH")) {
+            D3D12WarpFixture bench_fixture(true);
+            bench_native_dlss_layouts(bench_fixture);
+            return 0;
+        }
         if (std::getenv("XRFG_TEST_NATIVE_DLSSG_BENCH")) {
             D3D12WarpFixture bench_fixture(true);
             bench_native_dlss_pairs(bench_fixture);

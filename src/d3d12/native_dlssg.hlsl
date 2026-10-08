@@ -25,6 +25,13 @@ cbuffer Params : register(b0) {
     uint PackPrevious;
     uint EncodeSrgb;
     float4 DepthConvention; // near, far, infinite, unused
+    // Where this eye sits in the feature's private textures, and the cell of
+    // them this dispatch writes: the eye plus its share of any seam beside it.
+    uint EyeX;
+    uint CellX;
+    uint CellWidth;
+    uint CellHeight;
+    float2 MotionNormal; // one over the feature's size
 };
 
 float3 rotate(float3 ray, float4 q) {
@@ -64,12 +71,14 @@ float4 sample_color(float2 coordinate) {
 }
 
 [numthreads(8, 8, 1)] void PackNativeDlssG(uint3 id : SV_DispatchThreadID) {
-    if (any(id.xy >= Extent)) {
+    if (id.x >= CellWidth || id.y >= CellHeight) {
         return;
     }
-    uint2 p = id.xy;
-    // The private textures are mono. Each eye/subrect gets its own feature and
-    // its own temporal history, including a double-wide projection texture.
+    // Both eyes can share one feature, side by side. Pixels of the cell
+    // outside the eye - the seam between eyes, or rows below a shorter eye -
+    // repeat the eye's nearest edge, so NGX sees each eye as if alone.
+    uint2 cell = uint2(CellX + id.x, id.y);
+    uint2 p = uint2(clamp(int2(cell) - int2(EyeX, 0), int2(0, 0), int2(Extent) - 1));
     float2 uv = (float2(p) + 0.5) / float2(Extent);
     float3 ray = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
                         lerp(TargetTangents.z, TargetTangents.w, uv.y), -1);
@@ -77,9 +86,9 @@ float4 sample_color(float2 coordinate) {
     float2 previous_uv = source_uv(previous_ray, SourceTangents);
     if (PackPrevious != 0) {
         if (previous_ray.z >= -0.00001 || any(previous_uv < 0) || any(previous_uv > 1)) {
-            Color[p] = display_texel(CurrentFallback.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
-            Motion[p] = 0;
-            Depth[p] = ReversedDepth != 0 ? 0 : 1;
+            Color[cell] = display_texel(CurrentFallback.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
+            Motion[cell] = 0;
+            Depth[cell] = ReversedDepth != 0 ? 0 : 1;
             return;
         }
         uv = previous_uv;
@@ -112,8 +121,8 @@ float4 sample_color(float2 coordinate) {
         }
     }
     if (PackPrevious != 0) {
-        Color[p] = display(sample_color(OutputRect.xy + uv * float2(Extent) - 0.5));
-        Motion[p] = 0; // the reset seed has no predecessor
+        Color[cell] = display(sample_color(OutputRect.xy + uv * float2(Extent) - 0.5));
+        Motion[cell] = 0; // the reset seed has no predecessor
         float normal_z = ReversedDepth != 0 ? 1 - z : z;
         float n = DepthConvention.x, far_plane = DepthConvention.y;
         float linear_z =
@@ -124,9 +133,9 @@ float4 sample_color(float2 coordinate) {
         float target_depth = DepthConvention.z != 0
                                  ? 1 - n / target_z
                                  : far_plane * (target_z - n) / (target_z * (far_plane - n));
-        Depth[p] = saturate(ReversedDepth != 0 ? 1 - target_depth : target_depth);
+        Depth[cell] = saturate(ReversedDepth != 0 ? 1 - target_depth : target_depth);
     } else {
-        Color[p] = display_texel(SourceColor.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
+        Color[cell] = display_texel(SourceColor.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
         float2 backward = mv * MotionScale + JitterDelta;
         float2 a_uv = (float2(p) + 0.5 + backward) / float2(Extent);
         float3 a_ray = float3(lerp(SourceTangents.x, SourceTangents.y, a_uv.x),
@@ -134,9 +143,10 @@ float4 sample_color(float2 coordinate) {
         float4 inverse_rotation = float4(-Rotation.xyz, Rotation.w);
         float3 b_ray = rotate(a_ray, inverse_rotation);
         float2 b_uv = source_uv(b_ray, TargetTangents);
-        Motion[p] = b_uv - (float2(p) + 0.5) / float2(Extent);
+        // As a fraction of the whole feature, which may hold both eyes.
+        Motion[cell] = (b_uv - (float2(p) + 0.5) / float2(Extent)) * float2(Extent) * MotionNormal;
         // Dilation chooses motion, while depth remains at the original pixel.
-        Depth[p] = SourceDepth.Load(int4(dp, GuideSlice, 0));
+        Depth[cell] = SourceDepth.Load(int4(dp, GuideSlice, 0));
     }
 }
 
@@ -155,7 +165,7 @@ float4 NativeDlssGPS(Vertex input) : SV_Target {
         return current;
     }
     // The private colour may hold two alpha bits; the real frame's alpha is exact.
-    float3 generated = Generated.Load(int3(p - int2(OutputRect.xy), 0)).rgb;
+    float3 generated = Generated.Load(int3(p - int2(OutputRect.xy) + int2(EyeX, 0), 0)).rgb;
     // An sRGB target encodes only approximately. Decoding the nearest 8-bit
     // code, rather than a 10-bit value between two, keeps unmoved pixels exact.
     return float4(EncodeSrgb != 0 ? decode_srgb(round(generated * 255.0) / 255.0) : generated,
