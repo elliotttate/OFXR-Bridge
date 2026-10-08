@@ -4163,9 +4163,11 @@ void test_rotation_aware_synthesis_beats_uncompensated_flow(
             kRotationWidth,
             kRotationHeight,
             [&](UINT eye, UINT x, UINT y) {
+                // Like an engine, point uncovered pixels at their source
+                // outside A's view rather than claiming they did not move.
                 float source_x = static_cast<float>(x);
                 float source_y = static_cast<float>(y);
-                const bool valid = target_pixel_maps_to_source(
+                (void)target_pixel_maps_to_source(
                     views_a[eye],
                     views_b[eye],
                     kRotationWidth,
@@ -4174,11 +4176,9 @@ void test_rotation_aware_synthesis_beats_uncompensated_flow(
                     y,
                     &source_x,
                     &source_y);
-                return valid
-                    ? std::array<float, 2>{
-                          source_x - static_cast<float>(x),
-                          source_y - static_cast<float>(y)}
-                    : std::array<float, 2>{0.0F, 0.0F};
+                return std::array<float, 2>{
+                    source_x - static_cast<float>(x),
+                    source_y - static_cast<float>(y)};
             });
     auto game_frame_a = std::make_shared<xrfg::DlssMotionVectorFrame>();
     game_frame_a->stream = 31;
