@@ -3096,7 +3096,8 @@ void test_dlss_guide_snapshots_copy_only_the_read_region(D3D12WarpFixture& fixtu
     fixture.require_no_debug_errors();
 }
 
-[[nodiscard]] ComPtr<ID3D12Resource> create_native_test_depth(D3D12WarpFixture& fixture, UINT width, UINT height) {
+[[nodiscard]] ComPtr<ID3D12Resource> create_native_test_depth(D3D12WarpFixture& fixture, UINT width, UINT height,
+    float (*depth_at)(UINT eye, UINT x, UINT y) = nullptr) {
     ComPtr<ID3D12Resource> native_depth;
     auto description = stereo_texture_description(width,height);
     description.Format=DXGI_FORMAT_R32_FLOAT; description.Flags=D3D12_RESOURCE_FLAG_NONE;
@@ -3110,7 +3111,7 @@ void test_dlss_guide_snapshots_copy_only_the_read_region(D3D12WarpFixture& fixtu
     void* mapped{}; require_hresult(upload->Map(0,nullptr,&mapped),"map native depth");
     for(UINT eye=0;eye<kEyeCount;++eye) for(UINT y=0;y<height;++y) {
         auto* row=reinterpret_cast<float*>(static_cast<std::byte*>(mapped)+fp[eye].Offset+SIZE_T(y)*fp[eye].Footprint.RowPitch);
-        std::fill_n(row,width,0.5F);
+        for(UINT x=0;x<width;++x) row[x]=depth_at?depth_at(eye,x,y):0.5F;
     }
     upload->Unmap(0,nullptr);
     fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list){
@@ -3785,6 +3786,147 @@ void test_native_dlss_reseeds_only_for_camera_motion(D3D12WarpFixture& fixture) 
     return pattern;
 }
 
+void set_texture_state(D3D12WarpFixture& fixture, ID3D12Resource* texture,
+                       D3D12_RESOURCE_STATES from, D3D12_RESOURCE_STATES to) {
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+        const auto barrier = transition_barrier(texture, from, to);
+        list->ResourceBarrier(1, &barrier);
+    });
+}
+
+// A foreground square moves three times faster than the background, with
+// half-resolution vectors and edges between their texels, so pixels at its
+// edges need the nearer surface's motion. NGX dilates the vectors itself.
+void test_native_dlss_depth_edges(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 256, height = 128;
+    constexpr int box_x = 97, box_y = 33, box_size = 63, fg_motion = 12, bg_motion = 4;
+    const auto inside = [](int x, int y, int shift) {
+        return x >= box_x + shift && x < box_x + box_size + shift && y >= box_y &&
+               y < box_y + box_size;
+    };
+    const auto scene = [&](int bg_shift, int fg_shift) {
+        StereoPattern pattern;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto& bytes = pattern[eye];
+            bytes.assign(std::size_t(width) * height * kBytesPerPixel, 0);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    RgbaBytes texel{0, 0, 0, 255};
+                    if (inside(int(x), int(y), fg_shift)) {
+                        const bool stripe = ((int(x) - fg_shift) / 4 + int(y) / 4) % 2 != 0;
+                        texel = stripe ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255};
+                    } else if (int(x) >= bg_shift) {
+                        texel = motion_texel(UINT(int(x) - bg_shift), y, eye);
+                    }
+                    std::copy(texel.begin(), texel.end(),
+                              bytes.begin() + (std::size_t(y) * width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return pattern;
+    };
+    const auto a_pattern = scene(0, 0), b_pattern = scene(bg_motion, fg_motion);
+    const auto expected = scene(bg_motion / 2, fg_motion / 2);
+    std::array<ComPtr<ID3D12Resource>, 2> sources{create_source_texture(fixture, width, height),
+                                                  create_source_texture(fixture, width, height)};
+    upload_pattern(fixture, sources[0].Get(), a_pattern);
+    upload_pattern(fixture, sources[1].Get(), b_pattern);
+    // Native generation takes its sources at rest in COMMON.
+    for (auto& source : sources) {
+        set_texture_state(fixture, source.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                          D3D12_RESOURCE_STATE_COMMON);
+    }
+    auto output = create_source_texture(fixture, width, height);
+    const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+    // Nearer surfaces have smaller depth here (not reversed).
+    auto depth_a = create_native_test_depth(fixture, width, height, [](UINT, UINT x, UINT y) {
+        return x >= box_x && x < box_x + box_size && y >= box_y && y < box_y + box_size ? 0.2F
+                                                                                       : 0.8F;
+    });
+    auto depth_b = create_native_test_depth(fixture, width, height, [](UINT, UINT x, UINT y) {
+        return x >= box_x + fg_motion && x < box_x + box_size + fg_motion && y >= box_y &&
+                       y < box_y + box_size
+                   ? 0.2F
+                   : 0.8F;
+    });
+    auto still = create_and_upload_game_motion(fixture, width / 2, height / 2, {0, 0});
+    auto motion = create_and_upload_game_motion_field(
+        fixture, width / 2, height / 2, [&](UINT, UINT mx, UINT my) {
+            const bool fg = inside(int(mx * 2 + 1), int(my * 2 + 1), fg_motion);
+            return std::array<float, 2>{-float(fg ? fg_motion : bg_motion) / 2, 0.0F};
+        });
+    const auto guides = [&](std::uint64_t serial, const ComPtr<ID3D12Resource>& vectors,
+                            const ComPtr<ID3D12Resource>& depth) {
+        xrfg::DlssMotionVectorSet set{};
+        set.eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            f->stream = 91 + eye;
+            f->epoch = 1;
+            f->serial = serial;
+            f->previous_serial = serial - 1;
+            f->motion_vectors = vectors;
+            f->depth = depth;
+            f->producer_queue = fixture.queue();
+            f->output_width = f->depth_width = width;
+            f->output_height = f->depth_height = height;
+            f->motion_width = width / 2;
+            f->motion_height = height / 2;
+            f->motion_slice = f->output_slice = eye;
+            f->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+            set.eyes[eye] = f;
+        }
+        return set;
+    };
+    const auto views = make_reprojection_views();
+    const auto band_error = [&](const StereoPattern& actual, UINT eye) {
+        // Pixels within six of the square's interpolated left or right edge.
+        double total = 0;
+        std::size_t count = 0;
+        for (UINT y = box_y; y < box_y + box_size; ++y) {
+            for (UINT x = 0; x < width; ++x) {
+                const int left = box_x + fg_motion / 2, right = left + box_size;
+                if (std::abs(int(x) - left) >= 6 && std::abs(int(x) - right) >= 6) continue;
+                const std::size_t offset = (std::size_t(y) * width + x) * kBytesPerPixel;
+                for (UINT c = 0; c < 3; ++c, ++count)
+                    total += std::abs(int(actual[eye][offset + c]) - int(expected[eye][offset + c]));
+            }
+        }
+        return total / double(count);
+    };
+    {
+        xrfg::D3D12NativeDlssG native;
+        require_hresult(native.initialize(fixture.device(), fixture.queue(),
+                                          sources[0]->GetDesc(), kFormat),
+                        "native depth-edge initialization");
+        const auto seed_a = guides(1, still, depth_a), seed_b = guides(2, still, depth_a);
+        const auto moved = guides(3, motion, depth_b);
+        HRESULT seeded = E_FAIL, generated = E_FAIL;
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            seeded = native.record(list, 0, sources[0].Get(), sources[0].Get(), views, views,
+                                   &seed_a, &seed_b, outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        });
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+            generated = native.record(list, 0, sources[0].Get(), sources[1].Get(), views, views,
+                                      &seed_b, &moved, outputs,
+                                      D3D12_RESOURCE_STATE_RENDER_TARGET);
+        });
+        require(seeded == S_OK && generated == S_OK, "native depth-edge pair failed");
+        const auto actual = readback_pattern(fixture, output.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+        const auto blend = midpoint_pattern(a_pattern, b_pattern);
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            const double error = mean_absolute_rgb_error(actual, expected, width, height, eye, 16);
+            const double edge = band_error(actual, eye), blend_edge = band_error(blend, eye);
+            std::cout << "native depth edges eye=" << eye << " mae=" << error
+                      << " edge_mae=" << edge << " blend_edge_mae=" << blend_edge << '\n';
+            require(error < 0.5 && edge < 3 && edge < blend_edge * 0.05,
+                    "native generation misplaced a moving foreground edge for eye " +
+                        std::to_string(eye));
+        }
+    }
+    fixture.require_no_debug_errors();
+}
+
 // Opt-in with XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP: how well native
 // generation reproduces a static, detailed scene after a small head rotation
 // (about 0.25 to 16 pixels). Every rotation reseeds the history with the
@@ -3799,11 +3941,14 @@ void bench_native_dlss_rotation_sweep(D3D12WarpFixture& fixture) {
     const auto still = make_reprojection_views();
     const auto still_pattern = detailed_world_pattern(width, height, still);
     std::array<ComPtr<ID3D12Resource>, 2> still_sources{
-        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON),
-        create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON)};
-    upload_pattern(fixture, still_sources[0].Get(), still_pattern);
-    upload_pattern(fixture, still_sources[1].Get(), still_pattern);
-    auto turned_source = create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON);
+        create_source_texture(fixture, width, height),
+        create_source_texture(fixture, width, height)};
+    for (auto& source : still_sources) {
+        upload_pattern(fixture, source.Get(), still_pattern);
+        set_texture_state(fixture, source.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                          D3D12_RESOURCE_STATE_COMMON);
+    }
+    auto turned_source = create_source_texture(fixture, width, height);
     auto output = create_source_texture(fixture, width, height);
     const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
     const auto guides = [&](std::uint64_t serial, const ComPtr<ID3D12Resource>& motion) {
@@ -3830,6 +3975,8 @@ void bench_native_dlss_rotation_sweep(D3D12WarpFixture& fixture) {
         const auto turned = make_reprojection_views(yaw_degrees * 3.14159265F / 180.0F);
         const auto turned_pattern = detailed_world_pattern(width, height, turned);
         upload_pattern(fixture, turned_source.Get(), turned_pattern);
+        set_texture_state(fixture, turned_source.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                          D3D12_RESOURCE_STATE_COMMON);
         auto motion = create_and_upload_game_motion_field(
             fixture, width, height, [&](UINT eye, UINT x, UINT y) {
                 float sx = float(x), sy = float(y);
@@ -3869,7 +4016,10 @@ void bench_native_dlss_rotation_sweep(D3D12WarpFixture& fixture) {
                                                  height, eye, margin);
         }
         std::cout << '\n';
+        set_texture_state(fixture, turned_source.Get(), D3D12_RESOURCE_STATE_COMMON,
+                          D3D12_RESOURCE_STATE_RENDER_TARGET);
     }
+    fixture.require_no_debug_errors();
 }
 
 // Opt-in with XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH: GPU time of NGX for one
@@ -5254,6 +5404,7 @@ int main() {
         }
         if (std::getenv("XRFG_TEST_NATIVE_DLSSG")) {
             D3D12WarpFixture native_fixture(true);
+            test_native_dlss_depth_edges(native_fixture);
             test_native_dlss_packed_stereo(native_fixture, false);
             test_native_dlss_packed_stereo(native_fixture, true);
             test_native_dlss_packed_stereo(native_fixture, false, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);

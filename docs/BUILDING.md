@@ -145,9 +145,9 @@ measured two to five times the error on detailed content even at a quarter
 pixel of rotation; `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` repeats that
 quality measurement for the reseeding path.
 This preserves OFXR's current B pose/FOV contract and its bit-exact real-frame
-copy. On an RTX 5090 at 2064x2208 per eye, a stereo pair takes about 1.3 ms of
-GPU time at 2X with a still head and 1.6 ms with a turning head (2.0 ms with a
-feature per eye), and 1.9/2.2 ms at 3X. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
+copy. On an RTX 5090 at 2064x2208 per eye, a stereo pair takes about 1.24 ms
+of GPU time at 2X with a still head and 1.53 ms with a turning head (2.0 ms
+with a feature per eye), and 1.85/2.18 ms at 3X. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
 and run `xrfg_d3d12_history_tests` to repeat that measurement;
 `XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH=1` times NGX alone for one eye, two
 features and one shared feature. `XRFG_TEST_FG_BENCH=1` instead times every
@@ -158,7 +158,9 @@ meaningless.
 
 NGX receives colour display-encoded, as its programming guide requires, and
 motion as a fraction of the feature with the feature's size as its motion
-scale. The same vectors in pixels with a unit scale measurably lose quality. sRGB swapchains are encoded by the pack shader into 10-bit
+scale. The same vectors in pixels with a unit scale measurably lose quality.
+The vectors are passed undilated and NGX dilates them at depth edges; dilating
+them in the pack measured the same and cost about 35 us more per pair. sRGB swapchains are encoded by the pack shader into 10-bit
 private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
 and decoded again when the generated image is written; unchanged pixels
 round-trip exactly. Resize retirement polls the previous completion

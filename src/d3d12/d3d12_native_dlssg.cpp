@@ -787,7 +787,7 @@ struct D3D12NativeDlssG::Impl {
         o.cameraAspectRatio = float(p.extent[0]) / p.extent[1];
         o.depthInverted = gb.depth_inverted;
         o.cameraMotionIncluded = true;
-        o.motionVectorsDilated = true;
+        o.motionVectorsDilated = false; // NGX dilates them at depth edges
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
         // The pack writes motion as a fraction of the feature. NGX scales it
         // to pixels itself: handing it pixels with a unit scale instead costs

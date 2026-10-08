@@ -102,24 +102,10 @@ float4 sample_color(float2 coordinate) {
     int2 dp = clamp(int2(DepthRect.xy + uv * DepthRect.zw), depth_lo, depth_hi);
     int2 mp = clamp(int2(MotionRect.xy + uv * MotionRect.zw), motion_lo, motion_hi);
     float z = SourceDepth.Load(int4(dp, GuideSlice, 0));
+    // NGX dilates the vectors at depth edges itself, as it does for a game's
+    // own frame generation; doing it here measured no different and cost more.
+    // Jitter and MV_Scale follow the bridge's existing guide contract.
     float2 mv = SourceMotion.Load(int4(mp, MotionSlice, 0));
-    // Foreground dilation at depth edges avoids interpolating unrelated motion
-    // vectors. Jitter and MV_Scale follow the bridge's existing guide contract.
-    // The aligned reset seed uses only depth; dilation has no role there.
-    [branch] if (PackPrevious == 0) {
-        [unroll] for (int y = -1; y <= 1; ++y) {
-            [unroll] for (int x = -1; x <= 1; ++x) {
-                int2 q = clamp(dp + int2(x, y), depth_lo, depth_hi);
-                float d = SourceDepth.Load(int4(q, GuideSlice, 0));
-                if ((ReversedDepth != 0 && d > z) || (ReversedDepth == 0 && d < z)) {
-                    z = d;
-                    float2 quv = (float2(q) + 0.5 - DepthRect.xy) / DepthRect.zw;
-                    int2 qm = clamp(int2(MotionRect.xy + quv * MotionRect.zw), motion_lo, motion_hi);
-                    mv = SourceMotion.Load(int4(qm, MotionSlice, 0));
-                }
-            }
-        }
-    }
     if (PackPrevious != 0) {
         Color[cell] = display(sample_color(OutputRect.xy + uv * float2(Extent) - 0.5));
         Motion[cell] = 0; // the reset seed has no predecessor
