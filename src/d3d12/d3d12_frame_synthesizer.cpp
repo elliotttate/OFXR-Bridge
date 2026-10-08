@@ -728,6 +728,8 @@ struct D3D12FrameSynthesizer::Impl {
         // The pair wrote only the span marks: FidelityFX, game motion vectors
         // and native generation never run the NVIDIA optical-flow stages.
         bool timing_span_only{};
+        // A span end was written and resolved since the slot was reset.
+        bool timing_resolved{};
     };
 
     struct RollingSource {
@@ -2564,7 +2566,8 @@ struct D3D12FrameSynthesizer::Impl {
     void create_source_views(
         WorkSlot& slot,
         ID3D12Resource* previous_resource,
-        ID3D12Resource* current_resource) noexcept {
+        ID3D12Resource* current_resource,
+        UINT blocks = 0) noexcept {
         D3D12_SHADER_RESOURCE_VIEW_DESC description{};
         description.Format = view_format;
         description.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -2577,7 +2580,7 @@ struct D3D12FrameSynthesizer::Impl {
         description.Texture2DArray.ResourceMinLODClamp = 0.0F;
         const D3D12_CPU_DESCRIPTOR_HANDLE start =
             slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
-        const UINT block_count = image_description.DepthOrArraySize;
+        const UINT block_count = std::max<UINT>(blocks, image_description.DepthOrArraySize);
         for (UINT block = 0; block < block_count; ++block) {
             const UINT base = block * kDescriptorBlockSize;
             device->CreateShaderResourceView(
@@ -2593,9 +2596,10 @@ struct D3D12FrameSynthesizer::Impl {
 
     [[nodiscard]] HRESULT create_game_motion_views(
         WorkSlot& slot,
-        const DlssMotionVectorSet& frames) noexcept {
+        const DlssMotionVectorSet& frames,
+        UINT view_count) noexcept {
         if (frames.eye_count == 0 ||
-            frames.eye_count != image_description.DepthOrArraySize ||
+            !game_motion_eyes_match(frames.eye_count, view_count) ||
             frames.eye_count > kDlssMotionVectorEyeCount) {
             return E_INVALIDARG;
         }
@@ -2657,6 +2661,26 @@ struct D3D12FrameSynthesizer::Impl {
     // ALLOW_SIMULTANEOUS_ACCESS and copying across on the application's
     // queue - which is what the D3D11 interop path already does.
 
+    // One texture can hold the views side by side while the producer
+    // publishes a guide per view; each view then uses its own guide, as
+    // native generation maps them.
+    [[nodiscard]] bool side_by_side_guides(UINT eye_count, UINT view_count) const noexcept {
+        return image_description.DepthOrArraySize == 1 && view_count > 1 &&
+            eye_count == view_count;
+    }
+    [[nodiscard]] bool game_motion_eyes_match(UINT eye_count, UINT view_count) const noexcept {
+        return eye_count == image_description.DepthOrArraySize ||
+            side_by_side_guides(eye_count, view_count);
+    }
+    // The guide eye, and so the descriptor block, a view of the pair uses.
+    [[nodiscard]] UINT game_motion_guide(std::span<const D3D12ReprojectionView> views,
+        UINT view_index, UINT eye_count) const noexcept {
+        return side_by_side_guides(eye_count, static_cast<UINT>(views.size()))
+            ? view_index
+            : resolved_array_slice(views[view_index], view_index, views.size(),
+                  image_description.DepthOrArraySize);
+    }
+
     [[nodiscard]] bool valid_game_motion_pair(
         const RollingSource& previous_source,
         const RollingSource& current_source) const noexcept {
@@ -2664,7 +2688,7 @@ struct D3D12FrameSynthesizer::Impl {
         const auto& current = current_source.motion_vectors;
         if (!previous_vectors || !current || previous_vectors->eye_count == 0 ||
             previous_vectors->eye_count != current->eye_count ||
-            current->eye_count != image_description.DepthOrArraySize ||
+            !game_motion_eyes_match(current->eye_count, current_source.view_count) ||
             current->eye_count > kDlssMotionVectorEyeCount) {
             return false;
         }
@@ -2752,10 +2776,9 @@ struct D3D12FrameSynthesizer::Impl {
             }
         }
         for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
-            const UINT slice = resolved_array_slice(target_views[view_index], view_index,
-                target_views.size(), image_description.DepthOrArraySize);
-            if (slice >= guides->eye_count) return E_INVALIDARG;
-            const auto& guide = guides->eyes[slice];
+            const UINT eye = game_motion_guide(target_views, view_index, guides->eye_count);
+            if (eye >= guides->eye_count) return E_INVALIDARG;
+            const auto& guide = guides->eyes[eye];
             const D3D12ImageRect rect = resolved_rect(
                 target_views[view_index].image_rect,
                 static_cast<UINT>(image_description.Width), image_description.Height);
@@ -2773,8 +2796,9 @@ struct D3D12FrameSynthesizer::Impl {
                 return E_INVALIDARG;
             }
         }
-        create_source_views(slot, previous_resource, current_resource);
-        HRESULT result = create_game_motion_views(slot, *guides);
+        create_source_views(slot, previous_resource, current_resource, guides->eye_count);
+        HRESULT result = create_game_motion_views(slot, *guides,
+            static_cast<UINT>(target_views.size()));
         if (FAILED(result)) return result;
         // NVIDIA work slots also own a second command list. This route bypasses
         // OFA, but the list was reset with the slot and must still be closed
@@ -2831,9 +2855,10 @@ struct D3D12FrameSynthesizer::Impl {
             for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
                 const UINT slice = resolved_array_slice(target_views[view_index], view_index,
                     target_views.size(), image_description.DepthOrArraySize);
-                if (slice >= guides->eye_count) return E_INVALIDARG;
-                const auto& guide = guides->eyes[slice];
-                const UINT descriptor_base = slice * kDescriptorBlockSize;
+                const UINT eye = game_motion_guide(target_views, view_index, guides->eye_count);
+                if (eye >= guides->eye_count) return E_INVALIDARG;
+                const auto& guide = guides->eyes[eye];
+                const UINT descriptor_base = eye * kDescriptorBlockSize;
                 slot.command_list->SetGraphicsRootDescriptorTable(0,
                     offset_gpu_handle(gpu_start, descriptor_base, descriptor_increment));
                 slot.command_list->SetGraphicsRootDescriptorTable(1,
@@ -2879,16 +2904,8 @@ struct D3D12FrameSynthesizer::Impl {
             }
         }
 
-        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
-            // As the other paths: the span ends before the current copy, and
-            // only the two span marks were written.
-            slot.command_list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-                slot.timing_query_base + kSpanEnd);
-            slot.command_list->ResolveQueryData(nvidia_timestamp_heap.Get(),
-                D3D12_QUERY_TYPE_TIMESTAMP, slot.timing_query_base + kSpanBegin, 2,
-                nvidia_timestamp_readback.Get(),
-                UINT64(slot.timing_query_base + kSpanBegin) * sizeof(std::uint64_t));
-        }
+        // As the other paths: the span ends before the current copy.
+        end_timing_span(slot);
         std::array<D3D12_RESOURCE_BARRIER, 5> after{};
         UINT after_count = 0;
         after[after_count++] = transition_barrier(previous_resource,
@@ -2919,7 +2936,21 @@ struct D3D12FrameSynthesizer::Impl {
         return S_OK;
     }
 
+    // Ends the pair's GPU span and resolves its two marks for readback. The
+    // NVIDIA flow path resolves its own stage marks on its synthesis list.
+    void end_timing_span(WorkSlot& slot) noexcept {
+        if (!nvidia_gpu_timing_enabled || !nvidia_timestamp_heap) return;
+        slot.command_list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+            slot.timing_query_base + kSpanEnd);
+        slot.command_list->ResolveQueryData(nvidia_timestamp_heap.Get(),
+            D3D12_QUERY_TYPE_TIMESTAMP, slot.timing_query_base + kSpanBegin, 2,
+            nvidia_timestamp_readback.Get(),
+            UINT64(slot.timing_query_base + kSpanBegin) * sizeof(std::uint64_t));
+        slot.timing_resolved = true;
+    }
+
     [[nodiscard]] HRESULT reset_work_slot(WorkSlot& slot) noexcept {
+        slot.timing_resolved = false;
         HRESULT result = slot.allocator->Reset();
         if (FAILED(result)) {
             synthesis_enabled = false;
@@ -3633,14 +3664,8 @@ struct D3D12FrameSynthesizer::Impl {
                 }
                 }
             }
-            if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
-                slot.command_list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-                    slot.timing_query_base + kSpanEnd);
-                // Native mode writes only the two span timestamps.
-                slot.command_list->ResolveQueryData(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-                    slot.timing_query_base + kSpanBegin, 2, nvidia_timestamp_readback.Get(),
-                    UINT64(slot.timing_query_base + kSpanBegin) * sizeof(std::uint64_t));
-            }
+            // A skipped pair generated nothing, so it reports no time.
+            if (native_pair_generated) end_timing_span(slot);
             // This list is submitted after the synthetic when requested by the
             // presenter. Keeping the real copy out of the synthesis span also
             // makes its timing and completion fence reflect the actual order.
@@ -3850,27 +3875,10 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->ResourceBarrier(
             static_cast<UINT>(before_current_copy.size()),
             before_current_copy.data());
-        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
-            // Last mark of the pair's synthesis, before the current copy
-            // that is submitted separately. The span therefore covers
-            // exactly the work the synthetic frame is waiting on.
-            slot.command_list->EndQuery(
-                nvidia_timestamp_heap.Get(),
-                D3D12_QUERY_TYPE_TIMESTAMP,
-                slot.timing_query_base + kSpanEnd);
-            // Only this path records a resolve of its own; the NVIDIA path
-            // resolves on its synthesis list. Without one the span marks
-            // never reach the readback buffer at all. The NVIDIA stage marks
-            // are never written here, and resolving them is invalid.
-            slot.command_list->ResolveQueryData(
-                nvidia_timestamp_heap.Get(),
-                D3D12_QUERY_TYPE_TIMESTAMP,
-                slot.timing_query_base + kSpanBegin,
-                2,
-                nvidia_timestamp_readback.Get(),
-                static_cast<UINT64>(slot.timing_query_base + kSpanBegin) *
-                    sizeof(std::uint64_t));
-        }
+        // Last mark of the pair's synthesis, before the current copy that is
+        // submitted separately. The span therefore covers exactly the work
+        // the synthetic frame is waiting on.
+        end_timing_span(slot);
         // The copy's own transitions travel with the copy, so the resources
         // are left in their normal states while it waits to be submitted.
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_copy_states{
@@ -4096,15 +4104,8 @@ struct D3D12FrameSynthesizer::Impl {
             kShaderReadState,
             D3D12_RESOURCE_STATE_COMMON);
         slot.command_list->ResourceBarrier(1, &after_synthesis);
-        if (nvidia_gpu_timing_enabled && nvidia_timestamp_heap) {
-            // This path copies the current frame first, so its span includes it.
-            slot.command_list->EndQuery(nvidia_timestamp_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
-                slot.timing_query_base + kSpanEnd);
-            slot.command_list->ResolveQueryData(nvidia_timestamp_heap.Get(),
-                D3D12_QUERY_TYPE_TIMESTAMP, slot.timing_query_base + kSpanBegin, 2,
-                nvidia_timestamp_readback.Get(),
-                UINT64(slot.timing_query_base + kSpanBegin) * sizeof(std::uint64_t));
-        }
+        // This path copies the current frame first, so its span includes it.
+        end_timing_span(slot);
         dred_marker(slot.command_list.Get(), "OFXR repeated pair complete");
         return S_OK;
     }
@@ -4180,9 +4181,9 @@ struct D3D12FrameSynthesizer::Impl {
 
         completion_unknown = false;
         slot.fence_value = value;
-        // Both backends now write timestamps, so both must mark the slot as
-        // having a resolve waiting to be read back.
-        slot.timing_pending = nvidia_gpu_timing_enabled && (!native_dlss || native_pair_generated);
+        // Only a slot that resolved a span has timing to read back: a prime,
+        // or a skipped native pair, wrote a begin mark and nothing else.
+        slot.timing_pending = nvidia_gpu_timing_enabled && slot.timing_resolved;
         last_submitted_fence_value = value;
         *output_fence_value = value;
         return S_OK;

@@ -5180,9 +5180,11 @@ XrResult layer_create_session_impl(
         dispatch->destroy_session(created_session);
         return XR_ERROR_RUNTIME_FAILURE;
     }
+    // OFXR's own synthesis can use the same captured DLSS guides as native
+    // generation; without a provider publishing them, nothing else does.
     xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(),
         state->graphics_binding == SessionGraphicsBinding::d3d12 && state->menu_enabled &&
-        state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss);
+        state->dlss_motion_vectors);
     *session = created_session;
     return result;
 }
@@ -11684,9 +11686,11 @@ void apply_embedded_control(
     state->pause_applied = paused;
     state->recorder_applied = recording;
     state->menu_enabled = SUCCEEDED(result) && control.desired.enabled && !paused;
+    // OFXR's own synthesis can use the same captured DLSS guides as native
+    // generation; without a provider publishing them, nothing else does.
     xrfg::configure_ngx_guide_capture(state->d3d12_queue.Get(),
         state->graphics_binding == SessionGraphicsBinding::d3d12 && state->menu_enabled &&
-        state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss);
+        state->dlss_motion_vectors);
     if (state->menu_enabled && state->presenter_restore_after_pause) {
         state->presenter_restore_after_pause = false;
         if (!presenter_forbidden(*state)) {
