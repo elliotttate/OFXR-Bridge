@@ -293,6 +293,14 @@ struct Candidate {
     std::shared_ptr<const DlssMotionVectorFrame> previous;
 };
 
+// Where an eye's DLSS inputs sit in their render targets. Both eyes often
+// share one double-wide target with the left eye on the left - UEVR's depth,
+// for one - so the eye further left is eye 0 whichever evaluates first.
+[[nodiscard]] std::pair<std::uint32_t, std::uint32_t> input_offset(
+    const DlssMotionVectorFrame& frame) noexcept {
+    return {frame.depth ? frame.source_depth_x : 0U, frame.source_motion_x};
+}
+
 }  // namespace
 
 void publish_dlss_motion_vectors(
@@ -367,6 +375,7 @@ void publish_dlss_motion_vectors(
         frame->output_slice = 0;
         // A cropped snapshot holds the rectangle at its origin.
         frame->motion_x = motion_cropped ? 0 : publication.motion_x;
+        frame->source_motion_x = publication.motion_x;
         frame->motion_y = motion_cropped ? 0 : publication.motion_y;
         frame->motion_width = publication.motion_width;
         frame->motion_height = publication.motion_height;
@@ -382,6 +391,7 @@ void publish_dlss_motion_vectors(
         frame->reset = publication.reset;
         frame->depth = std::move(depth_snapshot);
         frame->depth_x = depth_cropped ? 0 : publication.depth_x;
+        frame->source_depth_x = publication.depth_x;
         frame->depth_y = depth_cropped ? 0 : publication.depth_y;
         frame->depth_width = publication.depth_width;
         frame->depth_height = publication.depth_height;
@@ -548,6 +558,9 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                 same_identity(previous->producer_queue.Get(), consumer_queue)) {
                 auto left = std::make_shared<DlssMotionVectorFrame>(*previous);
                 auto right = std::make_shared<DlssMotionVectorFrame>(*current);
+                // The first of the pair is the left eye unless the inputs
+                // say otherwise.
+                if (input_offset(*right) < input_offset(*left)) std::swap(left, right);
                 left->previous_serial = left->serial > 2 ? left->serial - 2 : 0;
                 right->previous_serial = right->serial > 2 ? right->serial - 2 : 0;
                 auto result = std::make_shared<DlssMotionVectorSet>();
@@ -585,11 +598,15 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             return {};
         }
 
-        // Stable first-seen stream order defines eye order. This survives any
-        // post-DLSS shader passes because the association follows the two DLSS
-        // evaluation streams rather than the final color resource identity.
+        // Eye order follows the two DLSS evaluation streams rather than the
+        // final colour resource, which survives any post-DLSS shader passes:
+        // by where each stream's inputs sit, then by first-seen order. First
+        // seen alone gave Galactic Racer under UEVR each eye the other's
+        // guides whenever the right eye evaluated first.
         std::sort(candidates.begin(), candidates.end(), [](const Candidate& a,
                                                            const Candidate& b) {
+            const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
+            if (ao != bo) return ao < bo;
             return a.first_publication < b.first_publication;
         });
 

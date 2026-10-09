@@ -91,6 +91,10 @@ struct DlssMotionVectorFrame {
     float camera_far{1000.0F};
     bool depth_inverted{};
     bool depth_infinite{};
+    // Where the game's motion and depth rectangles started before the
+    // snapshot cropped them: what tells eyes sharing one target apart.
+    std::uint32_t source_motion_x{};
+    std::uint32_t source_depth_x{};
 };
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;
