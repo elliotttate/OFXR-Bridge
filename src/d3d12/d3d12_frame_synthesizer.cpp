@@ -1,6 +1,7 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
+#include "xrfg/frame_dump.hpp"
 
 #include <windows.h>
 #include <wrl/client.h>
@@ -807,6 +808,7 @@ struct D3D12FrameSynthesizer::Impl {
     RollingSource untracked_source;
     D3D12_RESOURCE_DESC image_description{};
     DXGI_FORMAT view_format{DXGI_FORMAT_UNKNOWN};
+    FrameDump frame_dump;
     D3D12_RESOURCE_STATES release_state{};
     UINT descriptor_increment{};
     UINT rtv_increment{};
@@ -4786,6 +4788,10 @@ struct D3D12FrameSynthesizer::Impl {
         // A skipped pair can still hold NGX history work, so every native
         // pair's fence guards the eye resources a later resize releases.
         if (native_dlss) native_dlss->submitted(fence.Get(), fence_value);
+        if (frame_dump.wanted()) {
+            frame_dump.capture(device.Get(), queue.Get(), next.resource.Get(), view_format,
+                {next.views.data(), next.view_count}, next.motion_vectors.get());
+        }
         if (used_game_motion && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
 
         next.last_use_fence_value = fence_value;

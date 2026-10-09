@@ -5,6 +5,9 @@
 #include <fstream>
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
+#include "xrfg/frame_dump.hpp"
+#include <map>
+#include <sstream>
 
 #include <windows.h>
 #include <d3d12.h>
@@ -2855,6 +2858,29 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(true);
     require(!xrfg::resolve_dlss_motion_vectors(xr_output.Get(), fixture.queue()),
         "re-enabled DLSS vector tracking exposed a stale pair");
+
+    // Eyes whose inputs share one side-by-side target, as UEVR's do: the right
+    // eye's stream is seen first, yet the eye on the left is eye 0.
+    const auto shared_motion = create_texture(width, height / 2, 1);
+    for (int frame = 0; frame < 2; ++frame) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+            xrfg::publish_dlss_motion_vectors({
+                404, right_output.Get(), shared_motion.Get(), fixture.queue(), 0, 0, width, height,
+                width / 2, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+                D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+            xrfg::publish_dlss_motion_vectors({
+                505, left_output.Get(), shared_motion.Get(), fixture.queue(), 0, 0, width, height,
+                0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+                D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+        });
+    }
+    const auto side_by_side = xrfg::resolve_dlss_motion_vectors(packed_xr_output.Get(), fixture.queue());
+    require(side_by_side && side_by_side->eye_count == 2 && side_by_side->eyes[0]->stream == 505 &&
+            side_by_side->eyes[1]->stream == 404 && side_by_side->eyes[0]->output_x == 0 &&
+            side_by_side->eyes[1]->output_x == width,
+        "side-by-side DLSS inputs were assigned to eyes by evaluation order, not position");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
 
     const auto publish_alternating_eye = [&](ID3D12Resource* eye_output) {
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
@@ -6032,6 +6058,8 @@ void bench_frame_generation_methods() {
 
 }  // namespace
 
+#include "frame_replay.inc"
+
 int main() {
     const bool trace_test = std::getenv("XRFG_TEST_GPU_TRACE") != nullptr;
     const auto trace_dir = std::filesystem::temp_directory_path() /
@@ -6043,6 +6071,10 @@ int main() {
         xrfg::bridge_flight_logger().initialize(trace_dir);
     }
     try {
+        if (const char* replay = std::getenv("XRFG_TEST_REPLAY")) {
+            replay_held_out(replay);
+            return 0;
+        }
         if (std::getenv("XRFG_TEST_FG_BENCH")) {
             bench_frame_generation_methods();
             return 0;

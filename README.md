@@ -205,6 +205,15 @@ launch the game:
 
 ## Other changes in this fork
 
+- **DLSS guides matched to the right eye.** When each eye has its own DLSS
+  feature, as under UEVR, the guides were matched to eyes in the order their
+  streams first appeared. Whenever the right eye evaluated first, each eye
+  got the other eye's motion and depth. In Galactic Racer that was so on
+  every recording, and replaying those frames with the eyes put right took
+  OFXR + DLSS vectors' error where the scene moved from 9.6 to 3.5, and native
+  generation's from 4.8 to 3.6. Eyes are now ordered by where their inputs
+  sit in the shared render target, the left eye's on the left, and by first
+  appearance only when that cannot tell them apart.
 - **OFXR + DLSS vectors without a guide provider.** NGX guide capture now
   runs whenever DLSS motion vectors are selected, not only for native
   generation. In a native-enabled build, OFXR's own synthesis
@@ -360,8 +369,9 @@ Changes kept, with their measured effect:
   3.38 and 2.99; before: 4.88 and 2.96). A moving scene that darkens errs
   0.08, against 45.7 before. With the game's vectors exact, OFXR + DLSS
   vectors is now the more accurate method, at about a sixth of the GPU time.
-  Where the vectors are wrong (shadows, translucency, particles, an object
-  writing no velocity), native generation measured no better. In Hubris a pair rose from 0.32 to 0.37 ms, nearly all of it for
+  On recorded Galactic Racer frames, though, native generation had the least
+  error (see [Testing](#testing)): the game's vectors do not describe every
+  surface. In Hubris a pair rose from 0.32 to 0.37 ms, nearly all of it for
   the HUD check. On the offline benchmark, whose frames disagree almost
   everywhere, it rose about 15%.
 
@@ -395,8 +405,8 @@ Tried and rejected:
   took FidelityFX's edge error from 45 to 34 on the scene below. But
   estimated flow is unreliable where it would act, and the same-pixel blend,
   which follows the camera, is already exact for a static world: a rotating
-  cropped view erred 4.8, against a limit of 1.0, even when gated on a 4-pixel
-  jump in the flow. The optical-flow methods keep the blend.
+  cropped view erred 4.4 to 4.8, against a limit of 1.0, even when gated on a
+  4-pixel jump in the flow. The optical-flow methods keep the blend.
 - **Settings with no measurable effect:** 16-bit depth, a 16-pixel seam, the
   pack's thread-group shapes, NGX's undocumented `DLSSG.InternalWidth`,
   `DLSSG.DynamicResolution` and `DLSSG.EvalFlags` parameters, and every NGX
@@ -453,6 +463,31 @@ $env:XRFG_TEST_BENCH_EYE = '3004x3004'
 .\build\Release\xrfg_d3d12_history_tests.exe
 Remove-Item Env:XRFG_TEST_FG_BENCH, Env:XRFG_TEST_BENCH_EYE
 ```
+
+**Real game frames.** `XRFG_TEST_CAPTURE_FRAMES=<folder>`, set in the game's
+environment, makes the layer record runs of consecutive frames: colour, views
+and DLSS guides. `XRFG_TEST_CAPTURE_WAIT=1` starts them when a file named
+`go` appears in the folder. `XRFG_TEST_REPLAY=<folder>/seq<N>` then generates
+the middle frame of three from the other two with every method, the game's
+vectors scaled by the recorded frame times, and compares each with the real
+middle frame. Twelve triplets from Galactic Racer's Jakku time trial on a
+Steam Frame (3004x3004 per eye, about 50 frames a second while recording),
+error where the scene moved, averaged over the six recorded after the eye
+fix:
+
+| Method | Error |
+|---|---|
+| Native DLSS FG, 67% | 8.4 |
+| Native DLSS FG, 100% | 8.5 |
+| OFXR FidelityFX full-res flow / NVIDIA medium flow | 8.8 / 8.9 |
+| OFXR FidelityFX half-res flow | 9.2 |
+| OFXR + DLSS vectors | 10.7 |
+| A blend of the two frames | 14.6 |
+
+Section by section the order changes: OFXR + DLSS vectors had the least
+error on some, but along one fast wall the game's vectors did not describe
+the motion at any scale and it erred as much as a blend, where NVIDIA's own
+flow kept native generation near the optical-flow methods.
 
 The native pair and all-methods benchmarks generate from patterned frames.
 Blank frames compress to almost nothing in GPU memory, and NGX then measures

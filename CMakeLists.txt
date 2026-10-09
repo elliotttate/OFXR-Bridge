@@ -201,6 +201,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/d3d12/d3d12_history.cpp
         src/d3d12/d3d12_frame_synthesizer.cpp
         src/d3d12/d3d12_native_dlssg.cpp
+        src/d3d12/frame_dump.cpp
         src/common/dlss_motion_vectors.cpp
         "${XRFG_PACK_INPUT_HEADER}"
         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"

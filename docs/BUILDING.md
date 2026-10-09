@@ -418,6 +418,69 @@ wrong: NVIDIA's network leans on the same vectors. Particles defeat every
 method, and an object that writes no velocity defeats both vector methods,
 with optical flow a little better overall.
 
+Real game content is measured from recorded frames. With
+`XRFG_TEST_CAPTURE_FRAMES=<folder>` in the game's environment, the
+synthesizer copies each source it is handed - colour, views, and every eye's
+motion and depth snapshot - on the GPU, and writes a run to
+`<folder>/seq<N>/frame<M>` only once it is complete (`XRFG_TEST_CAPTURE_COUNT`
+frames, default 3; `XRFG_TEST_CAPTURE_SEQUENCES` runs, default 4,
+`XRFG_TEST_CAPTURE_GAP` frames apart, default 600; `XRFG_TEST_CAPTURE_SKIP`
+frames first, or `XRFG_TEST_CAPTURE_WAIT=1` to start when a file named `go`
+appears). Writing each frame as it came stalled the game for over 100 ms, so
+the frames of a run were unevenly spaced in time; copying first keeps them
+within a few milliseconds of the game's own pacing. `XRFG_TEST_REPLAY` then
+generates frame 1 of a run from frames 0 and 2 (`XRFG_TEST_REPLAY_FIRST`
+picks another start) with every method. Frame 2's vectors are scaled by
+(dt1 + dt2) / dt2 from the recorded DLSS frame times to reach frame 0, and
+OFXR's methods generate at dt1 / (dt1 + dt2); native generation is fixed at a
+half. The error is against the real frame 1, overall and where frames 0 and
+2 differ by more than 6 of 255. `XRFG_TEST_REPLAY_SAVE` writes crops, and
+`XRFG_TEST_REPLAY_VECTOR_GAIN`, `_GUIDE_SHIFT` and `_SWAP_EYES` test the
+guides.
+
+The first Galactic Racer recordings showed the game's vectors fitting the
+image motion worse than a blend. Compared with OpenCV's optical flow between
+the frames, each eye's colour matched the other eye's vectors (median
+difference 0.7 pixels, against 3.6 and 4.6 for its own). Galactic Racer has a
+DLSS feature per eye, and the resolver assigned the two streams to eyes in
+the order they first appeared; on every recording the right eye's came first.
+The guide marked as the left eye had its depth at x=2008 of UEVR's
+double-wide depth target. With the eyes swapped back, the replays' error
+where the scene moved fell from 9.6 to 3.5 (OFXR + DLSS vectors) and 4.8 to
+3.6 (native) on one run, and from 10.4 to 4.6 and 5.8 to 5.1 on another. The
+resolver now orders the eyes by where their motion and depth rectangles sat
+in the game's targets before the snapshots cropped them, and by first
+appearance only when those are equal.
+`test_dlss_motion_vector_stereo_stream_pairing` publishes the right eye
+first from a shared side-by-side target.
+
+Recorded again with the fix, on Galactic Racer's Jakku time trial on a Steam
+Frame (3004x3004 per eye), six triplets with even frame times measured, where
+the scene moved:
+
+| Method | Average | Range |
+|---|---|---|
+| Native DLSS FG, 67% | 8.4 | 4.1-10.7 |
+| Native DLSS FG, 100% | 8.5 | 4.1-11.1 |
+| OFXR FidelityFX full-res flow | 8.8 | 4.2-12.8 |
+| OFXR NVIDIA medium flow | 8.9 | 4.2-13.1 |
+| OFXR FidelityFX half-res flow | 9.2 | 4.3-12.8 |
+| OFXR + DLSS vectors | 10.7 | 4.7-16.4 |
+| A blend of the two frames | 14.6 | 9.5-19.4 |
+
+OFXR + DLSS vectors had the least error in one triplet and was within a few
+tenths of the best in two more. In one run, along a wall passing fast and
+close, the game's vectors did not describe the motion at any scale
+(`XRFG_TEST_REPLAY_VECTOR_GAIN` from 0 to 2, `_GUIDE_SHIFT` of a frame either
+way) and it erred 16.1 and 16.4, as much as a blend, while native generation,
+whose network has its own flow, erred 10.6 and 10.9 and the optical-flow
+methods 9.1 to 10.9. Hubris's menu, where only a glowing logo moves (0.2% of
+the image) and its vectors do not describe it, ordered them FidelityFX flow
+8.7, native 10.5-11.5, NVIDIA flow 13.6 and OFXR + DLSS vectors 16.9, against
+a blend's 15.9. So the synthetic results overstate OFXR + DLSS vectors:
+real vectors are not exact, and native generation, which also costs four to
+six times as much, holds up better where they fail.
+
 OFXR + DLSS vectors measured 3.95 overall and 25.9 at the edges until its
 occlusion handling changed. It solves, per output pixel, for the point of B
 whose vector passes through the pixel at the generated instant, and blends
