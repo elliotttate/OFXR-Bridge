@@ -2185,6 +2185,10 @@ struct SwapchainState {
     // left, 1 right, -1 otherwise. It picks the eye's own DLSS evaluation
     // (resolve_dlss_motion_vectors). Written at the application's xrEndFrame.
     std::atomic<int> projection_eye{-1};
+    // Whether a projection layer has named this swapchain as a view. Only
+    // such a swapchain is armed outside the projection path
+    // (apply_embedded_control). Written at the application's xrEndFrame.
+    std::atomic<bool> projection_used{false};
     // How many DLSS evaluations had been published at this image's last
     // release. Guarded by mutex.
     std::uint64_t release_publication{};
@@ -10267,6 +10271,7 @@ void note_projection_eyes(
             if (!swapchain) {
                 continue;
             }
+            swapchain->projection_used.store(true, std::memory_order_relaxed);
             int eye = -1;
             if (mapping.views.size() == 1 && swapchain->create_info.arraySize == 1) {
                 const ProjectionViewReference& view = mapping.views.front();
@@ -12015,7 +12020,17 @@ void apply_embedded_control(
         // refusal becomes a permanent budget leak. The budget flag latches when
         // a runtime refuses a private swapchain, which says something about the
         // whole session rather than this swapchain.
+        //
+        // And only a swapchain a projection has named: pending is set at
+        // enumeration for every candidate, so the session's first control
+        // revision armed them all. Under UEVR that took three of SteamVR's
+        // sixteen for each 2560x1440 spectator image before the eyes were
+        // named, and the eyes were then refused (Lies of P and Subnautica 2 in
+        // Alternating/AFR, whose eyes are images of their own; which way it
+        // went depended on whether the revision came before the first
+        // projection). The projection path arms the rest when they are named.
         const bool eligible = chain->generation_eligible_pending &&
+            chain->projection_used.load(std::memory_order_relaxed) &&
             !chain->generation_declined &&
             !state->generation_budget_exhausted.load(std::memory_order_acquire);
         if (!chain->frame_generation && control.desired.enabled && !paused && eligible) {

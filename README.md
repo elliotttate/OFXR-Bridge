@@ -405,12 +405,24 @@ OpenXR session, and extrapolation wins if both are set.
   | Kayak VR: Mirage | UE4, native OpenXR (`-hmd=OpenXRHMD -dx12`) | 0.0011 / 0.0253 | FidelityFX 1.03 ms, NVIDIA medium 5.7 (DLSS off in its menu) |
   | RoboQuest VR | UE5, native OpenXR, no DLSS | 0.0016 / 0.0022 | FidelityFX 2.0-2.2 ms, NVIDIA medium 12 |
 
-  Run UEVR games in **Native Stereo**. Alternating/AFR gives each eye its own
-  swapchains, which takes more of SteamVR's sixteen than generation leaves
-  room for: in Subnautica 2 under AFR the second eye's rings were refused and
-  the session passed through without generating, where Native Stereo
-  generated from the start. Bootstrap Island uses OpenVR and is outside an
-  OpenXR layer's reach.
+  Run UEVR games in **Native Stereo** where they allow it: one double-wide
+  image, the shape every method was tuned on. Alternating/AFR gives each eye
+  images of its own; it generates too since release 16 (Lies of P), but it
+  costs more of SteamVR's sixteen swapchains. Bootstrap Island uses OpenVR and
+  is outside an OpenXR layer's reach.
+- **Only the images a projection uses are armed.** Any change from the tray -
+  and the first one, at the start of every session - armed every swapchain
+  the game had made that was still eligible, not only the ones a projection
+  layer had named. Under UEVR that gave three of SteamVR's sixteen swapchains
+  to each 2560x1440 spectator or UI image before the eyes were named, and in
+  Lies of P and Subnautica 2 under Alternating/AFR the eyes were then refused
+  (XR_ERROR_LIMIT_REACHED) and the session passed through without
+  generating - on some launches and not others, by whether the tray's first
+  change came before the first projection. The tray now arms only images a
+  projection has named; the projection path arms the rest when named. Two
+  Lies of P launches in a row then armed the eyes alone and used both eyes'
+  vectors, and Galactic Racer armed its one projection image, not its three
+  1707x869 ones.
 - **The game is promised the time its frame is shown.** The display time a
   game is handed at xrWaitFrame assumed its frame would go down within a
   display period; a game rendering at half the display rate takes most of
