@@ -469,8 +469,14 @@ struct D3D12NativeDlssG::Impl {
     // composed frame restores detail when that is below 100.
     UINT scale{100};
     float detail_falloff{kDetailFalloff};
-    // NGX's depth heuristics, at NVIDIA's defaults unless a test sets them.
-    float depth_scale{1.0F}, near_far_partition{600.0F}, object_separation{40.0F};
+    // NGX's depth heuristics. NGX linearises depth as one over it, which for
+    // a reversed projection is the distance in near-plane units. NVIDIA
+    // suggests scaling that by a tenth where depth is compressed; on 42
+    // recorded Galactic Racer triplets it cut native generation's error by
+    // 0.09-0.12 at 67% and 100%, better on 31 of them. Scales from 0.03 to
+    // 0.2 measured alike; 10 and the other heuristics' settings were worse.
+    // The rest are NVIDIA's defaults. Tests may set each.
+    float depth_scale{0.1F}, near_far_partition{600.0F}, object_separation{40.0F};
     bool vectors_dilated{};
     D3D12_RESOURCE_DESC source{};
     DXGI_FORMAT view_format{}, color_format{kTenBitColorFormat}, seed_format{kTenBitColorFormat};
