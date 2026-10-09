@@ -72,8 +72,8 @@ The native GPU test needs an adapter and driver for which NGX reports frame
 generation available. The implementation was tested with SDK 310.9.1 at commit
 `374959484e79a640feaba44c93ac8cfb0a03f5b5` of NVIDIA/DLSS and
 driver 616.56 on an RTX 5090. Use 310.6 or later: its `nvngx_dlssg.dll`
-generates the same pixels about 5% faster than 310.5.3 (13% for a turning
-head at 3004x3004), and 310.6, 310.7 and 310.9.1 measure alike. Older SDKs
+generates the same pixels about 4% faster than 310.5.3 at 3004x3004 (2% for
+a turning head), and 310.6, 310.7 and 310.9.1 measure alike. Older SDKs
 still build. SDK directories must contain
 `include/nvsdk_ngx_helpers_dlssg.h`, `lib/Windows_x86_64/x64/nvsdk_ngx_d.lib`,
 `lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib`,
@@ -134,9 +134,10 @@ native DLSS FG 4.3-5.3 ms and NVIDIA medium flow 8.1 ms. Offline at that size
 (`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
 takes 2.7 ms through the synthesizer with SDK 310.5.3, so about 2 ms of the
 live figure is the GPU shared with the game at that resolution. With 310.9.1 a
-pair there costs 1.66 ms with a still head and 2.04 ms turning (3X: 2.56 and
-2.94 ms), and a feature per eye would cost 26% more still and 15% more
-turning. Skipping the reseed instead is worse: a quarter pixel of
+pair there costs 1.98 ms with a still head and 2.58 ms turning (3X: 3.05 and
+3.75 ms), and a feature per eye would cost 17% more still and 11% more
+turning. Live in the game's lighter hub scene, where the GPU is not saturated,
+the still-head pair measured 1.93 ms. Skipping the reseed instead is worse: a quarter pixel of
 unaligned history already triples the error of a reseeded pair on detailed
 content, so the 0.1 pixel threshold stays.
 
@@ -171,9 +172,11 @@ pixel of rotation; `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` repeats that
 quality measurement for the reseeding path.
 This preserves OFXR's current B pose/FOV contract and its bit-exact real-frame
 copy. On an RTX 5090 at 2064x2208 per eye with SDK 310.9.1, a stereo pair
-takes about 1.18 ms of GPU time at 2X with a still head and 1.46 ms with a
-turning head (2.0 ms with a feature per eye and SDK 310.5.3), and 1.75/2.07 ms
-at 3X; through the synthesizer at 2004x2004 a 2X pair takes 1.58 ms. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
+takes about 1.36 ms of GPU time at 2X with a still head and 1.71 ms with a
+turning head, and 2.05/2.46 ms at 3X; through the synthesizer at 2004x2004 a
+2X pair takes 1.58 ms. Both benchmarks generate from patterned frames: blank
+ones compress to almost nothing in GPU memory, and NGX then measures 20-25%
+faster than it does on real content. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
 and run `xrfg_d3d12_history_tests` to repeat that measurement;
 `XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH=1` times NGX alone for one eye, two
 features and one shared feature. `XRFG_TEST_FG_BENCH=1` instead times every
@@ -191,14 +194,19 @@ them in the pack measured the same and cost about 35 us more per pair.
 Of a 2X pair at 2064x2208 per eye, OFXR's own work is the pack of B (about
 72 us), the reseed's pack of the aligned A (about 71 us, turning head only) and
 the composition (about 26 us per output); NGX's evaluation is the rest. With
-SDK 310.9.1, NGX's evaluations alone take 1.08 ms of a 1.18 ms pair (1.29 of
-1.46 ms turning), and at 3004x3004 1.48 of 1.67 ms (1.73 of 2.04 ms). The
+SDK 310.9.1, NGX's evaluations alone take 1.24 ms of a 1.36 ms pair (1.50 of
+1.71 ms turning), and at 3004x3004 1.72 of 1.99 ms (2.14 of 2.59 ms). The
 remainder writes the full-resolution colour, motion and depth NGX takes in its
 own feature layout and composes its output, about 350 MB per pair at
-3004x3004: as long as the RTX 5090's memory bandwidth needs to move it. Other
-choices measured no faster or slower: 16x16 or 32x8 pack groups instead of
-8x8 (8x8 overlaps NGX best), 8-bit colour or 16-bit depth for NGX (32-bit
-motion is slower), a 16 rather than 64 pixel seam, leaving the reseed's motion
+3004x3004: as long as the RTX 5090's memory bandwidth needs to move it. With
+patterned frames, 16-bit depth for NGX and a 16 rather than 64 pixel seam
+still measure the same. 8-bit colour for NGX instead of 10-bit makes a pair
+3-4% faster, but it is a trade: it rounds away the precision of the reseed's
+resampled A, raising the rotation sweep's error by about a quarter (0.32 to
+0.40), while a still head and the other quality tests measure the same or
+slightly better. Measured on blank frames, these other choices were no faster
+or slower: 16x16 or 32x8 pack groups instead of 8x8 (8x8 overlaps NGX best),
+32-bit motion (slower), leaving the reseed's motion
 unwritten, a reset evaluated over smaller motion and depth rectangles (NGX
 requires the full colour extent), and NGX's undocumented
 `DLSSG.InternalWidth`, `DLSSG.DynamicResolution` and `DLSSG.EvalFlags`
@@ -211,8 +219,8 @@ own input textures, so both packs run before either evaluation, measured no
 faster and would cost about 220 MB more video memory at 3004x3004.
 
 Generating below the eye's resolution and upscaling the result is cheaper -
-at 3004x3004, 75% per axis takes a still/turning pair from 1.66/2.04 ms to
-1.28/1.61 ms and 67% to 1.11/1.36 ms - but it is a trade, not an
+at 3004x3004 on blank frames, 75% per axis took a still/turning pair from
+1.66/2.04 ms to 1.28/1.61 ms and 67% to 1.11/1.36 ms - but it is a trade, not an
 optimisation: on the rotation sweep's detailed scene, the down-and-up resample
 alone adds an error of 1.2 (75%) to 1.4 (67%), four times what a native pair
 otherwise shows (0.3), on every generated frame between sharp real ones.

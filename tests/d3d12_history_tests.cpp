@@ -4137,7 +4137,19 @@ void bench_native_dlss_pairs(D3D12WarpFixture& fixture) {
     std::array<ComPtr<ID3D12Resource>, 2> images{
         create_source_texture(fixture, width, height),
         create_source_texture(fixture, width, height)};
-    auto motion = create_and_upload_game_motion(fixture, render_width, render_height, {-3, 3});
+    // The frame-generation benchmark's scene. Blank frames would compress to
+    // almost nothing in GPU memory, and NGX measures 20-25% faster on them.
+    constexpr int shift = 12;
+    auto motion = create_and_upload_game_motion(fixture, render_width, render_height,
+        {-float(shift) * render_width / width, float(shift) * render_width / width});
+    for (UINT i = 0; i < 2; ++i) {
+        const int moved = i ? shift : 0;
+        set_texture_state(fixture, sources[i].Get(), D3D12_RESOURCE_STATE_COMMON,
+                          D3D12_RESOURCE_STATE_RENDER_TARGET);
+        upload_pattern(fixture, sources[i].Get(), translated_motion_pattern(width, height, {moved, -moved}));
+        set_texture_state(fixture, sources[i].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                          D3D12_RESOURCE_STATE_COMMON);
+    }
     auto depth = create_native_test_depth(fixture, render_width, render_height);
     ComPtr<ID3D12QueryHeap> queries;
     D3D12_QUERY_HEAP_DESC query_description{};
