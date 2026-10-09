@@ -30,6 +30,7 @@ cbuffer Params : register(b0) {
     uint CellWidth;
     uint CellHeight;
     float2 MotionNormal; // one over the feature's size
+    float2 GuideScale; // guide texels per output pixel
 };
 
 float3 rotate(float3 ray, float4 q) {
@@ -103,7 +104,15 @@ bool pack_cell(uint3 id, out uint2 cell, out uint2 p) {
     if (!pack_cell(id, cell, p)) {
         return;
     }
-    float2 uv = (float2(p) + 0.5) / float2(Extent);
+    Color[cell] = display_texel(SourceColor.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
+    // Motion and depth may sit on a coarser grid. The cell holding a guide
+    // texel's centre writes it, sampling the game's guides at that centre.
+    uint2 g = uint2((float2(cell) + 0.5) * GuideScale);
+    if (any(uint2((float2(g) + 0.5) / GuideScale) != cell)) {
+        return;
+    }
+    float2 q = clamp((float2(g) + 0.5) / GuideScale - float2(EyeX, 0), 0.5, float2(Extent) - 0.5);
+    float2 uv = q / float2(Extent);
     // A rotated edge can land exactly at UV 1. Fractional guide rectangles
     // also occur when the color viewport is smaller than the guide output.
     int2 depth_lo = int2(DepthRect.xy);
@@ -116,18 +125,17 @@ bool pack_cell(uint3 id, out uint2 cell, out uint2 p) {
     // own frame generation; doing it here measured no different and cost more.
     // Jitter and MV_Scale follow the bridge's existing guide contract.
     float2 mv = SourceMotion.Load(int4(mp, MotionSlice, 0));
-    Color[cell] = display_texel(SourceColor.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
     float2 backward = mv * MotionScale + JitterDelta;
-    float2 a_uv = (float2(p) + 0.5 + backward) / float2(Extent);
+    float2 a_uv = (q + backward) / float2(Extent);
     float3 a_ray = float3(lerp(SourceTangents.x, SourceTangents.y, a_uv.x),
                           lerp(SourceTangents.z, SourceTangents.w, a_uv.y), -1);
     float4 inverse_rotation = float4(-Rotation.xyz, Rotation.w);
     float3 b_ray = rotate(a_ray, inverse_rotation);
     float2 b_uv = source_uv(b_ray, TargetTangents);
     // As a fraction of the whole feature, which may hold both eyes.
-    Motion[cell] = (b_uv - (float2(p) + 0.5) / float2(Extent)) * float2(Extent) * MotionNormal;
+    Motion[g] = (b_uv - q / float2(Extent)) * float2(Extent) * MotionNormal;
     // Dilation chooses motion, while depth remains at the original pixel.
-    Depth[cell] = SourceDepth.Load(int4(dp, GuideSlice, 0));
+    Depth[g] = SourceDepth.Load(int4(dp, GuideSlice, 0));
 }
 
 struct Vertex {

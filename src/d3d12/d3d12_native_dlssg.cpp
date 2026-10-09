@@ -60,7 +60,7 @@ constexpr UINT kCreateRetryPairs = 120;
 // the other unless its motion crosses half the seam.
 constexpr UINT kSeam = 64;
 // Root constants per dispatch or draw.
-constexpr UINT kParams = 42;
+constexpr UINT kParams = 44;
 // The motion and depth rectangle a reset evaluation reads.
 constexpr UINT kResetGuideSize = 64;
 // SeedNativeDlssG's group width; its groups are 8 high, like the pack's.
@@ -73,7 +73,7 @@ struct Params {
     float source_tangents[4], target_tangents[4];
     UINT motion_slice, encode_srgb, padding[2];
     UINT eye_x, cell_x, cell_width, cell_height;
-    float motion_normal[2];
+    float motion_normal[2], guide_scale[2];
 };
 static_assert(sizeof(Params) == kParams * sizeof(UINT));
 // Where an eye sits in its feature, and the columns its pack writes: the eye
@@ -386,7 +386,7 @@ struct D3D12NativeDlssG::Impl {
         // The reseed's colour, when it needs a format of its own.
         ComPtr<ID3D12Resource> seed_color;
         std::array<ComPtr<ID3D12Resource>, kMaxOutputs> generated, disable;
-        UINT width{}, height{}, outputs{};
+        UINT width{}, height{}, outputs{}, guide_width{}, guide_height{};
     };
     // The guide frame whose history an eye's feature continues.
     struct EyeHistory {
@@ -511,17 +511,18 @@ struct D3D12NativeDlssG::Impl {
         }
         f = {};
     }
-    HRESULT create_feature(ID3D12GraphicsCommandList *list, Feature &f, UINT width, UINT height) {
+    HRESULT create_feature(ID3D12GraphicsCommandList *list, Feature &f, UINT width, UINT height,
+                           UINT gw, UINT gh) {
         release_feature(f);
         HRESULT hr = texture(color_format, f.color, false, width, height);
         if (FAILED(hr)) {
             return hr;
         }
-        hr = texture(DXGI_FORMAT_R16G16_FLOAT, f.motion, false, width, height);
+        hr = texture(DXGI_FORMAT_R16G16_FLOAT, f.motion, false, gw, gh);
         if (FAILED(hr)) {
             return hr;
         }
-        hr = texture(DXGI_FORMAT_R32_FLOAT, f.depth, false, width, height);
+        hr = texture(DXGI_FORMAT_R32_FLOAT, f.depth, false, gw, gh);
         if (FAILED(hr)) {
             return hr;
         }
@@ -533,6 +534,8 @@ struct D3D12NativeDlssG::Impl {
         }
         f.width = width;
         f.height = height;
+        f.guide_width = gw;
+        f.guide_height = gh;
         hr = ensure_outputs(f, 1);
         if (FAILED(hr)) {
             return hr;
@@ -542,8 +545,8 @@ struct D3D12NativeDlssG::Impl {
             return E_FAIL;
         }
         NVSDK_NGX_DLSSG_Create_Params create{};
-        create.Width = create.RenderWidth = width;
-        create.Height = create.RenderHeight = height;
+        create.Width = width; create.RenderWidth = gw;
+        create.Height = height; create.RenderHeight = gh;
         create.NativeBackbufferFormat = color_format;
         result = NGX_D3D12_CREATE_DLSSG(list, 1, 1, &f.handle, f.params, &create);
         if (NVSDK_NGX_FAILED(result)) {
@@ -817,25 +820,28 @@ struct D3D12NativeDlssG::Impl {
         o.motionVectorsDilated = false; // NGX dilates them at depth edges
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
         // The pack writes motion as a fraction of the feature. NGX scales it
-        // to pixels itself: handing it pixels with a unit scale instead costs
-        // measurable quality.
-        o.mvecScale[0] = float(e.width);
-        o.mvecScale[1] = float(e.height);
+        // to pixels of the motion grid itself: handing it pixels with a unit
+        // scale instead costs measurable quality.
+        o.mvecScale[0] = float(e.guide_width);
+        o.mvecScale[1] = float(e.guide_height);
         o.reset = reset;
         // Colour and motion are unjittered by now, and NGX's result does not
         // depend on this offset for them. Depth still carries the render
-        // jitter, resampled onto the output grid, so express it in that grid.
-        o.jitterOffset[0] = gb.jitter_x * float(gb.output_width) / gb.depth_width;
-        o.jitterOffset[1] = gb.jitter_y * float(gb.output_height) / gb.depth_height;
+        // jitter, resampled onto the guide grid, so express it in that grid.
+        o.jitterOffset[0] =
+            gb.jitter_x * float(gb.output_width) / gb.depth_width * e.guide_width / e.width;
+        o.jitterOffset[1] =
+            gb.jitter_y * float(gb.output_height) / gb.depth_height * e.guide_height / e.height;
         o.multiFrameCount = count;
         o.multiFrameIndex = index;
-        o.mvecsSubrectSize = o.depthSubrectSize = o.backbufferSubrectSize = {e.width, e.height};
+        o.backbufferSubrectSize = {e.width, e.height};
+        o.mvecsSubrectSize = o.depthSubrectSize = {e.guide_width, e.guide_height};
         // A reset's output is the same whatever motion and depth it gets, so
         // the seed packs only colour and NGX reads a token rectangle of them.
         // The colour must still cover the whole feature.
         if (reset) {
-            o.mvecsSubrectSize = o.depthSubrectSize = {std::min(e.width, kResetGuideSize),
-                                                       std::min(e.height, kResetGuideSize)};
+            o.mvecsSubrectSize = o.depthSubrectSize = {std::min(e.guide_width, kResetGuideSize),
+                                                       std::min(e.guide_height, kResetGuideSize)};
         }
         const auto result = NGX_D3D12_EVALUATE_DLSSG(list, e.handle, e.params, &in, &o);
         if (NVSDK_NGX_FAILED(result)) {
@@ -1081,7 +1087,8 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             eye_rect[i] = rect(bv[i], UINT(p.source.Width), p.source.Height);
         }
         std::array<Placement, 2> place{};
-        std::array<std::array<UINT, 2>, 2> feature_size{};
+        // Width and height, then the motion and depth grid's.
+        std::array<std::array<UINT, 4>, 2> feature_size{};
         if (shared) {
             const UINT w0 = eye_rect[0].width, w1 = eye_rect[1].width, half = p.seam / 2;
             feature_size[0] = {w0 + p.seam + w1, std::max(eye_rect[0].height, eye_rect[1].height)};
@@ -1093,14 +1100,35 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 place[i] = {i, 0, 0, eye_rect[i].width};
             }
         }
+        // Guides the game renders at two thirds of the output or less (DLSS
+        // Quality and below) are packed to a grid two thirds the feature's size,
+        // which loses none of their detail. NGX then measures 1-2% faster at
+        // 3004x3004 and the native quality tests the same or better; packed to a
+        // half-size grid, depth edges measured worse.
+        bool coarse = true;
+        for (UINT i = 0; i < bv.size(); ++i) {
+            const auto &gb = *bg->eyes[guide_index(i)];
+            coarse = coarse && 100ULL * gb.motion_width <= 67ULL * gb.output_width &&
+                     100ULL * gb.motion_height <= 67ULL * gb.output_height &&
+                     100ULL * gb.depth_width <= 67ULL * gb.output_width &&
+                     100ULL * gb.depth_height <= 67ULL * gb.output_height;
+        }
+        for (UINT f = 0; f < feature_count; ++f) {
+            feature_size[f][2] = coarse ? (2 * feature_size[f][0] + 2) / 3 : feature_size[f][0];
+            feature_size[f][3] = coarse ? (2 * feature_size[f][1] + 2) / 3 : feature_size[f][1];
+        }
+        const auto resized = [&](const Impl::Feature &feature, UINT f) {
+            return feature.width != feature_size[f][0] || feature.height != feature_size[f][1] ||
+                   feature.guide_width != feature_size[f][2] ||
+                   feature.guide_height != feature_size[f][3];
+        };
         // Changing a feature's dimensions destroys its neural history. A
         // previous queue submission can still own it: poll its fence, never
         // CPU-wait.
         for (UINT f = 0; f < feature_count; ++f) {
             const auto &feature = p.features[f];
-            if (feature.handle &&
-                (feature.width != feature_size[f][0] || feature.height != feature_size[f][1]) &&
-                p.completion && p.completion->GetCompletedValue() < p.completion_value) {
+            if (feature.handle && resized(feature, f) && p.completion &&
+                p.completion->GetCompletedValue() < p.completion_value) {
                 return skip(Skip::resizing);
             }
         }
@@ -1113,10 +1141,10 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         for (UINT f = 0; f < feature_count; ++f) {
             auto &feature = p.features[f];
             HRESULT hr = S_OK;
-            const bool creating = !feature.handle || feature.width != feature_size[f][0] ||
-                                  feature.height != feature_size[f][1];
+            const bool creating = !feature.handle || resized(feature, f);
             if (creating) {
-                hr = p.create_feature(list, feature, feature_size[f][0], feature_size[f][1]);
+                hr = p.create_feature(list, feature, feature_size[f][0], feature_size[f][1],
+                                      feature_size[f][2], feature_size[f][3]);
                 // A new feature holds no eye's history.
                 for (UINT i = 0; i < bv.size(); ++i) {
                     if (place[i].feature == f) {
@@ -1159,6 +1187,9 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             v.cell_height = p.features[place[i].feature].height;
             v.motion_normal[0] = 1.0F / p.features[place[i].feature].width;
             v.motion_normal[1] = 1.0F / p.features[place[i].feature].height;
+            const auto &f = p.features[place[i].feature];
+            v.guide_scale[0] = float(f.guide_width) / f.width;
+            v.guide_scale[1] = float(f.guide_height) / f.height;
         };
         std::array<Params, 2> eye_params{};
         for (UINT f = 0; f < feature_count; ++f) {
