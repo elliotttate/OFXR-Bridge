@@ -33,7 +33,8 @@ namespace {
 using Microsoft::WRL::ComPtr;
 using namespace DirectX;
 constexpr UINT kSlots = D3D12SwapchainHistory::kSlotCount;
-constexpr UINT kBlock = 9;        // six SRVs, three UAVs
+constexpr UINT kSrvs = 7;
+constexpr UINT kBlock = kSrvs + 3; // seven SRVs, three UAVs
 constexpr UINT kBlocksPerEye = 4; // A, B, and two outputs
 constexpr UINT kMaxOutputs = 2;
 constexpr auto kRead = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
@@ -65,20 +66,28 @@ constexpr UINT kSeam = 64;
 constexpr UINT kMaxFeatureSize = 8192;
 constexpr UINT kMinSeam = 16;
 // Root constants per dispatch or draw.
-constexpr UINT kParams = 44;
+constexpr UINT kParams = 48;
 // The motion and depth rectangle a reset evaluation reads.
 constexpr UINT kResetGuideSize = 64;
 // SeedNativeDlssG's group width; its groups are 8 high, like the pack's.
 constexpr UINT kSeedGroupWidth = 16;
+// The lowest reduced feature resolution, in percent of the eye's.
+constexpr UINT kMinScale = 25;
+// A reduced-resolution generated frame takes the real frame's detail where the
+// two differ by less than a quarter of the display range, fading towards it.
+// Of 1/32 to 1, a quarter measured the least error at moving edges.
+constexpr float kDetailFalloff = 4.0F;
 
 struct Params {
     UINT extent[2], color_slice, guide_slice;
     float output_rect[4], motion_rect[4], depth_rect[4];
     float motion_scale[2], jitter_delta[2], rotation[4];
     float source_tangents[4], target_tangents[4];
-    UINT motion_slice, encode_srgb, padding[2];
+    UINT motion_slice, encode_srgb, feature_extent[2];
     UINT eye_x, cell_x, cell_width, cell_height;
     float motion_normal[2], guide_scale[2];
+    float detail_falloff, towards_a;
+    UINT padding[2];
 };
 static_assert(sizeof(Params) == kParams * sizeof(UINT));
 // Where an eye sits in its feature, and the columns its pack writes: the eye
@@ -421,6 +430,10 @@ struct D3D12NativeDlssG::Impl {
     std::array<EyeHistory, 2> eyes;
     bool shared_stereo{true};
     UINT seam{kSeam};
+    // The feature's resolution, in percent of each eye's, and how the
+    // composed frame restores detail when that is below 100.
+    UINT scale{100};
+    float detail_falloff{kDetailFalloff};
     D3D12_RESOURCE_DESC source{};
     DXGI_FORMAT view_format{}, color_format{kTenBitColorFormat}, seed_format{kTenBitColorFormat};
     UINT increment{}, rtv_increment{}, max_outputs{1};
@@ -578,7 +591,7 @@ struct D3D12NativeDlssG::Impl {
     }
     HRESULT pipelines() {
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
-        ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 6, 0, 0, 0};
+        ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kSrvs, 0, 0, 0};
         ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 0};
         D3D12_ROOT_PARAMETER rp[3]{};
         for (UINT i = 0; i < 2; ++i) {
@@ -656,9 +669,12 @@ struct D3D12NativeDlssG::Impl {
     // a block can be rewritten here; one that still matches is left alone.
     void descriptors(UINT slot, UINT base, Feature &f, ID3D12Resource *color,
                      const DlssMotionVectorFrame &g, UINT output, ID3D12Resource *fallback) {
+        // The feature's packed colour is both read, by a reduced-resolution
+        // compose, and written, by the pack.
         const std::array<ID3D12Resource *, kBlock> resources{
             color, g.motion_vectors.Get(), g.depth.Get(), f.generated[output].Get(),
-            f.disable[output].Get(), fallback, f.color.Get(), f.motion.Get(), f.depth.Get()};
+            f.disable[output].Get(), fallback, f.color.Get(), f.color.Get(), f.motion.Get(),
+            f.depth.Get()};
         const std::array<DXGI_FORMAT, 3> formats{view_format,
                                                  motion_format(g.motion_vectors->GetDesc().Format),
                                                  depth_format(g.depth->GetDesc().Format)};
@@ -682,12 +698,13 @@ struct D3D12NativeDlssG::Impl {
         raw.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         device->CreateShaderResourceView(resources[4], &raw, cpu(slot, base + 4));
         srv(slot, base + 5, fallback, formats[0], true);
+        srv(slot, base + 6, resources[6], resources[6]->GetDesc().Format, false);
         for (UINT i = 0; i < 3; ++i) {
             D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
-            u.Format = resources[6 + i]->GetDesc().Format;
+            u.Format = resources[kSrvs + i]->GetDesc().Format;
             u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-            device->CreateUnorderedAccessView(resources[6 + i], nullptr, &u,
-                                              cpu(slot, base + 6 + i));
+            device->CreateUnorderedAccessView(resources[kSrvs + i], nullptr, &u,
+                                              cpu(slot, base + kSrvs + i));
         }
         for (UINT i = 0; i < kBlock; ++i) {
             written.resources[i] = resources[i];
@@ -772,7 +789,7 @@ struct D3D12NativeDlssG::Impl {
         list->SetComputeRootSignature(root.Get());
         list->SetPipelineState(seeding ? seed.Get() : pack.Get());
         list->SetComputeRootDescriptorTable(0, gpu(slot, base));
-        list->SetComputeRootDescriptorTable(1, gpu(slot, base + 6));
+        list->SetComputeRootDescriptorTable(1, gpu(slot, base + kSrvs));
         list->SetComputeRoot32BitConstants(2, kParams, &p, 0);
         const UINT width = seeding ? kSeedGroupWidth : 8;
         list->Dispatch((p.cell_width + width - 1) / width, (p.cell_height + 7) / 8, 1);
@@ -835,10 +852,10 @@ struct D3D12NativeDlssG::Impl {
         // Colour and motion are unjittered by now, and NGX's result does not
         // depend on this offset for them. Depth still carries the render
         // jitter, resampled onto the guide grid, so express it in that grid.
-        o.jitterOffset[0] =
-            gb.jitter_x * float(gb.output_width) / gb.depth_width * e.guide_width / e.width;
-        o.jitterOffset[1] =
-            gb.jitter_y * float(gb.output_height) / gb.depth_height * e.guide_height / e.height;
+        o.jitterOffset[0] = gb.jitter_x * float(gb.output_width) / gb.depth_width *
+                            p.feature_extent[0] / p.extent[0] * e.guide_width / e.width;
+        o.jitterOffset[1] = gb.jitter_y * float(gb.output_height) / gb.depth_height *
+                            p.feature_extent[1] / p.extent[1] * e.guide_height / e.height;
         o.multiFrameCount = count;
         o.multiFrameIndex = index;
         o.backbufferSubrectSize = {e.width, e.height};
@@ -867,7 +884,7 @@ D3D12NativeDlssG::~D3D12NativeDlssG() = default;
 
 HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *queue,
                                      const D3D12_RESOURCE_DESC &source,
-                                     DXGI_FORMAT format) noexcept {
+                                     DXGI_FORMAT format, UINT scale) noexcept {
 #ifdef XRFG_NATIVE_DLSSG
     try {
         auto p = std::make_unique<Impl>();
@@ -890,6 +907,8 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->reseed_every_pair = environment(L"XRFG_TEST_NATIVE_DLSSG_RESEED_EVERY_PAIR");
         p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE");
         p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
+        p->scale = std::clamp(environment(L"XRFG_NATIVE_DLSSG_SCALE", scale), kMinScale, 100U);
+        p->detail_falloff = float(environment(L"XRFG_NATIVE_DLSSG_DETAIL", UINT(kDetailFalloff)));
         HRESULT hr = acquire_ngx(device);
         if (FAILED(hr)) {
             return hr;
@@ -950,6 +969,7 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
     (void)queue;
     (void)source;
     (void)format;
+    (void)scale;
     return DXGI_ERROR_UNSUPPORTED;
 #endif
 }
@@ -1087,45 +1107,51 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         }
         // Two eyes share one feature side by side, each eye's pack cell taking
         // the half of the seam beside it; otherwise each eye has its own.
-        std::array<D3D12ImageRect, 2> eye_rect{};
+        // Each eye's size in the feature: its viewport, or that scaled down when
+        // the feature runs at a reduced resolution.
+        std::array<std::array<UINT, 2>, 2> eye_size{};
         for (UINT i = 0; i < bv.size(); ++i) {
-            eye_rect[i] = rect(bv[i], UINT(p.source.Width), p.source.Height);
+            const auto r = rect(bv[i], UINT(p.source.Width), p.source.Height);
+            eye_size[i] = {std::max(1U, (r.width * p.scale + 50) / 100),
+                           std::max(1U, (r.height * p.scale + 50) / 100)};
         }
         bool shared = p.shared_stereo && bv.size() == 2;
         UINT seam = p.seam;
         if (shared) {
-            const std::uint64_t eyes = std::uint64_t(eye_rect[0].width) + eye_rect[1].width;
+            const std::uint64_t eyes = std::uint64_t(eye_size[0][0]) + eye_size[1][0];
             seam = UINT(std::min<std::uint64_t>(seam, kMaxFeatureSize - std::min<std::uint64_t>(eyes, kMaxFeatureSize)));
             shared = seam >= std::min(p.seam, kMinSeam) &&
-                     std::max(eye_rect[0].height, eye_rect[1].height) <= kMaxFeatureSize;
+                     std::max(eye_size[0][1], eye_size[1][1]) <= kMaxFeatureSize;
         }
         const UINT feature_count = shared ? 1 : UINT(bv.size());
         std::array<Placement, 2> place{};
         // Width and height, then the motion and depth grid's.
         std::array<std::array<UINT, 4>, 2> feature_size{};
         if (shared) {
-            const UINT w0 = eye_rect[0].width, w1 = eye_rect[1].width, half = seam / 2;
-            feature_size[0] = {w0 + seam + w1, std::max(eye_rect[0].height, eye_rect[1].height)};
+            const UINT w0 = eye_size[0][0], w1 = eye_size[1][0], half = seam / 2;
+            feature_size[0] = {w0 + seam + w1, std::max(eye_size[0][1], eye_size[1][1])};
             place[0] = {0, 0, 0, w0 + half};
             place[1] = {0, w0 + seam, w0 + half, w1 + seam - half};
         } else {
             for (UINT i = 0; i < bv.size(); ++i) {
-                feature_size[i] = {eye_rect[i].width, eye_rect[i].height};
-                place[i] = {i, 0, 0, eye_rect[i].width};
+                feature_size[i] = {eye_size[i][0], eye_size[i][1]};
+                place[i] = {i, 0, 0, eye_size[i][0]};
             }
         }
-        // Guides the game renders at two thirds of the output or less (DLSS
-        // Quality and below) are packed to a grid two thirds the feature's size,
-        // which loses none of their detail. NGX then measures 1-2% faster at
-        // 3004x3004 and the native quality tests the same or better; packed to a
-        // half-size grid, depth edges measured worse.
+        // Guides the game renders at two thirds of the feature's resolution or
+        // less (DLSS Quality and below, at full resolution) are packed to a
+        // grid two thirds the feature's size, which loses none of their detail.
+        // NGX then measures 1-2% faster at 3004x3004 and the native quality
+        // tests the same or better; packed to a half-size grid, depth edges
+        // measured worse.
         bool coarse = true;
+        const std::uint64_t limit = 67ULL * p.scale;
         for (UINT i = 0; i < bv.size(); ++i) {
             const auto &gb = *bg->eyes[guide_index(i)];
-            coarse = coarse && 100ULL * gb.motion_width <= 67ULL * gb.output_width &&
-                     100ULL * gb.motion_height <= 67ULL * gb.output_height &&
-                     100ULL * gb.depth_width <= 67ULL * gb.output_width &&
-                     100ULL * gb.depth_height <= 67ULL * gb.output_height;
+            coarse = coarse && 10000ULL * gb.motion_width <= limit * gb.output_width &&
+                     10000ULL * gb.motion_height <= limit * gb.output_height &&
+                     10000ULL * gb.depth_width <= limit * gb.output_width &&
+                     10000ULL * gb.depth_height <= limit * gb.output_height;
         }
         for (UINT f = 0; f < feature_count; ++f) {
             feature_size[f][2] = coarse ? (2 * feature_size[f][0] + 2) / 3 : feature_size[f][0];
@@ -1204,6 +1230,9 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             const auto &f = p.features[place[i].feature];
             v.guide_scale[0] = float(f.guide_width) / f.width;
             v.guide_scale[1] = float(f.guide_height) / f.height;
+            v.feature_extent[0] = eye_size[i][0];
+            v.feature_extent[1] = eye_size[i][1];
+            v.detail_falloff = p.detail_falloff;
         };
         std::array<Params, 2> eye_params{};
         for (UINT f = 0; f < feature_count; ++f) {
@@ -1274,6 +1303,17 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 t.to(p.features[f].generated[output].Get(), kCommon, kPixelRead);
                 t.to(p.features[f].disable[output].Get(), kCommon, kPixelRead);
             }
+            // A reduced-resolution compose compares with the packed real frame.
+            if (p.scale < 100) {
+                t.to(p.features[f].color.Get(), kCommon, kAnyRead);
+            }
+        }
+        // It also follows B's engine motion.
+        if (p.scale < 100) {
+            for (UINT i = 0; i < bv.size(); ++i) {
+                const auto &gb = *bg->eyes[guide_index(i)];
+                t.to(gb.motion_vectors.Get(), gb.resource_state, kAnyRead);
+            }
         }
         for (const auto &output : outputs) {
             t.to(output.image, release, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -1288,11 +1328,12 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             for (UINT i = 0; i < bv.size(); ++i) {
                 auto &feature = p.features[place[i].feature];
                 const auto &gb = *bg->eyes[guide_index(i)];
-                const auto &params = eye_params[i];
+                auto params = eye_params[i];
+                params.towards_a = 1.0F - float(output + 1) / float(outputs.size() + 1);
                 const UINT outbase = i * kBlocksPerEye * kBlock + (output + 2) * kBlock;
                 p.descriptors(slot, outbase, feature, b, gb, output, b);
                 list->SetGraphicsRootDescriptorTable(0, p.gpu(slot, outbase));
-                list->SetGraphicsRootDescriptorTable(1, p.gpu(slot, outbase + 6));
+                list->SetGraphicsRootDescriptorTable(1, p.gpu(slot, outbase + kSrvs));
                 list->SetGraphicsRoot32BitConstants(2, kParams, &params, 0);
                 const auto rh = p.target(slot, i * kMaxOutputs + output, outputs[output].image,
                                          params.color_slice);

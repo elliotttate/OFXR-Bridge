@@ -3927,6 +3927,160 @@ void test_native_dlss_depth_edges(D3D12WarpFixture& fixture) {
     fixture.require_no_debug_errors();
 }
 
+// Opt-in with XRFG_TEST_NATIVE_DLSSG_SCALE_QUALITY: what a reduced-resolution
+// feature costs in quality. A detailed background slides 6 pixels and a
+// striped foreground square 16, with DLSS Quality's two-thirds guides, at a
+// headset-like size. The error is against the true midpoint frame, overall
+// and in the band around the square's edges.
+void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 1024, height = 768, margin = 24;
+    constexpr UINT gw = width * 2 / 3, gh = height * 2 / 3;
+    constexpr int box_x = 301, box_y = 211, box_size = 301, fg_motion = 16, bg_motion = 6;
+    const auto inside = [](int x, int y, int shift) {
+        return x >= box_x + shift && x < box_x + box_size + shift && y >= box_y &&
+               y < box_y + box_size;
+    };
+    const auto background = [](float x, float y, UINT eye) {
+        const auto edge = [](float s) { return s >= 0 ? 1.0F : -1.0F; };
+        const float phase = float(eye) * 0.7F;
+        return RgbaBytes{
+            direction_channel(127.5F + 50 * std::sin(x * 0.031F + y * 0.017F + phase) +
+                              35 * edge(std::sin(x * 0.11F) * std::sin(y * 0.093F)) +
+                              20 * std::sin(x * 0.83F + y * 0.37F)),
+            direction_channel(127.5F + 45 * std::cos(x * 0.047F - y * 0.029F) +
+                              35 * edge(std::sin(x * 0.071F + 1) * std::sin(y * 0.13F)) +
+                              18 * std::cos(x * 0.61F - y * 0.97F)),
+            direction_channel(127.5F + 45 * std::sin(x * 0.021F + y * 0.053F) +
+                              30 * std::cos(y * 0.19F) + 16 * std::sin(x * 1.1F + y * 0.7F)),
+            255};
+    };
+    const auto scene = [&](int bg_shift, int fg_shift) {
+        StereoPattern pattern;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto& bytes = pattern[eye];
+            bytes.resize(std::size_t(width) * height * kBytesPerPixel);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    RgbaBytes texel = background(float(int(x) - bg_shift), float(y), eye);
+                    if (inside(int(x), int(y), fg_shift)) {
+                        const bool stripe = ((int(x) - fg_shift) / 6 + int(y) / 6) % 2 != 0;
+                        texel = stripe ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255};
+                    }
+                    std::copy(texel.begin(), texel.end(),
+                              bytes.begin() + (std::size_t(y) * width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return pattern;
+    };
+    const auto a_pattern = scene(0, 0), b_pattern = scene(bg_motion, fg_motion);
+    const auto expected = scene(bg_motion / 2, fg_motion / 2);
+    std::array<ComPtr<ID3D12Resource>, 2> sources{create_source_texture(fixture, width, height),
+                                                  create_source_texture(fixture, width, height)};
+    upload_pattern(fixture, sources[0].Get(), a_pattern);
+    upload_pattern(fixture, sources[1].Get(), b_pattern);
+    for (auto& source : sources) {
+        set_texture_state(fixture, source.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                          D3D12_RESOURCE_STATE_COMMON);
+    }
+    auto output = create_source_texture(fixture, width, height);
+    const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+    // Nearer surfaces have smaller depth here (not reversed).
+    auto depth_a = create_native_test_depth(fixture, gw, gh, [](UINT, UINT x, UINT y) {
+        const int px = int((x + 0.5F) * width / gw), py = int((y + 0.5F) * height / gh);
+        return px >= box_x && px < box_x + box_size && py >= box_y && py < box_y + box_size
+            ? 0.2F : 0.8F;
+    });
+    auto depth_b = create_native_test_depth(fixture, gw, gh, [](UINT, UINT x, UINT y) {
+        const int px = int((x + 0.5F) * width / gw) - fg_motion, py = int((y + 0.5F) * height / gh);
+        return px >= box_x && px < box_x + box_size && py >= box_y && py < box_y + box_size
+            ? 0.2F : 0.8F;
+    });
+    auto still = create_and_upload_game_motion(fixture, gw, gh, {0, 0});
+    auto motion = create_and_upload_game_motion_field(fixture, gw, gh, [&](UINT, UINT mx, UINT my) {
+        const bool fg = inside(int((mx + 0.5F) * width / gw), int((my + 0.5F) * height / gh),
+                               fg_motion);
+        return std::array<float, 2>{-float(fg ? fg_motion : bg_motion) * gw / width, 0.0F};
+    });
+    const auto guides = [&](std::uint64_t serial, const ComPtr<ID3D12Resource>& vectors,
+                            const ComPtr<ID3D12Resource>& depth) {
+        xrfg::DlssMotionVectorSet set{};
+        set.eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            f->stream = 95 + eye;
+            f->epoch = 1;
+            f->serial = serial;
+            f->previous_serial = serial - 1;
+            f->motion_vectors = vectors;
+            f->depth = depth;
+            f->producer_queue = fixture.queue();
+            f->output_width = width;
+            f->output_height = height;
+            f->motion_width = f->depth_width = gw;
+            f->motion_height = f->depth_height = gh;
+            f->motion_slice = f->output_slice = eye;
+            f->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+            set.eyes[eye] = f;
+        }
+        return set;
+    };
+    const auto band_error = [&](const StereoPattern& actual, UINT eye) {
+        double total = 0;
+        std::size_t count = 0;
+        for (UINT y = box_y; y < box_y + box_size; ++y) {
+            for (UINT x = 0; x < width; ++x) {
+                const int left = box_x + fg_motion / 2, right = left + box_size;
+                if (std::abs(int(x) - left) >= 12 && std::abs(int(x) - right) >= 12) continue;
+                const std::size_t offset = (std::size_t(y) * width + x) * kBytesPerPixel;
+                for (UINT c = 0; c < 3; ++c, ++count)
+                    total += std::abs(int(actual[eye][offset + c]) - int(expected[eye][offset + c]));
+            }
+        }
+        return total / double(count);
+    };
+    const auto views = make_reprojection_views();
+    const auto blend = midpoint_pattern(a_pattern, b_pattern);
+    std::cout << "scale quality blend mae=" << mean_absolute_rgb_error(blend, expected, width, height, 0, margin)
+              << " b mae=" << mean_absolute_rgb_error(b_pattern, expected, width, height, 0, margin) << '\n';
+    for (const char* scale : {"100", "75", "67", "50"}) {
+        for (const char* detail : {"0", "32", "16", "8", "4", "1"}) {
+            if (std::string(scale) == "100" && std::string(detail) != "0") continue;
+            SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", scale);
+            SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_DETAIL", detail);
+            xrfg::D3D12NativeDlssG native;
+            require_hresult(native.initialize(fixture.device(), fixture.queue(),
+                                              sources[0]->GetDesc(), kFormat),
+                            "scale quality initialization");
+            const auto seed_a = guides(1, still, depth_a), seed_b = guides(2, still, depth_a);
+            const auto moved = guides(3, motion, depth_b);
+            HRESULT seeded = E_FAIL, generated = E_FAIL;
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                seeded = native.record(list, 0, sources[0].Get(), sources[0].Get(), views, views,
+                                       &seed_a, &seed_b, outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            });
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                generated = native.record(list, 0, sources[0].Get(), sources[1].Get(), views,
+                                          views, &seed_b, &moved, outputs,
+                                          D3D12_RESOURCE_STATE_RENDER_TARGET);
+            });
+            require(seeded == S_OK && generated == S_OK, "scale quality pair failed");
+            const auto actual =
+                readback_pattern(fixture, output.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            std::cout << "scale quality scale=" << scale << " detail=" << detail;
+            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                std::cout << " eye" << eye << "_mae="
+                          << mean_absolute_rgb_error(actual, expected, width, height, eye, margin)
+                          << " eye" << eye << "_edge_mae=" << band_error(actual, eye);
+            }
+            std::cout << '\n';
+        }
+    }
+    SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", nullptr);
+    SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_DETAIL", nullptr);
+    fixture.require_no_debug_errors();
+}
+
 // Opt-in with XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP: how well native
 // generation reproduces a static, detailed scene after a small head rotation
 // (about 0.25 to 16 pixels). Every rotation reseeds the history with the
@@ -5415,6 +5569,11 @@ int main() {
         if (std::getenv("XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP")) {
             D3D12WarpFixture bench_fixture(true);
             bench_native_dlss_rotation_sweep(bench_fixture);
+            return 0;
+        }
+        if (std::getenv("XRFG_TEST_NATIVE_DLSSG_SCALE_QUALITY")) {
+            D3D12WarpFixture bench_fixture(true);
+            bench_native_dlss_scale_quality(bench_fixture);
             return 0;
         }
         if (std::getenv("XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH")) {

@@ -187,6 +187,9 @@ LauncherSettings parse_settings(std::string_view text) {
                 if (key == "frame_generation") {
                     settings.frame_generation = lower_ascii(value) == "dlss"
                         ? FrameGeneration::native_dlss : FrameGeneration::ofxr;
+                } else if (key == "dlssg_resolution") {
+                    const int percent = std::atoi(value.c_str());
+                    settings.native_scale = percent >= 25 && percent <= 100 ? percent : 100;
                 } else if (key == "backend") {
                     settings.backend = lower_ascii(value) == "nvidia"
                         ? FlowBackend::nvidia
@@ -256,6 +259,7 @@ LauncherSettings parse_settings(std::string_view text) {
 std::string serialize_settings(const LauncherSettings& settings) {
     return "[tray]\r\nbackend=" + backend_ini_value(settings.backend) +
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
+           "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
            "\r\nnvidia_preset=" +
            nvidia_preset_ini_value(settings.nvidia_preset) +
            "\r\nnvidia_input_scale=" +
@@ -492,6 +496,7 @@ std::string build_runtime_ini(
     bool flush_each_event) {
     return "[ofxr]\r\nbackend=" + backend_ini_value(settings.backend) +
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
+           "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
            "\r\nmotion_vectors=dlss" +
            "\r\nnvidia_preset=" +
            nvidia_preset_ini_value(settings.nvidia_preset) +

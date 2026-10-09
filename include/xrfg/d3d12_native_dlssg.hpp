@@ -25,8 +25,11 @@ class D3D12NativeDlssG final {
     };
     D3D12NativeDlssG();
     ~D3D12NativeDlssG();
+    // scale is the feature's resolution in percent of each eye's, 25 to 100;
+    // XRFG_NATIVE_DLSSG_SCALE overrides it.
     HRESULT initialize(ID3D12Device *device, ID3D12CommandQueue *queue,
-                       const D3D12_RESOURCE_DESC &source, DXGI_FORMAT view_format) noexcept;
+                       const D3D12_RESOURCE_DESC &source, DXGI_FORMAT view_format,
+                       UINT scale = 100) noexcept;
     // S_FALSE means the pair was not generated and no output was written. The
     // list may still hold NGX history work, so call submitted() for any list
     // that is executed after record(), whatever it returned.

@@ -146,6 +146,21 @@ int main(int argc, char** argv) {
     require(request_control_v2(&unsupported_settings) == 0,
         "external frame-generation request rejected");
 
+    using GetNativeScale = int (*)() noexcept;
+    using RequestNativeScale = int (*)(int) noexcept;
+    const auto get_native_scale = resolve<GetNativeScale>(module, "OFXR_GetNativeDlssgScaleV2");
+    const auto request_native_scale =
+        resolve<RequestNativeScale>(module, "OFXR_RequestNativeDlssgScaleV2");
+    require(get_native_scale() == 100, "native DLSS FG runs at full resolution by default");
+    require(request_native_scale(67) != 0 && get_native_scale() == 67,
+        "native DLSS FG resolution accepted");
+    require(request_control_v2(&snapshot_v2.desired) != 0 && get_native_scale() == 67,
+        "a V2 control request keeps the native DLSS FG resolution");
+    require(request_native_scale(24) == 0 && request_native_scale(101) == 0 &&
+                get_native_scale() == 67,
+        "an out-of-range native DLSS FG resolution is rejected");
+    require(request_native_scale(100) != 0, "restore the native DLSS FG resolution");
+
     OFXR_DlssGuidePublicationV2 legacy_publication{};
     legacy_publication.struct_size = static_cast<std::uint32_t>(
         offsetof(OFXR_DlssGuidePublicationV2, verified_native_device));

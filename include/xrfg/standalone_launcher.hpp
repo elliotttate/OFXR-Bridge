@@ -32,6 +32,10 @@ enum class NvidiaInputScale {
 
 struct LauncherSettings {
     FrameGeneration frame_generation{FrameGeneration::ofxr};
+    // Native DLSS Frame Generation's resolution, in percent of each eye's:
+    // the layer's dlssg_resolution. 100 by default; below it the generated
+    // frames trade sharpness on moving content for GPU time.
+    int native_scale{100};
     // NVIDIA optical flow, medium, is the default: the layer falls back to
     // FidelityFX on its own where NVIDIA cannot initialise, so the default
     // can be the better backend without a GPU check here.

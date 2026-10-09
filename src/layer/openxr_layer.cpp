@@ -4774,7 +4774,8 @@ XrResult layer_create_session_impl(
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(initial_control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(initial_control.desired.scale),
         initial_control.desired.backward,
-        static_cast<xrfg::D3D12FrameGeneration>(initial_control.desired.frame_generation)};
+        static_cast<xrfg::D3D12FrameGeneration>(initial_control.desired.frame_generation),
+        static_cast<std::uint32_t>(initial_control.desired.native_scale)};
     // One display period of extra depth, bought with one display period of
     // latency: every synthetic is held until it is a period old, so synthesis
     // gets a period to finish instead of the gap the game leaves. On by
@@ -11552,12 +11553,14 @@ void apply_embedded_control(
     const xrfg::D3D12NvidiaOpticalFlowOptions options{
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
-        static_cast<xrfg::D3D12FrameGeneration>(control.desired.frame_generation)};
+        static_cast<xrfg::D3D12FrameGeneration>(control.desired.frame_generation),
+        static_cast<std::uint32_t>(control.desired.native_scale)};
     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
         options.bidirectional != state->nvidia_options.bidirectional ||
-        options.frame_generation != state->nvidia_options.frame_generation;
+        options.frame_generation != state->nvidia_options.frame_generation ||
+        options.native_scale != state->nvidia_options.native_scale;
     // Enumeration is excluded by frame_call_mutex, so newly created contexts
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;

@@ -78,6 +78,8 @@ extern "C" __declspec(dllexport) int OFXR_RequestControlV1(
                    input->scale,
                    input->backward != 0,
                    input->motion_vectors,
+                   0,
+                   xrfg::embedded::snapshot().desired.native_scale,
                })
             ? 1
             : 0;
@@ -277,9 +279,30 @@ extern "C" __declspec(dllexport) int OFXR_RequestControlV2(
                    input->backward != 0,
                    input->motion_vectors,
                    input->frame_generation,
+                   xrfg::embedded::snapshot().desired.native_scale,
                })
             ? 1
             : 0;
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Native DLSS Frame Generation's resolution, in percent of each eye's. Kept
+// apart from OFXR_ControlSettingsV2, whose size callers already compile in.
+extern "C" __declspec(dllexport) int OFXR_GetNativeDlssgScaleV2() noexcept {
+    try {
+        return xrfg::embedded::snapshot().desired.native_scale;
+    } catch (...) {
+        return 0;
+    }
+}
+
+extern "C" __declspec(dllexport) int OFXR_RequestNativeDlssgScaleV2(int percent) noexcept {
+    try {
+        auto settings = xrfg::embedded::snapshot().desired;
+        settings.native_scale = percent;
+        return xrfg::embedded::request(settings) ? 1 : 0;
     } catch (...) {
         return 0;
     }

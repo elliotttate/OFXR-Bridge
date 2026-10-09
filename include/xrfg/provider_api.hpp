@@ -242,6 +242,10 @@ OFXR_LAYER_API int OFXR_GetControlSnapshotV2(
     OFXR_ControlSnapshotV2* snapshot) noexcept;
 OFXR_LAYER_API int OFXR_RequestControlV2(
     const OFXR_ControlSettingsV2* settings) noexcept;
+// Native DLSS Frame Generation's resolution, 25 to 100 percent of each eye's.
+// Get returns 0 on failure; Request returns 0 for an invalid value.
+OFXR_LAYER_API int OFXR_GetNativeDlssgScaleV2() noexcept;
+OFXR_LAYER_API int OFXR_RequestNativeDlssgScaleV2(int percent) noexcept;
 OFXR_LAYER_API void OFXR_ConfigureDlssGuidesV2(int enabled) noexcept;
 OFXR_LAYER_API int OFXR_PublishDlssGuidesV2(
     const OFXR_DlssGuidePublicationV2* publication) noexcept;

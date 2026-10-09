@@ -66,6 +66,9 @@ enum MenuCommand : UINT {
     overlay_lower_left = 124,
     overlay_lower_right = 125,
     open_logs = 130,
+    dlssg_scale_full = 131,
+    dlssg_scale_two_thirds = 132,
+    dlssg_scale_half = 133,
     donate_creator = 138,
     donate_maintainer = 139,
     show_about = 140,
@@ -937,6 +940,24 @@ void show_context_menu(AppState& state) {
 #ifdef XRFG_NATIVE_DLSSG
     AppendMenuW(menu, MF_STRING | (state.settings.frame_generation == xrfg::standalone::FrameGeneration::native_dlss ? MF_CHECKED : 0),
         generation_dlss, L"NVIDIA DLSS Frame Generation (experimental)");
+    // Below 100%, NVIDIA generates at a lower resolution and the bridge puts
+    // back the real frame's detail wherever it can follow the game's motion.
+    if (HMENU dlssg_scale_menu = CreatePopupMenu()) {
+        const struct { UINT command; int percent; const wchar_t* text; } scales[]{
+            {dlssg_scale_full, 100, L"100% (sharpest)"},
+            {dlssg_scale_two_thirds, 67, L"67% (faster, softer moving detail)"},
+            {dlssg_scale_half, 50, L"50% (fastest)"},
+        };
+        for (const auto& scale : scales) {
+            AppendMenuW(dlssg_scale_menu,
+                MF_STRING | (state.settings.native_scale == scale.percent ? MF_CHECKED : MF_UNCHECKED),
+                scale.command, scale.text);
+        }
+        AppendMenuW(menu,
+            MF_POPUP | (state.settings.frame_generation == xrfg::standalone::FrameGeneration::native_dlss
+                            ? MF_ENABLED : MF_GRAYED),
+            reinterpret_cast<UINT_PTR>(dlssg_scale_menu), L"DLSS Frame Generation resolution");
+    }
 #endif
     AppendMenuW(
         menu,
@@ -1156,6 +1177,13 @@ void handle_command(AppState& state, UINT command) {
         state.settings.frame_generation = command == generation_dlss
             ? xrfg::standalone::FrameGeneration::native_dlss : xrfg::standalone::FrameGeneration::ofxr;
         update_runtime_options(state, L"The frame-generation algorithm will be used by the next OpenXR session.");
+        break;
+    case dlssg_scale_full:
+    case dlssg_scale_two_thirds:
+    case dlssg_scale_half:
+        state.settings.native_scale = command == dlssg_scale_full ? 100
+            : command == dlssg_scale_two_thirds ? 67 : 50;
+        update_runtime_options(state, L"DLSS Frame Generation will use this resolution the next time the game starts.");
         break;
     case backend_fidelity_fx:
         state.settings.backend = xrfg::standalone::FlowBackend::fidelity_fx;

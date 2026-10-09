@@ -11,6 +11,7 @@ struct Settings {
     bool backward{};
     int motion_vectors{}; // 0 optical flow, 1 DLSS ingress
     int frame_generation{}; // 0 OFXR, 1 native NVIDIA DLSS Frame Generation.
+    int native_scale{100}; // native DLSS FG resolution, percent of each eye's
     bool operator==(const Settings&) const = default;
 };
 struct Snapshot {

@@ -115,6 +115,9 @@ struct D3D12NvidiaOpticalFlowOptions {
         D3D12OpticalFlowInputScale::half};
     bool bidirectional{};
     D3D12FrameGeneration frame_generation{D3D12FrameGeneration::ofxr};
+    // Native DLSS Frame Generation's resolution, in percent of each eye's.
+    // Below 100 it trades the generated frames' sharpness for GPU time.
+    std::uint32_t native_scale{100};
 };
 
 // A second synthetic produced from the same pair, for a session that hands

@@ -231,6 +231,13 @@ ConfiguredFrameGeneration read_frame_generation(const std::filesystem::path& dir
     return _wcsicmp(value,L"dlss") == 0 ? ConfiguredFrameGeneration::native_dlss : ConfiguredFrameGeneration::ofxr;
 }
 
+int read_native_dlssg_scale(const std::filesystem::path& directory) noexcept {
+    if (directory.empty()) return 100;
+    const auto ini = directory / L"ofxr_bridge.ini";
+    const int value = static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"dlssg_resolution", 100, ini.c_str()));
+    return value >= kMinNativeDlssgScale && value <= 100 ? value : 100;
+}
+
 ConfiguredFlowBackend read_flow_backend(
     const std::filesystem::path& module_directory) noexcept {
     try {

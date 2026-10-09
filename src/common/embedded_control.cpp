@@ -26,6 +26,7 @@ struct Control {
         const auto options = implicit_layer::read_nvidia_options(directory());
         settings.backend = static_cast<int>(implicit_layer::read_flow_backend(directory()));
         settings.frame_generation = static_cast<int>(implicit_layer::read_frame_generation(directory()));
+        settings.native_scale = implicit_layer::read_native_dlssg_scale(directory());
         settings.preset = static_cast<int>(options.preset);
         settings.scale = static_cast<int>(options.input_scale);
         settings.backward = options.bidirectional;
@@ -56,7 +57,8 @@ Snapshot snapshot() {
 bool request(Settings s) {
     if (s.backend < 0 || s.backend > 1 || s.preset < 0 || s.preset > 2 ||
         s.scale < 0 || s.scale > 2 || s.motion_vectors < 0 || s.motion_vectors > 1 ||
-        s.frame_generation < 0 || s.frame_generation > 1) return false;
+        s.frame_generation < 0 || s.frame_generation > 1 ||
+        s.native_scale < implicit_layer::kMinNativeDlssgScale || s.native_scale > 100) return false;
     auto& c = control(); std::scoped_lock lock(c.mutex);
     const auto old = c.settings;
     bool ok = true;
@@ -70,6 +72,8 @@ bool request(Settings s) {
     if (old.backward != s.backward) ok &= write(L"ofxr", L"nvidia_bidirectional", s.backward ? L"1" : L"0");
     if (old.motion_vectors != s.motion_vectors) ok &= write(L"ofxr", L"motion_vectors", s.motion_vectors ? L"dlss" : L"off");
     if (old.frame_generation != s.frame_generation) ok &= write(L"ofxr", L"frame_generation", s.frame_generation ? L"dlss" : L"ofxr");
+    if (old.native_scale != s.native_scale)
+        ok &= write(L"ofxr", L"dlssg_resolution", std::to_wstring(s.native_scale).c_str());
     if (old != s) { c.settings = s; ++c.revision; }
     return ok;
 }
@@ -91,6 +95,9 @@ bool set_overlay_setting(int position) { return position >= 0 && position < 5 &&
 
 // Private, versioned POD ABI for the combined-module host regression harness.
 extern "C" __declspec(dllexport) int OFXR_EmbeddedRequestV1(int enabled, int backend, int preset, int scale, int backward) noexcept {
-    try { return xrfg::embedded::request({enabled != 0, backend, preset, scale, backward != 0, 0, 0}) ? 1 : 0; }
+    try {
+        return xrfg::embedded::request({enabled != 0, backend, preset, scale, backward != 0, 0, 0,
+                                        xrfg::embedded::snapshot().desired.native_scale}) ? 1 : 0;
+    }
     catch (...) { return 0; }
 }
