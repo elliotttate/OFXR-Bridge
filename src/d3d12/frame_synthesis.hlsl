@@ -740,6 +740,33 @@ FullscreenVertex FullscreenTriangleVS(uint vertex_id : SV_VertexID) {
     return output;
 }
 
+// Content that stayed where it was on screen although the game's vector there
+// says it moved: a HUD drawn after DLSS has no vectors of its own. It needs
+// both: unchanged at the pixel and its neighbours, and not what the vector
+// predicts. Correct vectors explain a moving surface however flat or striped
+// it is, so only content they do not describe is kept.
+bool game_motion_static_overlay(float2 pixel, float4 current) {
+    int2 texel = int2(pixel);
+    bool overlay = rgb_error(PreviousFrame.Load(int4(texel, int(Slice), 0)), current) <= 1.0 / 255.0;
+    if (overlay) {
+        float2 backward = game_motion_for_pixel(pixel, Slice, ViewIndex);
+        MappedCoordinate moved = map_source_to_target(pixel + backward, PreviousMappings[ViewIndex]);
+        CameraSample predicted = sample_previous_target(moved.coordinate, Slice, ViewIndex);
+        overlay = moved.valid >= 0.5 && predicted.valid >= 0.5 &&
+            rgb_error(predicted.color, current) > 0.1;
+    }
+    if (overlay) {
+        int2 limit = int2(int(Width) - 1, int(Height) - 1);
+        [unroll] for (uint i = 0; i < 4; ++i) {
+            int2 neighbour = clamp(texel + (i == 0 ? int2(2, 0) : i == 1 ? int2(-2, 0)
+                : i == 2 ? int2(0, 2) : int2(0, -2)), int2(0, 0), limit);
+            overlay = overlay && rgb_error(PreviousFrame.Load(int4(neighbour, int(Slice), 0)),
+                CurrentFrame.Load(int4(neighbour, int(Slice), 0))) <= 1.0 / 255.0;
+        }
+    }
+    return overlay;
+}
+
 // The game-motion solve below, from start rather than the pixel, for a second
 // surface: true, with its A and B samples, if two steps reach its fixed point.
 bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
@@ -804,11 +831,16 @@ float4 synthesize_midpoint(
             bool preserve_stationary = validate_fast && repeated_capture_flag() == 0 &&
                 current_fallback.valid >= 0.5 &&
                 fast_stationary_patch(pixel, Slice, current_fallback.color);
+            bool static_overlay = !preserve_stationary && use_game_motion_pipeline &&
+                repeated_capture_flag() == 0 && current_fallback.valid >= 0.5 &&
+                game_motion_static_overlay(pixel, current_fallback.color);
             if (preserve_stationary) {
                 output_color = saturate(lerp(
                     sample_previous_target(pixel, Slice, ViewIndex).color,
                     current_fallback.color,
                     synthesis_fraction()));
+            } else if (static_overlay) {
+                output_color = saturate(current_fallback.color);
             } else {
                 float2 raw_backward = float2(0.0, 0.0);
                 CameraSample previous_sample = (CameraSample)0;

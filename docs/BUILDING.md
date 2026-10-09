@@ -279,7 +279,7 @@ meaningless. Its median GPU time per stereo pair on an RTX 5090, by eye size
 
 | Method | 1440x1584 | 2004x2004 | 3004x3004 | 3600x3600 |
 |---|---|---|---|---|
-| OFXR + DLSS vectors | 0.13 ms | 0.22 ms | 0.50 ms | 0.71 ms |
+| OFXR + DLSS vectors | 0.13 ms | 0.23 ms | 0.51 ms | 0.72 ms |
 | OFXR FidelityFX, half-res flow | 0.20 ms | 0.31 ms | 0.58 ms | 0.78 ms |
 | OFXR FidelityFX, full-res flow | 0.38 ms | 0.64 ms | 1.30 ms | 1.80 ms |
 | Native DLSS FG 2X | 1.14 ms | 1.49 ms | 2.38 ms | 3.42 ms |
@@ -436,18 +436,28 @@ of A and B at the same pixel, which showed both frames' edges at once. Now:
   7.28 and 7.69 at the edges, and agreement thresholds of 0.025 and 0.1
   measured 7.47 and 7.35. With the gate, capping the solves at one, three or
   six all measured 7.35.
+- A HUD drawn after DLSS has no vectors of its own: it carries the vectors
+  of the scene behind it. With B's warped sample as the fallback, a static
+  striped overlay over a moving background erred 100.8, against 31.6 for the
+  old same-pixel blend, which kept it wherever the warped samples disagreed.
+  Now a pixel that is unchanged on screen between the frames, along with its
+  neighbours two pixels away, and that its own vector does not explain
+  (the vector's A sample differs by more than 0.1), is kept as it is: 6.5.
+  Correct vectors explain a moving surface however flat or striped it is, so
+  this never fires on the benchmark scene, whose figures are unchanged.
+  `test_dlss_motion_vector_occlusion_edges` checks both cases.
 
 Rejected: keeping the same-pixel blend wherever the pixel, or a 5-point patch
-around it, is unchanged between the frames (for a head-locked HUD the vectors
-do not describe). Flat stripes pass that test, and it measured 2.6, or 4.5 as
-a check ahead of the warp. Nearest-tap vectors across motion discontinuities,
+around it, is unchanged between the frames, without asking the vector. Flat
+stripes pass that test, and it measured 2.6, or 4.5 as a check ahead of the
+warp. Nearest-tap vectors across motion discontinuities,
 instead of bilinear, measured 13.4 at the edges. An ungated search over 32
 starts cost 6.8 ms per pair at 3004x3004 on `XRFG_TEST_FG_BENCH`, whose
 turning-head frames disagree with their vectors almost everywhere. Gated by
 the motion edge, with single-texel vector probes, that benchmark measures
 0.50 ms at the median against 0.45 before (p10 0.45 against 0.42), and its
-uniform vectors never start a search. In Hubris, two rounds measured 0.325
-and 0.326 ms, against 0.323 before.
+uniform vectors never start a search; the overlay check adds 0.01 ms. In
+Hubris, two rounds measured 0.325 and 0.326 ms, against 0.323 before.
 
 At 3X, against the true frames a third and two thirds of the way from A, 67%
 errs 4.9 and 4.6 where full resolution errs 3.4 and 3.0: each generated frame
