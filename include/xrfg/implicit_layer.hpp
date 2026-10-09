@@ -71,8 +71,9 @@ enum class ConfiguredFrameGeneration { ofxr, native_dlss };
 [[nodiscard]] ConfiguredFrameGeneration read_frame_generation(
     const std::filesystem::path& module_directory) noexcept;
 // Native DLSS Frame Generation's resolution in percent of each eye's:
-// [ofxr] dlssg_resolution, 25 to 100, by default 100.
+// [ofxr] dlssg_resolution, 25 to 100, by default 67.
 inline constexpr int kMinNativeDlssgScale = 25;
+inline constexpr int kDefaultNativeDlssgScale = 67;
 [[nodiscard]] int read_native_dlssg_scale(
     const std::filesystem::path& module_directory) noexcept;
 

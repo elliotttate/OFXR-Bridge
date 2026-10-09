@@ -189,7 +189,7 @@ LauncherSettings parse_settings(std::string_view text) {
                         ? FrameGeneration::native_dlss : FrameGeneration::ofxr;
                 } else if (key == "dlssg_resolution") {
                     const int percent = std::atoi(value.c_str());
-                    settings.native_scale = percent >= 25 && percent <= 100 ? percent : 100;
+                    settings.native_scale = percent >= 25 && percent <= 100 ? percent : 67;
                 } else if (key == "backend") {
                     settings.backend = lower_ascii(value) == "nvidia"
                         ? FlowBackend::nvidia

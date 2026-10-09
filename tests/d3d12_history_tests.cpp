@@ -3209,6 +3209,7 @@ void test_dlss_motion_vector_gpu_ingress(
     xrfg::D3D12FrameSynthesizer synthesizer;
     xrfg::D3D12NvidiaOpticalFlowOptions options;
     if (native_dlss) options.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
+    options.native_scale = 100; // full resolution generates these vectors exactly
     auto extra_image = triple ? create_source_texture(fixture,width,height) : ComPtr<ID3D12Resource>{};
     std::vector<ID3D12Resource*> output_images{synthetic_destination_pointers[0]};
     if(triple) output_images.push_back(extra_image.Get());
@@ -5897,6 +5898,7 @@ void bench_frame_generation_methods() {
         options.preset = method.preset;
         options.input_scale = method.scale;
         if (method.native) options.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
+        options.native_scale = 100; // XRFG_NATIVE_DLSSG_SCALE times the others
         xrfg::D3D12FrameSynthesizer synthesizer;
         require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                                                current_out, synthetic_out, kFormat,
@@ -6117,6 +6119,7 @@ int main() {
             test_dlss_motion_vector_gpu_ingress(native_fixture,xrfg::D3D12OpticalFlowBackend::nvidia,true,false,true,true);
             xrfg::D3D12NvidiaOpticalFlowOptions native_options;
             native_options.frame_generation=xrfg::D3D12FrameGeneration::native_dlss;
+            native_options.native_scale=100;
             test_rotation_aware_synthesis_beats_uncompensated_flow(native_fixture,
                 xrfg::D3D12OpticalFlowBackend::fidelity_fx,native_options);
             native_fixture.require_no_debug_errors();

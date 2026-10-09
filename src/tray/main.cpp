@@ -942,13 +942,13 @@ void show_context_menu(AppState& state) {
         generation_dlss, L"NVIDIA DLSS Frame Generation (experimental)");
     // Below 100%, NVIDIA generates at a lower resolution and the bridge puts
     // back the real frame's detail wherever it can follow the game's motion.
-    // On recorded Galactic Racer frames 67% and 50% had less error than 100%,
-    // though a sharp synthetic scene loses detail at 50%. dlssg_resolution in
-    // the layer's INI takes 25 to 100.
+    // On recorded Galactic Racer frames 67% and 50% had less error than 100%
+    // and were sharper, so 67% is the default; a sharp synthetic scene loses
+    // detail at 50%. dlssg_resolution in the layer's INI takes 25 to 100.
     if (HMENU dlssg_scale_menu = CreatePopupMenu()) {
         const struct { UINT command; int percent; const wchar_t* text; } scales[]{
-            {dlssg_scale_full, 100, L"100% (sharpest)"},
-            {dlssg_scale_two_thirds, 67, L"67% (faster, softer moving detail)"},
+            {dlssg_scale_full, 100, L"100% (most GPU time)"},
+            {dlssg_scale_two_thirds, 67, L"67% (default)"},
             {dlssg_scale_half, 50, L"50% (fastest)"},
         };
         for (const auto& scale : scales) {

@@ -232,10 +232,11 @@ ConfiguredFrameGeneration read_frame_generation(const std::filesystem::path& dir
 }
 
 int read_native_dlssg_scale(const std::filesystem::path& directory) noexcept {
-    if (directory.empty()) return 100;
+    if (directory.empty()) return kDefaultNativeDlssgScale;
     const auto ini = directory / L"ofxr_bridge.ini";
-    const int value = static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"dlssg_resolution", 100, ini.c_str()));
-    return value >= kMinNativeDlssgScale && value <= 100 ? value : 100;
+    const int value = static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"dlssg_resolution",
+                                                             kDefaultNativeDlssgScale, ini.c_str()));
+    return value >= kMinNativeDlssgScale && value <= 100 ? value : kDefaultNativeDlssgScale;
 }
 
 ConfiguredFlowBackend read_flow_backend(
