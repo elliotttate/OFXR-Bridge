@@ -138,6 +138,7 @@ jobs:
           Copy-Item build/Release/OFXRBridgeTray.exe $out
           Copy-Item build/Release/ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll,
                     build/Release/ofxr/OFXR_vulkan_queue_layer.dll,
+                    build/Release/ofxr/OFXRBenchmark.exe,
                     build/Release/ofxr/ofxr_bridge.ini "$out/ofxr"
           Copy-Item README.md, LICENSE, THIRD_PARTY.md $out
           Copy-Item licenses/* "$out/licenses"
@@ -174,7 +175,8 @@ jobs:
   #   SIGNPATH_ORGANIZATION_ID, SIGNPATH_PROJECT_SLUG, SIGNPATH_POLICY_SLUG,
   #   SIGNPATH_ARTIFACT_CONFIGURATION_SLUG (optional), and the secret
   #   SIGNPATH_API_TOKEN. Files to sign inside the zip: OFXRBridgeTray.exe,
-  #   ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll, ofxr/OFXR_vulkan_queue_layer.dll.
+  #   ofxr/XR_APILAYER_XRFrameBridge_diagnostic.dll, ofxr/OFXR_vulkan_queue_layer.dll,
+  #   ofxr/OFXRBenchmark.exe.
   sign:
     name: Sign with SignPath
     needs: build

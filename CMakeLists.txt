@@ -447,6 +447,35 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 /W4 /permissive- /EHsc)
         endif()
 
+        # "Benchmark this PC": GPU time of every frame-generation method
+        # through the synthesizer, at a headset's per-eye size. The tray runs
+        # it as a child process, so a driver fault in a case cannot take the
+        # tray and its arm with it. It ships in the ofxr folder beside
+        # nvngx_dlssg.dll, which NGX looks for in the folder of the module
+        # that initialises it.
+        add_executable(OFXRBenchmark
+            src/benchmark/benchmark_main.cpp
+            src/d3d12/fg_benchmark.cpp
+            include/xrfg/fg_benchmark.hpp)
+        target_include_directories(OFXRBenchmark PRIVATE include)
+        target_link_libraries(OFXRBenchmark PRIVATE xrfg_d3d12_history xrfg_core d3d12 dxgi)
+        target_compile_features(OFXRBenchmark PRIVATE cxx_std_20)
+        target_compile_definitions(OFXRBenchmark PRIVATE
+            NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+        if(MSVC)
+            target_compile_options(OFXRBenchmark PRIVATE /W4 /permissive- /EHsc)
+        endif()
+        if(XRFG_BUILD_TESTS)
+            # Every kind of case, small and on WARP so it runs without a GPU:
+            # NVIDIA flow and native generation answer "unavailable" there.
+            add_test(NAME xrfg_benchmark_tool_warp
+                COMMAND OFXRBenchmark --warp --eye 256x256 --warmup 1 --pairs 4
+                    --cases ffx_50,ffx_50_3x,vectors,hybrid_50,extrapolate,guide_snapshot,nv_medium_50,native_67
+                    --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark-tool-warp.ini")
+            set_tests_properties(xrfg_benchmark_tool_warp PROPERTIES TIMEOUT 120
+                FAIL_REGULAR_EXPRESSION "result [a-z0-9_]+ failed;error ")
+        endif()
+
         enable_language(RC)
         add_executable(OFXRBridgeTray WIN32
             src/tray/main.cpp
@@ -498,8 +527,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/ofxr_bridge.ini"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different
                 "$<TARGET_FILE:OFXR_vulkan_queue_layer>"
-                "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/OFXR_vulkan_queue_layer.dll")
-        add_dependencies(OFXRBridgeTray OFXR_vulkan_queue_layer)
+                "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/OFXR_vulkan_queue_layer.dll"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "$<TARGET_FILE:OFXRBenchmark>"
+                "$<TARGET_FILE_DIR:OFXRBridgeTray>/ofxr/OFXRBenchmark.exe")
+        add_dependencies(OFXRBridgeTray OFXR_vulkan_queue_layer OFXRBenchmark)
 
         if(XRFG_BUILD_TESTS)
             add_executable(xrfg_standalone_launcher_tests
