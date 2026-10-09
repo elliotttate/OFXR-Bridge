@@ -1,10 +1,10 @@
 # Runs the promise-shown-time call chain with XRFG_TEST_ADMISSION_WAIT_MS
 # making every pair look as if it had waited most of a display period at
 # admission, and checks from the flight log that the layer moves the
-# application's phase (presenter_transition 720): once a window of 32 pairs
-# says so, with the pair hold that follows holding a presenter frame longer,
-# and then - since the waits stay where they were - again only after a window
-# twice as long.
+# application's phase (presenter_transition 720): once twelve late pairs in a
+# row say so, with the pair hold that follows holding a presenter frame
+# longer, and then - since the waits stay where they were - again only after
+# a run twice as long.
 foreach(required_variable IN ITEMS LAYER_DLL CALL_CHAIN ENABLED_INI WORK_DIR)
     if(NOT DEFINED ${required_variable})
         message(FATAL_ERROR "${required_variable} was not provided")
@@ -82,9 +82,9 @@ list(GET moves 0 first_windows)
 list(GET moves 1 second_windows)
 if(NOT first_windows EQUAL 1 OR NOT second_windows EQUAL 2)
     message(FATAL_ERROR
-        "Expected the first move after one window and the next after a window "
-        "twice as long, since the first left the waits where they were; the "
-        "window lengths were '${moves}'")
+        "Expected the first move after one run and the next after a run twice "
+        "as long, since the first left the waits where they were; the run "
+        "lengths were '${moves}'")
 endif()
 if(first_hold STREQUAL "" OR first_hold LESS 3000)
     message(FATAL_ERROR
@@ -92,5 +92,5 @@ if(first_hold STREQUAL "" OR first_hold LESS 3000)
         "have run a presenter frame longer (${other_long_holds} of "
         "${other_holds} other holds were over 3 ms)")
 endif()
-message("Phase moved ${move_count} times (windows ${moves}); the hold after "
+message("Phase moved ${move_count} times (runs ${moves}); the hold after "
         "the first held ${first_hold} us")

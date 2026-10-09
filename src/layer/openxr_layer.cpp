@@ -1016,12 +1016,11 @@ struct SessionState {
     bool triple_switchable{};
     // The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point triple_poll_at{};
-    // The application's xrEndFrame thread only: the window of admission
-    // waits observe_admission_wait judges, how many windows long it is, and
-    // the presenter frame it adds to the next once-per-pair hold. Tests add
-    // XRFG_TEST_ADMISSION_WAIT_MS to every wait it measures.
-    std::uint32_t admission_window_pairs{};
-    std::uint32_t admission_window_late{};
+    // The application's xrEndFrame thread only: the run of pairs that waited
+    // at admission observe_admission_wait counts, how many runs long it must
+    // be, and the presenter frame it adds to the next once-per-pair hold.
+    // Tests add XRFG_TEST_ADMISSION_WAIT_MS to every wait it measures.
+    std::uint32_t admission_late_run{};
     std::uint32_t rephase_backoff{1};
     bool rephase_check_due{};
     std::uint32_t pair_hold_extra_frames{};
@@ -1329,6 +1328,9 @@ struct SessionState {
     std::uint32_t promise_sample_count{};
     std::uint32_t promise_settle{};
     bool promise_runtime_slowed{};
+    // Whether the runtime's last frame was at a multiple of the display
+    // period, written by the presenter for the application's thread.
+    std::atomic<bool> runtime_slowed{};
     XrResult presenter_failure{XR_SUCCESS};
     std::uint64_t next_presenter_sequence{1};
     std::size_t outstanding_presenter_submissions{};
@@ -9363,6 +9365,13 @@ void continuous_presenter_main(
             request ? request->sequence : 0,
             static_cast<std::uint64_t>(submitted_content_time),
             static_cast<std::uint64_t>(frame_state.predictedDisplayTime));
+        if (XR_SUCCEEDED(end_result) && state->presenter_display_period > 0) {
+            state->runtime_slowed.store(
+                frame_state.predictedDisplayPeriod >
+                    state->presenter_display_period +
+                        state->presenter_display_period / 2,
+                std::memory_order_relaxed);
+        }
         // A generated pair's real frame: how late it went down against the
         // time the application was promised.
         if (request && request->owned_frame && !fresh_synthetic &&
@@ -9743,60 +9752,60 @@ void stop_continuous_presenter(
 // each real frame shown 70 ms after the game's wait instead of 62 at the same
 // 119.7 frames a second. Over a whole race, 57% of its pairs were like that.
 //
-// So when nine in ten pairs of a window wait more than half a display period
-// at admission, the next hold runs one presenter frame longer, once. That
-// starts the application's next frame a period later, so the wait moves to
-// after its hand-over: with this, 1.7% of a race's pairs, each such stretch
-// over within a second. The promise is left to its own measurement; moving
-// it with the phase only had the measurement move it back. A move that
-// leaves the waits where they were is not repeated until a window twice as
-// long has said so again.
+// So when twelve pairs in a row - a fifth of a second - wait more than half
+// a display period at admission, the next hold runs one presenter frame
+// longer, once. That starts the application's next frame a period later, so
+// the wait moves to after its hand-over. Single late pairs are common and
+// runs of up to a dozen end by themselves; the slips that stay ran 20 to 114
+// pairs in Galactic Racer. Judged over fixed windows of 32 instead, a slip
+// cost 32 to 64 pairs before it was moved: 1.7-6.8% of a race's pairs, from
+// 57% with no move at all. Not while the runtime runs at a multiple of the
+// period, which moves both waits. The promise is left to its own
+// measurement; moving it with the phase only had the measurement move it
+// back. A move that leaves the waits where they were is not repeated until a
+// run twice as long has said so again.
 void observe_admission_wait(
     SessionState& state, std::chrono::nanoseconds waited) noexcept {
-    constexpr std::uint32_t kWindowPairs = 32;
+    constexpr std::uint32_t kLateRun = 12;
     constexpr std::uint32_t kLongestBackoff = 64;
     const auto period = std::chrono::nanoseconds(
         static_cast<std::int64_t>(state.presenter_display_period));
     if (state.frames_per_application_frame != 2U ||
-        period <= std::chrono::nanoseconds::zero()) {
-        state.admission_window_pairs = 0;
-        state.admission_window_late = 0;
+        period <= std::chrono::nanoseconds::zero() ||
+        state.runtime_slowed.load(std::memory_order_relaxed)) {
+        state.admission_late_run = 0;
         return;
     }
-    ++state.admission_window_pairs;
-    if ((waited + state.test_admission_wait) * 2 > period) {
-        ++state.admission_window_late;
-    }
-    if (state.admission_window_pairs < kWindowPairs * state.rephase_backoff) {
-        return;
-    }
-    const std::uint32_t pairs = state.admission_window_pairs;
-    const std::uint32_t late_pairs = state.admission_window_late;
-    state.admission_window_pairs = 0;
-    state.admission_window_late = 0;
-    const bool late = late_pairs * 10 >= pairs * 9;
-    if (state.rephase_check_due) {
-        // The window after a move: did it take?
-        state.rephase_check_due = false;
-        if (late) {
-            state.rephase_backoff =
-                std::min(state.rephase_backoff * 2, kLongestBackoff);
-            return;
+    if ((waited + state.test_admission_wait) * 2 <= period) {
+        // A move that took, or the phase as it should be.
+        if (state.rephase_check_due) {
+            state.rephase_check_due = false;
+            state.rephase_backoff = 1;
         }
-        state.rephase_backoff = 1;
+        state.admission_late_run = 0;
+        return;
     }
-    if (!late) {
+    if (++state.admission_late_run < kLateRun * state.rephase_backoff) {
+        return;
+    }
+    const std::uint32_t run = state.admission_late_run;
+    state.admission_late_run = 0;
+    if (state.rephase_check_due) {
+        // The last move left the waits where they were.
+        state.rephase_check_due = false;
+        state.rephase_backoff =
+            std::min(state.rephase_backoff * 2, kLongestBackoff);
         return;
     }
     state.pair_hold_extra_frames = 1;
     state.rephase_check_due = true;
-    // 720: a the pairs of the window that waited at admission, b the pairs
-    // in it, c how many windows long it was.
+    // 720: a the late pairs in a row, b the run it took, c how many runs
+    // long that was.
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::presenter_transition,
         720,
-        late_pairs,
-        pairs,
+        run,
+        kLateRun * state.rephase_backoff,
         state.rephase_backoff);
 }
 

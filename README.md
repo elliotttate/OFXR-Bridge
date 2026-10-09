@@ -356,7 +356,10 @@ OpenXR session, and extrapolation wins if both are set.
   wait before synthesis and, when nine in ten pairs of a window spend more
   than half a period there, holds the game one presenter frame longer once;
   live that left 1.7-6.8% of pairs there, each stretch over within a second,
-  and every full-rate round at 62 ms. While SteamVR runs at half the rate the
+  and every full-rate round at 62 ms. Triggered instead by twelve late pairs
+  in a row, which single late pairs and short runs never reach, each slip is
+  moved after a fifth of a second: 1.3% of a race's full-rate pairs, the
+  longest run 13. While SteamVR runs at half the rate the
   promise stops measuring too, where it had swung between one period and
   three. Details in [BUILDING.md](docs/BUILDING.md).
 - **The game is promised the time its frame is shown.** The display time a
@@ -560,6 +563,14 @@ table, and native's and NVIDIA's flow cost more beside a running game:
 
 NVIDIA's flow was the one method that cost frames there, and the rounds
 after it were the ones SteamVR dropped to half the rate.
+
+At 2886x2886 per eye the GPU was saturated (110-114 frames a second for
+every method) and the spans were steady from round to round: OFXR + DLSS
+vectors 0.57-0.58 ms, FidelityFX 1.24 ms, native 67% 1.54-1.61 ms, the hybrid
+1.90-1.92 ms, native 100% 1.9-4.7 ms and NVIDIA medium 9.1 ms. Beside a game
+that fills the GPU, FidelityFX's many short passes stretch to twice their
+offline time while native's evaluation does not, so there native 67% takes
+less of the GPU's time than the hybrid; the hybrid still errs least.
 
 **"Prefer FPS over latency", live.** The tray's option (the deeper pipeline,
 on by default) holds each synthetic a display period so synthesis has time
