@@ -331,6 +331,9 @@ scale several times over. Against the true midpoint frame:
 | 50% | 10.9 | 25.0 | 16.6 |
 | A blend of the two frames | 28.8 | | |
 
+At 3X, against the true frames a third and two thirds of the way from A, 67%
+errs 5.4 and 5.0 where full resolution errs 3.4 and 3.0: each generated frame
+restores detail from its own point along the motion.
 67% beats 70% and 75% because it puts the feature on the game's two-thirds
 guide grid; 70%, 64% and 60% measured 7.4, 6.3 and 8.4 with a quarter
 tolerance, against 67%'s 6.1. 85% is no use: it is closer to full quality, but it loses the

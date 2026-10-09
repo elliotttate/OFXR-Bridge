@@ -4043,6 +4043,14 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
     // Per setting: overall, centre, outer and edge error, summed over eyes and slides.
     std::vector<std::array<double, 4>> totals(settings.size());
     double blend_total = 0;
+    // 3X: each of the two generated frames restores detail from its own point
+    // along the motion, a third and two thirds of the way from A.
+    const std::array<const char*, 2> triple_scales{"100", "67"};
+    std::array<std::array<double, 2>, 2> triple_totals{};
+    auto second_output = create_source_texture(fixture, width, height);
+    const std::array<xrfg::D3D12NativeDlssG::Output, 2> triple_outputs{
+        {{output.Get()}, {second_output.Get()}}};
+    const bool triple = xrfg::native_dlssg_max_generated_frames(fixture.device()) >= 2;
     for (const auto& slide : slides) {
         const float bg_motion = slide[0], fg_motion = slide[1];
         const auto a_pattern = scene(0, 0), b_pattern = scene(bg_motion, fg_motion);
@@ -4109,6 +4117,39 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                 }
             }
         }
+        if (!triple) continue;
+        const std::array<StereoPattern, 2> thirds{scene(bg_motion / 3, fg_motion / 3),
+                                                  scene(bg_motion * 2 / 3, fg_motion * 2 / 3)};
+        for (std::size_t s = 0; s < triple_scales.size(); ++s) {
+            SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", triple_scales[s]);
+            SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_DETAIL", nullptr);
+            xrfg::D3D12NativeDlssG native;
+            require_hresult(native.initialize(fixture.device(), fixture.queue(),
+                                              sources[0]->GetDesc(), kFormat),
+                            "scale quality 3X initialization");
+            const auto seed_a = guides(1, still, depth_a), seed_b = guides(2, still, depth_a);
+            const auto moved = guides(3, motion, depth_b);
+            HRESULT seeded = E_FAIL, generated = E_FAIL;
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                seeded = native.record(list, 0, sources[0].Get(), sources[0].Get(), views, views,
+                                       &seed_a, &seed_b, triple_outputs,
+                                       D3D12_RESOURCE_STATE_RENDER_TARGET);
+            });
+            fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
+                generated = native.record(list, 0, sources[0].Get(), sources[1].Get(), views,
+                                          views, &seed_b, &moved, triple_outputs,
+                                          D3D12_RESOURCE_STATE_RENDER_TARGET);
+            });
+            require(seeded == S_OK && generated == S_OK, "scale quality 3X pair failed");
+            for (UINT index = 0; index < 2; ++index) {
+                const auto actual = readback_pattern(fixture, triple_outputs[index].image,
+                                                     D3D12_RESOURCE_STATE_RENDER_TARGET);
+                for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                    triple_totals[s][index] +=
+                        mean_absolute_rgb_error(actual, thirds[index], width, height, eye, margin);
+                }
+            }
+        }
     }
     SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", nullptr);
     SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_DETAIL", nullptr);
@@ -4118,6 +4159,11 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
         std::cout << "scale quality scale=" << settings[s].scale << " detail=" << settings[s].detail
                   << " mae=" << totals[s][0] / runs << " centre=" << totals[s][1] / runs
                   << " outer=" << totals[s][2] / runs << " edge=" << totals[s][3] / runs << '\n';
+    }
+    for (std::size_t s = 0; triple && s < triple_scales.size(); ++s) {
+        std::cout << "scale quality 3X scale=" << triple_scales[s]
+                  << " third_mae=" << triple_totals[s][0] / runs
+                  << " two_thirds_mae=" << triple_totals[s][1] / runs << '\n';
     }
     fixture.require_no_debug_errors();
 }
