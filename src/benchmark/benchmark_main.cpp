@@ -154,7 +154,7 @@ int wmain(int argc, wchar_t** argv) {
         results.gpu = utf8(adapter.name);
         results.vendor_id = adapter.vendor_id;
         results.device_id = adapter.device_id;
-        results.driver = xrfg::fg_benchmark::driver_version_text(adapter.driver_version);
+        results.driver = xrfg::benchmark::driver_version_text(adapter.driver_version);
         emit("adapter " + std::to_string(adapter.vendor_id) + " " + std::to_string(adapter.device_id) +
              " " + results.driver + " " + results.gpu);
     };

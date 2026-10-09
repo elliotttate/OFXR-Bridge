@@ -31,14 +31,7 @@ struct AdapterInfo {
     std::uint64_t dedicated_video_memory{};
     bool software{};
 };
-inline constexpr std::uint32_t kNvidiaVendorId = 0x10de;
-
-// "32.0.15.8180".
-[[nodiscard]] std::string driver_version_text(std::uint64_t version);
-// "581.80": NVIDIA's own number, from the last five digits. Empty for others.
-[[nodiscard]] std::string nvidia_driver_text(std::uint32_t vendor_id, std::uint64_t version);
-// The adapter games run on: the high-performance one, as games pick it.
-[[nodiscard]] HRESULT high_performance_adapter(AdapterInfo* info) noexcept;
+inline constexpr std::uint32_t kNvidiaVendorId = benchmark::kNvidiaVendorId;
 
 struct Options {
     std::uint32_t eye_width{2064};

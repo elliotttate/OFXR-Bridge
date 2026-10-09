@@ -740,50 +740,6 @@ struct Context {
 
 } // namespace
 
-std::string driver_version_text(std::uint64_t version) {
-    char buffer[48]{};
-    std::snprintf(buffer, sizeof(buffer), "%u.%u.%u.%u",
-                  static_cast<unsigned>((version >> 48) & 0xFFFF), static_cast<unsigned>((version >> 32) & 0xFFFF),
-                  static_cast<unsigned>((version >> 16) & 0xFFFF), static_cast<unsigned>(version & 0xFFFF));
-    return buffer;
-}
-
-std::string nvidia_driver_text(std::uint32_t vendor_id, std::uint64_t version) {
-    if (vendor_id != kNvidiaVendorId || version == 0) return {};
-    // 32.0.15.8180 is 581.80: the last digit of the third part and the fourth.
-    const unsigned number = static_cast<unsigned>(((version >> 16) & 0xFFFF) % 10) * 10000U +
-                            static_cast<unsigned>(version & 0xFFFF);
-    char buffer[24]{};
-    std::snprintf(buffer, sizeof(buffer), "%u.%02u", number / 100, number % 100);
-    return buffer;
-}
-
-HRESULT high_performance_adapter(AdapterInfo* info) noexcept {
-    if (info == nullptr) return E_POINTER;
-    ComPtr<IDXGIFactory6> factory;
-    HRESULT result = CreateDXGIFactory2(0, IID_PPV_ARGS(factory.GetAddressOf()));
-    if (FAILED(result)) return result;
-    for (UINT index = 0;; ++index) {
-        ComPtr<IDXGIAdapter1> adapter;
-        result = factory->EnumAdapterByGpuPreference(index, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-                                                     IID_PPV_ARGS(adapter.GetAddressOf()));
-        if (FAILED(result)) return result;
-        DXGI_ADAPTER_DESC1 description{};
-        if (FAILED(adapter->GetDesc1(&description)) ||
-            (description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) continue;
-        *info = {};
-        info->name = description.Description;
-        info->vendor_id = description.VendorId;
-        info->device_id = description.DeviceId;
-        info->dedicated_video_memory = description.DedicatedVideoMemory;
-        LARGE_INTEGER version{};
-        if (SUCCEEDED(adapter->CheckInterfaceSupport(__uuidof(IDXGIDevice), &version))) {
-            info->driver_version = static_cast<std::uint64_t>(version.QuadPart);
-        }
-        return S_OK;
-    }
-}
-
 HRESULT run(const Options& options, const Callbacks& callbacks, std::wstring* error) noexcept {
     try {
         if (options.eye_width < 64 || options.eye_height < 64 || options.eye_width > 8192 ||

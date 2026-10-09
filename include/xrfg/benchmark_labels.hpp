@@ -33,7 +33,8 @@ void apply_dlss_game_mode(LauncherSettings& settings, DlssGameMode mode) noexcep
 [[nodiscard]] int input_scale_percent(NvidiaInputScale scale) noexcept;
 [[nodiscard]] std::wstring method_name(Method method);
 [[nodiscard]] std::wstring dlss_game_mode_name(DlssGameMode mode);
-// "NVIDIA optical flow, medium · 2X", for the menu's status line.
+// The menu's status line: "NVIDIA optical flow, medium 50%", a middle dot,
+// then "2X" or "3X".
 [[nodiscard]] std::wstring active_method_summary(const LauncherSettings& settings);
 
 // A method's GPU time per generated pair (or triple, at 3X) with the given
@@ -61,8 +62,9 @@ struct CostQuery {
 [[nodiscard]] ModeCost dlss_game_cost(const benchmark::Results& results,
                                       const LauncherSettings& settings, DlssGameMode mode,
                                       const CostQuery& query = {});
-// The menu's right-hand column: "0.6 ms · up to +95%", "not available on this
-// PC", "failed in the benchmark", or nothing when the case did not run.
+// The menu's right-hand column: "0.6 ms", a middle dot and "up to +95%";
+// "not available on this PC", "failed in the benchmark", or nothing when the
+// case did not run.
 [[nodiscard]] std::wstring menu_annotation(const ModeCost& cost, double refresh_hz,
                                            bool triple);
 

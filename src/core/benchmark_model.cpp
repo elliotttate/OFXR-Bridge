@@ -410,6 +410,33 @@ double snap_refresh(double hz) noexcept {
     return std::round(hz);
 }
 
+std::string driver_version_text(std::uint64_t version) {
+    char buffer[48]{};
+    std::snprintf(buffer, sizeof(buffer), "%u.%u.%u.%u",
+                  static_cast<unsigned>((version >> 48) & 0xFFFF),
+                  static_cast<unsigned>((version >> 32) & 0xFFFF),
+                  static_cast<unsigned>((version >> 16) & 0xFFFF),
+                  static_cast<unsigned>(version & 0xFFFF));
+    return buffer;
+}
+
+std::string nvidia_driver_text(std::uint32_t vendor_id, std::string_view version) {
+    if (vendor_id != kNvidiaVendorId) return {};
+    // The last two dot-separated parts.
+    const std::size_t last = version.rfind('.');
+    if (last == std::string_view::npos || last == 0) return {};
+    const std::size_t third = version.rfind('.', last - 1);
+    const auto minor = parse_integer<unsigned>(version.substr(last + 1));
+    const auto major = parse_integer<unsigned>(
+        version.substr(third == std::string_view::npos ? 0 : third + 1,
+                       last - (third == std::string_view::npos ? 0 : third + 1)));
+    if (!minor || !major || *minor > 9999) return {};
+    const unsigned number = (*major % 10) * 10000U + *minor;
+    char buffer[24]{};
+    std::snprintf(buffer, sizeof(buffer), "%u.%02u", number / 100, number % 100);
+    return buffer;
+}
+
 std::wstring format_ms(double milliseconds) {
     wchar_t buffer[32]{};
     std::swprintf(buffer, std::size(buffer), milliseconds < 1.0 ? L"%.2f ms" : L"%.1f ms",
@@ -418,7 +445,7 @@ std::wstring format_ms(double milliseconds) {
 }
 
 std::wstring short_annotation(const Estimate& value) {
-    std::wstring text = format_ms(value.cost_ms) + L" · ";
+    std::wstring text = format_ms(value.cost_ms) + L" \u00B7 ";
     if (!value.fits) {
         wchar_t buffer[48]{};
         std::swprintf(buffer, std::size(buffer), L"too slow for %.0f Hz", value.refresh_hz);

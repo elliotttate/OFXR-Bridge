@@ -155,9 +155,17 @@ struct HeadsetGuess {
 // To the nearest whole rate, or to the nearest common one within 1 Hz.
 [[nodiscard]] double snap_refresh(double hz) noexcept;
 
+inline constexpr std::uint32_t kNvidiaVendorId = 0x10de;
+// IDXGIAdapter::CheckInterfaceSupport's driver version: "32.0.15.8180".
+[[nodiscard]] std::string driver_version_text(std::uint64_t version);
+// NVIDIA's own number for it, "581.80" from 32.0.15.8180: the last digit of
+// the third part and the fourth. Empty for another vendor.
+[[nodiscard]] std::string nvidia_driver_text(std::uint32_t vendor_id, std::string_view version);
+
 // "0.59 ms", "12.4 ms": two significant decimals under 1 ms, one above.
 [[nodiscard]] std::wstring format_ms(double milliseconds);
-// "0.6 ms · up to +95%", or "2.9 ms · too slow for 90 Hz".
+// "0.6 ms", a middle dot and "up to +95%"; or "too slow for 90 Hz" after the
+// dot when no game can gain at that rate.
 [[nodiscard]] std::wstring short_annotation(const Estimate& estimate);
 // Latency a method adds to the real frames, in display frames: 0 for
 // extrapolation, frames_per_game_frame - 1 for interpolation.

@@ -128,10 +128,17 @@ void speed_up_model() {
             "3X budget arithmetic");
     // A cost of a whole display period or more gains nothing at 2X.
     require(!estimate(11.2, 90.0, 2).fits && estimate(11.0, 90.0, 2).fits, "too slow");
-    require(short_annotation(ffx) == L"0.60 ms · up to +95%", "menu annotation");
-    require(short_annotation(estimate(12.0, 90.0, 2)) == L"12.0 ms · too slow for 90 Hz",
+    require(short_annotation(ffx) == L"0.60 ms \u00B7 up to +95%", "menu annotation");
+    require(short_annotation(estimate(12.0, 90.0, 2)) == L"12.0 ms \u00B7 too slow for 90 Hz",
             "menu annotation when too slow");
     require(format_ms(2.94) == L"2.9 ms" && format_ms(0.534) == L"0.53 ms", "format_ms");
+    const std::uint64_t driver = (32ULL << 48) | (15ULL << 16) | 8180ULL;
+    require(driver_version_text(driver) == "32.0.15.8180", "driver version text");
+    require(nvidia_driver_text(kNvidiaVendorId, "32.0.15.8180") == "581.80" &&
+                nvidia_driver_text(kNvidiaVendorId, "32.0.16.1656") == "616.56" &&
+                nvidia_driver_text(0x1002, "32.0.15.8180").empty() &&
+                nvidia_driver_text(kNvidiaVendorId, "nonsense").empty(),
+            "NVIDIA's driver number");
     require(added_latency_frames(CaseKind::extrapolate, 2) == 0 &&
                 added_latency_frames(CaseKind::flow, 2) == 1 &&
                 added_latency_frames(CaseKind::native, 3) == 2,
@@ -213,7 +220,7 @@ void tray_lookups() {
     LauncherSettings both;
     both.dlss_flow_hybrid = both.extrapolate = true;
     require(dlss_game_mode(both) == DlssGameMode::hybrid, "the synthesizer prefers the hybrid");
-    require(active_method_summary(settings) == L"NVIDIA optical flow, medium 50% · 2X",
+    require(active_method_summary(settings) == L"NVIDIA optical flow, medium 50% \u00B7 2X",
             "status line");
 
     xrfg::benchmark::Results results;
@@ -258,7 +265,7 @@ void tray_lookups() {
             "DLSS-game modes include the guide copy");
     require(dlss_game_cost(results, settings, DlssGameMode::extrapolate).status == CaseStatus::not_run,
             "no extrapolation result");
-    require(menu_annotation(medium, 90.0, false) == L"2.9 ms · up to +74%",
+    require(menu_annotation(medium, 90.0, false) == L"2.9 ms \u00B7 up to +74%",
             "annotation from settings");
     require(menu_annotation(method_cost(results, settings, Method::nvidia_slow), 90.0, false) ==
                 L"not available on this PC" &&
