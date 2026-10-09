@@ -87,7 +87,7 @@ struct Params {
     UINT eye_x, cell_x, cell_width, cell_height;
     float motion_normal[2], guide_scale[2];
     float detail_falloff, towards_a;
-    UINT padding[2];
+    UINT depth_inverted, padding;
 };
 static_assert(sizeof(Params) == kParams * sizeof(UINT));
 // Where an eye sits in its feature, and the columns its pack writes: the eye
@@ -737,6 +737,7 @@ struct D3D12NativeDlssG::Impl {
         p.guide_slice = g.depth->GetDesc().DepthOrArraySize == 1 ? 0 : g.output_slice;
         p.motion_slice = g.motion_slice;
         p.encode_srgb = encode_srgb;
+        p.depth_inverted = g.depth_inverted;
         p.output_rect[0] = float(r.offset_x);
         p.output_rect[1] = float(r.offset_y);
         p.output_rect[2] = float(r.width);
@@ -1308,11 +1309,12 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 t.to(p.features[f].color.Get(), kCommon, kAnyRead);
             }
         }
-        // It also follows B's engine motion.
+        // It also follows B's engine motion, at the nearest surface.
         if (p.scale < 100) {
             for (UINT i = 0; i < bv.size(); ++i) {
                 const auto &gb = *bg->eyes[guide_index(i)];
                 t.to(gb.motion_vectors.Get(), gb.resource_state, kAnyRead);
+                t.to(gb.depth.Get(), gb.depth_resource_state, kAnyRead);
             }
         }
         for (const auto &output : outputs) {

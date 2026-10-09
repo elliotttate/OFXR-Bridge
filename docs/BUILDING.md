@@ -286,11 +286,14 @@ the smaller feature and maps the guides onto its grid. The composition then
 upsamples NGX's frame and restores the real frame's detail: following B's
 engine motion to where each generated pixel's content lies in B, it adds B's
 texel there less B as packed, wherever the generated frame agrees with the
-packed B to within a quarter of the display range. Where they disagree - an
-occlusion, or content the vectors do not describe - the pixel stays as
-generated, and softer. At 3004x3004 a turning-head 2X pair costs 1.71 ms at
-67% and 1.36 ms at 50%, against 2.35 ms (still head: 1.45 and 1.21 against
-1.90; 3X turning: 2.49 and 2.03 against 3.50). Live in Galactic Racer on the
+packed B to within a quarter of the display range. Its second step follows
+the nearest surface's motion among a depth texel and its four neighbours, as
+NGX dilates at depth edges; that cut the error at moving edges by a tenth for
+about 30 us. Where the frames disagree - an occlusion, or content the vectors
+do not describe - the pixel stays as generated, and softer. At 3004x3004 a
+turning-head 2X pair costs 1.74 ms at 67% and 1.40 ms at 50%, against 2.35 ms
+(still head: 1.48 and 1.24 against 1.90; 3X turning: 2.55 and 2.09 against
+3.50). Live in Galactic Racer on the
 Meta XR Simulator at 2160x2376 per eye, racing, two interleaved rounds
 measured 1.60 ms per pair at full resolution, 1.19 at 67% and 0.97 at 50%
 (OFXR + DLSS vectors: 0.26). On the Steam Frame at 3004x3004 and 120 Hz,
@@ -317,9 +320,9 @@ crosses it at 16, with two-thirds guides. Against the true midpoint frame:
 | Feature resolution | Error | At the square's edges |
 |---|---|---|
 | 100% | 0.68 | 4.9 |
-| 75% | 3.1 | 11.7 |
-| 67% | 1.85 | 12.4 |
-| 50% | 3.5 | 12.1 |
+| 75% | 3.1 | 10.2 |
+| 67% | 1.81 | 11.2 |
+| 50% | 3.5 | 10.5 |
 | A blend of the two frames | 33 | |
 
 Without the detail restore, 67% measured 8.4 and 50% 12.1. 67% beats 75%

@@ -168,8 +168,8 @@ frame's detail wherever it can follow the game's motion. Moving content in the
 generated frames is softer; occlusion edges soften most. In return, Galactic
 Racer on a Steam Frame (3004x3004 per eye, 120 Hz, racing) rendered 106.3
 game frames a second at 67% and 107.8 at 50%, against 99.5 at 100% (OFXR +
-DLSS vectors: 112.5). Offline, a turning-head 2X pair costs 1.71 ms at 67% and
-1.36 ms at 50%, against 2.35 ms. 67% suits games whose DLSS renders at two
+DLSS vectors: 112.5). Offline, a turning-head 2X pair costs 1.74 ms at 67% and
+1.40 ms at 50%, against 2.35 ms. 67% suits games whose DLSS renders at two
 thirds (Quality).
 
 | Where | Setting |
@@ -326,7 +326,7 @@ Tried and rejected:
   much detail, so it is an option instead (see
   [Turning it on](#turning-it-on)). There, the bridge restores the real
   frame's detail along the game's motion. On a moving test scene, that takes
-  67%'s error from 8.4 to 1.85, against 0.68 at full resolution.
+  67%'s error from 8.4 to 1.81, against 0.68 at full resolution.
 - **A half-size guide grid.** Depth edges measured worse.
 - **8-bit colour for the reseed too.** It is slightly faster, but the
   rotation sweep's error rises from 0.31 to 0.40.

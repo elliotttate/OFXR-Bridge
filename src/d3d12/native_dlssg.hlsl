@@ -41,7 +41,8 @@ cbuffer Params : register(b0) {
     // How far the composed generated frame lies from B towards A: one half
     // for 2X, two thirds and one third for 3X.
     float TowardsA;
-    uint2 Padding2;
+    uint DepthInverted; // nearer surfaces have larger depth values
+    uint Padding2;
 };
 
 float3 rotate(float3 ray, float4 q) {
@@ -112,6 +113,27 @@ float2 towards_a(float2 uv) {
     float4 inverse_rotation = float4(-Rotation.xyz, Rotation.w);
     float3 b_ray = rotate(a_ray, inverse_rotation);
     return source_uv(b_ray, TargetTangents) - uv;
+}
+
+// The point of the nearest surface among a depth texel and its four
+// neighbours, as NGX dilates motion at depth edges: an edge pixel moves with
+// the surface in front. The full 3x3 measured the same and cost more.
+float2 nearest_surface(float2 uv) {
+    int2 lo = int2(DepthRect.xy);
+    int2 hi = max(lo, int2(ceil(DepthRect.xy + DepthRect.zw)) - 1);
+    int2 centre = clamp(int2(DepthRect.xy + uv * DepthRect.zw), lo, hi);
+    int2 pick = centre;
+    float best = SourceDepth.Load(int4(centre, GuideSlice, 0));
+    const int2 neighbours[4] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
+    [unroll] for (int i = 0; i < 4; ++i) {
+        int2 p = clamp(centre + neighbours[i], lo, hi);
+        float d = SourceDepth.Load(int4(p, GuideSlice, 0));
+        if (DepthInverted != 0 ? d > best : d < best) {
+            best = d;
+            pick = p;
+        }
+    }
+    return (float2(pick) + 0.5 - DepthRect.xy) / DepthRect.zw;
 }
 
 // Both eyes can share one feature, side by side. Pixels of the cell outside
@@ -215,9 +237,11 @@ float4 NativeDlssGPS(Vertex input) : SV_Target {
                                                     float2(EyeX, 0)).rgb;
     float2 uv = x / float2(Extent);
     // The content at x came from y = x - TowardsA * motion(y); two steps of
-    // that fixed point follow the motion field across most of an edge.
+    // that fixed point follow the motion field across most of an edge. The
+    // second step takes the nearest surface's motion, which cut the error at
+    // moving edges by a tenth; in the first step it made no difference.
     float2 y = uv - TowardsA * towards_a(uv);
-    y = uv - TowardsA * towards_a(saturate(y));
+    y = uv - TowardsA * towards_a(nearest_surface(saturate(y)));
     int2 texel = clamp(int2(y * float2(Extent)), int2(0, 0), int2(Extent) - 1);
     float2 centre = (float2(texel) + 0.5) * float2(FeatureExtent) / float2(Extent) - 0.5 +
                     float2(EyeX, 0);
