@@ -15,6 +15,7 @@
 #include "hybrid_synthesize_midpoint_pixel_shader.hpp"
 #include "extrapolate_pixel_shader.hpp"
 #include "extrapolate_flow_pixel_shader.hpp"
+#include "extrapolate_hybrid_pixel_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -797,6 +798,7 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> hybrid_graphics_pipeline;
     ComPtr<ID3D12PipelineState> extrapolate_graphics_pipeline;
     ComPtr<ID3D12PipelineState> extrapolate_flow_graphics_pipeline;
+    ComPtr<ID3D12PipelineState> extrapolate_hybrid_graphics_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
@@ -1165,6 +1167,17 @@ struct D3D12FrameSynthesizer::Impl {
         result = device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(extrapolate_flow_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result)) {
+            return result;
+        }
+
+        graphics_description.PS = {
+            g_xrfg_extrapolate_hybrid_pixel_shader,
+            sizeof(g_xrfg_extrapolate_hybrid_pixel_shader),
+        };
+        result = device->CreateGraphicsPipelineState(
+            &graphics_description,
+            IID_PPV_ARGS(extrapolate_hybrid_graphics_pipeline.GetAddressOf()));
         if (FAILED(result)) {
             return result;
         }
@@ -3792,7 +3805,9 @@ struct D3D12FrameSynthesizer::Impl {
         }
         // The hybrid runs FidelityFX's flow below and composes with the
         // game's vectors as well.
-        const bool hybrid = nvidia_options.hybrid &&
+        // Extrapolation with the game's vectors takes the same route: it
+        // extrapolates from both and keeps whichever explains A better.
+        const bool hybrid = (nvidia_options.hybrid || nvidia_options.extrapolate) &&
             backend == D3D12OpticalFlowBackend::fidelity_fx &&
             valid_game_motion_pair(previous_source, current_source) &&
             current_source.motion_vectors &&
@@ -3971,11 +3986,15 @@ struct D3D12FrameSynthesizer::Impl {
                 kSrvDescriptorCount,
                 descriptor_increment));
         // Without the game's vectors, extrapolation follows FidelityFX's flow.
-        slot.command_list->SetPipelineState(guides ? hybrid_graphics_pipeline.Get()
+        slot.command_list->SetPipelineState(
+            guides ? (nvidia_options.extrapolate ? extrapolate_hybrid_graphics_pipeline.Get()
+                                                 : hybrid_graphics_pipeline.Get())
             : nvidia_options.extrapolate ? extrapolate_flow_graphics_pipeline.Get()
             : graphics_pipeline.Get());
         dred_marker(slot.command_list.Get(), "OFXR FidelityFX composition draw");
-        // The guides' motion is read by the hybrid composition.
+        const auto view_mappings = parameters.previous_mappings;
+        // The guides' motion is read by the hybrid composition, and their
+        // depth by the extrapolating one.
         const auto motion_barriers = [&](bool to_read) {
             if (!guides) return;
             for (UINT eye = 0; eye < guides->eye_count; ++eye) {
@@ -3989,6 +4008,18 @@ struct D3D12FrameSynthesizer::Impl {
                     : transition_barrier(guide->motion_vectors.Get(), kShaderReadState, guide->resource_state);
                 slot.command_list->ResourceBarrier(1, &barrier);
             }
+            if (!nvidia_options.extrapolate) return;
+            for (UINT eye = 0; eye < guides->eye_count; ++eye) {
+                const auto& guide = guides->eyes[eye];
+                bool shared = false;
+                for (UINT other = 0; other < eye; ++other)
+                    shared = shared || guides->eyes[other]->depth.Get() == guide->depth.Get();
+                if (!guide->depth || shared || guide->depth_resource_state == kShaderReadState) continue;
+                const auto barrier = to_read
+                    ? transition_barrier(guide->depth.Get(), guide->depth_resource_state, kShaderReadState)
+                    : transition_barrier(guide->depth.Get(), kShaderReadState, guide->depth_resource_state);
+                slot.command_list->ResourceBarrier(1, &barrier);
+            }
         };
         motion_barriers(true);
         slot.command_list->IASetPrimitiveTopology(
@@ -3998,7 +4029,7 @@ struct D3D12FrameSynthesizer::Impl {
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
             parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
-                packed_synthesis_fraction(nvidia_options.extrapolate && !guides
+                packed_synthesis_fraction(nvidia_options.extrapolate
                     ? (synthetic_output_fraction(output) - 1.0F) * 0.5F
                     : synthetic_output_fraction(output));
             const UINT first_rtv =
@@ -4038,6 +4069,17 @@ struct D3D12FrameSynthesizer::Impl {
                         ? std::array<float, 2>{guide->jitter_x - guide->previous_jitter_x,
                                                guide->jitter_y - guide->previous_jitter_y}
                         : std::array<float, 2>{};
+                    if (nvidia_options.extrapolate) {
+                        // The depth rectangle rides in the other view's
+                        // mapping, which this view's draw never reads.
+                        parameters.previous_mappings = view_mappings;
+                        parameters.previous_mappings[1U - std::min(view_index, 1U)].source_rect = {
+                            static_cast<float>(guide->depth_x), static_cast<float>(guide->depth_y),
+                            static_cast<float>(guide->depth_width), static_cast<float>(guide->depth_height)};
+                        parameters.synthesis_flags = (parameters.synthesis_flags & ~0x0CU) |
+                            (guide->depth && guide->depth_width && guide->depth_height ? 8U : 0U) |
+                            (guide->depth_inverted ? 4U : 0U);
+                    }
                 }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,

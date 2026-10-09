@@ -1065,8 +1065,13 @@ bool extrapolation_depth() {
 float game_depth(float2 q) {
     float4 output_rect = game_motion_output_rect();
     float2 uv = (q - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
-    float2 size = float2(float(FlowBlockSize & 0xffffU), float(FlowBlockSize >> 16));
-    float2 origin = float2(float(FlowWidth), float(FlowHeight));
+    // The hybrid extrapolation keeps the flow's constants, and carries the
+    // depth rectangle in the other view's mapping, which this view's draw
+    // never reads.
+    float2 size = hybrid_layout ? PreviousMappings[1 - ViewIndex].SourceRect.zw
+                                : float2(float(FlowBlockSize & 0xffffU), float(FlowBlockSize >> 16));
+    float2 origin = hybrid_layout ? PreviousMappings[1 - ViewIndex].SourceRect.xy
+                                  : float2(float(FlowWidth), float(FlowHeight));
     int2 texel = int2(clamp(origin + uv * size, origin, origin + size - 1.0));
     return GameDepth.Load(int4(texel, 0, 0));
 }
@@ -1079,6 +1084,9 @@ bool nearer(float a, float b) {
 // head's turn, stands in for the game's motion, and with no depth the
 // surfaces are ordered by their motion.
 static bool extrapolate_flow = false;
+// How badly the last extrapolated pixel's point explains A: its B sample
+// against A's where its motion says it came from, both blurred a little.
+static float last_extrapolation_error = 1.0;
 float2 extrapolation_displacement(float2 q) {
     if (extrapolate_flow) {
         float2 raw = flow_for_pixel(q, Slice, ViewIndex, 1.0, false);
@@ -1112,10 +1120,14 @@ float4 extrapolate_pixel(float2 pixel, CameraSample here) {
         float radius = (probe & 2) != 0 ? 48.0 : 16.0;
         float2 offset = (probe & 1) != 0 ? float2(0, radius) : float2(radius, 0);
         smooth_motion = smooth_motion && length(extrapolation_motion_texel(pixel + offset) +
-                                  extrapolation_motion_texel(pixel - offset) - 2.0 * here_motion) < 1.0;
+                                  extrapolation_motion_texel(pixel - offset) - 2.0 * here_motion) <
+            (extrapolate_flow ? 3.0 : 1.0);
     }
-    uint candidates = smooth_motion ? 1 : 9;
-    [loop] for (uint candidate = 0; candidate < candidates; ++candidate) {
+    // In the hybrid the vectors order the surfaces by depth; the flow only
+    // offers its own point.
+    uint candidates = smooth_motion || (extrapolate_flow && hybrid_layout) ? 1 : 9;
+    [unroll] for (uint candidate = 0; candidate < 9; ++candidate) {
+        if (candidate >= candidates) break;
         float2 start = pixel;
         if (candidate > 0) {
             uint ring = (candidate - 1) / 4;
@@ -1153,9 +1165,21 @@ float4 extrapolate_pixel(float2 pixel, CameraSample here) {
             }
         }
     }
-    CameraSample b = sample_current_target(found ? best_point : fill_point, Slice, ViewIndex);
+    float2 chosen = found ? best_point : fill_point;
+    CameraSample b = sample_current_target(chosen, Slice, ViewIndex);
+    last_extrapolation_error = 1.0;
     if (b.valid >= 0.5) {
         output_color = saturate(b.color);
+        if (hybrid_layout) {
+            float2 came_from = chosen + extrapolation_displacement(chosen);
+            float4 b_low = 0.0, a_low = 0.0;
+            [unroll] for (uint k = 0; k < 4; ++k) {
+                float2 o = float2((k & 1) != 0 ? 0.5 : -0.5, (k & 2) != 0 ? 0.5 : -0.5);
+                b_low += sample_current_target(chosen + o, Slice, ViewIndex).color;
+                a_low += sample_previous_target(came_from + o, Slice, ViewIndex).color;
+            }
+            last_extrapolation_error = rgb_error(b_low, a_low) * 0.25;
+        }
     }
     return output_color;
 }
@@ -1179,6 +1203,19 @@ float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
 float4 SynthesizeExtrapolatedFlowPS(FullscreenVertex input) : SV_Target {
     extrapolate_flow = true;
     return extrapolate(input);
+}
+
+// Extrapolation from both the game's vectors and FidelityFX's flow: per
+// pixel, whichever's point explains A better. The vectors keep a tie.
+float4 SynthesizeExtrapolatedHybridPS(FullscreenVertex input) : SV_Target {
+    hybrid_layout = true;
+    float4 vectors = extrapolate(input);
+    float vectors_error = last_extrapolation_error;
+    // Where the vectors' point explains A, the flow need not be asked.
+    [branch] if (vectors_error < 0.02) return vectors;
+    extrapolate_flow = true;
+    float4 flow = extrapolate(input);
+    return lerp(flow, vectors, saturate(1.0 + (last_extrapolation_error - vectors_error) * 8.0));
 }
 
 // The game's vectors and FidelityFX's optical flow both: per pixel, whichever
