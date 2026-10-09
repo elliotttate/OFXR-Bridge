@@ -336,13 +336,15 @@ HRESULT acquire_ngx(ID3D12Device *d) {
     ngx_devices.push_back({d, 1});
     return S_OK;
 }
+// The device stays initialised once its last user goes. A later instance -
+// the one a resized swapchain brings, say - would otherwise initialise NGX
+// again in the middle of the game's own DLSS work, which recreates its
+// features at the same resize.
 void release_ngx(ID3D12Device *d) {
     std::scoped_lock lock(ngx_mutex);
-    for (auto it = ngx_devices.begin(); it != ngx_devices.end(); ++it) {
-        if (it->device.Get() == d) {
-            if (--it->users == 0) {
-                ngx_devices.erase(it);
-            }
+    for (auto &e : ngx_devices) {
+        if (e.device.Get() == d) {
+            if (e.users) --e.users;
             return;
         }
     }

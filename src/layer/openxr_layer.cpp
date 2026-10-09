@@ -1797,25 +1797,29 @@ struct HandoverCopier {
     }
 
     // The destroy path only: the staging and the images are about to go.
-    void wait_idle() noexcept {
+    // False when the copies were not seen to finish within two seconds.
+    [[nodiscard]] bool wait_idle() noexcept {
         try {
             std::scoped_lock lock(mutex);
             if (!fence || next_value <= 1) {
-                return;
+                return true;
             }
             const std::uint64_t target = next_value - 1;
             if (fence->GetCompletedValue() >= target) {
-                return;
+                return true;
             }
             HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
             if (event == nullptr) {
-                return;
+                return false;
             }
+            bool idle = false;
             if (SUCCEEDED(fence->SetEventOnCompletion(target, event))) {
-                WaitForSingleObject(event, 2000);
+                idle = WaitForSingleObject(event, 2000) == WAIT_OBJECT_0;
             }
             CloseHandle(event);
+            return idle;
         } catch (...) {
+            return false;
         }
     }
 };
@@ -2462,9 +2466,15 @@ void destroy_frame_generation_swapchains(
 
         const auto& dispatch = state->session->dispatch;
         // A hand-over copy still running would read staging and write an
-        // image that are both about to be destroyed.
-        if (generation->copier) {
-            generation->copier->wait_idle();
+        // image that are both about to be destroyed. Copies not seen to
+        // finish could still run from command lists freed with the copier,
+        // so then everything is kept, as the synthesizer and history keep
+        // their resources when their work cannot be proven complete. The
+        // runtime frees its private images with the session.
+        if (generation->copier && !generation->copier->wait_idle()) {
+            static_cast<void>(
+                new std::shared_ptr<FrameGenerationSwapchainState>(std::move(generation)));
+            return;
         }
         for (PrivateSwapchainState& image : generation->synthetic) {
             static_cast<void>(
