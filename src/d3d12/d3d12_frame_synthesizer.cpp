@@ -4790,7 +4790,8 @@ struct D3D12FrameSynthesizer::Impl {
         if (native_dlss) native_dlss->submitted(fence.Get(), fence_value);
         if (frame_dump.wanted()) {
             frame_dump.capture(device.Get(), queue.Get(), next.resource.Get(), view_format,
-                {next.views.data(), next.view_count}, next.motion_vectors.get());
+                {next.views.data(), next.view_count}, next.motion_vectors.get(),
+                synthetic_destinations[synthetic_destination_index].resource.Get(), release_state);
         }
         if (used_game_motion && (!native_dlss || native_pair_generated)) report_dlss_motion_vector_use();
 

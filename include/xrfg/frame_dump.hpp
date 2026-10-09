@@ -26,9 +26,12 @@ class FrameDump {
 public:
     // Called once per source; true when this one is to be recorded.
     [[nodiscard]] bool wanted() noexcept;
+    // generated, if given, is the frame generated before this one, as the
+    // headset is sent it; it rests in generated_state.
     void capture(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* colour,
                  DXGI_FORMAT view_format, std::span<const D3D12ReprojectionView> views,
-                 const DlssMotionVectorSet* guides) noexcept;
+                 const DlssMotionVectorSet* guides, ID3D12Resource* generated = nullptr,
+                 D3D12_RESOURCE_STATES generated_state = D3D12_RESOURCE_STATE_COMMON) noexcept;
 
 private:
     bool configured_{}, waiting_{};

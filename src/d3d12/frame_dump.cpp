@@ -58,7 +58,8 @@ bool FrameDump::wait(std::uint64_t value) {
 
 void FrameDump::capture(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12Resource* colour,
                         DXGI_FORMAT view_format, std::span<const D3D12ReprojectionView> views,
-                        const DlssMotionVectorSet* guides) noexcept {
+                        const DlssMotionVectorSet* guides, ID3D12Resource* generated,
+                        D3D12_RESOURCE_STATES generated_state) noexcept {
     try {
         const auto folder = directory_ / ("seq" + std::to_string(sequence_)) /
                             ("frame" + std::to_string(written_));
@@ -105,6 +106,7 @@ void FrameDump::capture(ID3D12Device* device, ID3D12CommandQueue* queue, ID3D12R
         };
         std::string meta = "view_format=" + std::to_string(int(view_format)) + "\n";
         add(colour, D3D12_RESOURCE_STATE_COMMON, "colour.bin");
+        add(generated, generated_state, "generated.bin");
         meta += "view_count=" + std::to_string(views.size()) + "\n";
         char line[512];
         for (std::size_t i = 0; i < views.size(); ++i) {
