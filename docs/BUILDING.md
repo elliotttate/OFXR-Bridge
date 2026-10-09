@@ -286,7 +286,7 @@ the smaller feature and maps the guides onto its grid. The composition then
 upsamples NGX's frame and restores the real frame's detail: following B's
 engine motion to where each generated pixel's content lies in B, it adds B's
 texel there less B as packed, wherever the generated frame agrees with the
-packed B to within a quarter of the display range. Its second step follows
+packed B to within half the display range. Its second step follows
 the nearest surface's motion among a depth texel and its four neighbours, as
 NGX dilates at depth edges; that cut the error at moving edges by a tenth for
 about 30 us. Where the frames disagree - an occlusion, or content the vectors
@@ -314,20 +314,34 @@ offline time, while 75% (1.7 ms) and below match theirs. A feature per eye
 did not avoid that (5.0-5.3 ms at full resolution).
 
 `XRFG_TEST_NATIVE_DLSSG_SCALE_QUALITY=1` measures what that costs on a 1024x768
-scene whose detailed background slides 6 pixels while a striped square
-crosses it at 16, with two-thirds guides. Against the true midpoint frame:
+scene where a detailed background slides behind a striped square, with
+two-thirds guides. The scene is rendered analytically with 4x4 supersampling,
+so the true midpoint frame is exact. Four pairs of slides are averaged: 3.3 to
+9.4 pixels for the background and 9.8 to 21.2 for the square, every one a
+fraction of a pixel on each scale's grid. A single scene with whole-pixel motion
+on one scale's grid, as an earlier version of this benchmark had, flattered that
+scale several times over. Against the true midpoint frame:
 
-| Feature resolution | Error | At the square's edges |
-|---|---|---|
-| 100% | 0.68 | 4.9 |
-| 75% | 3.1 | 10.2 |
-| 67% | 1.81 | 11.2 |
-| 50% | 3.5 | 10.5 |
-| A blend of the two frames | 33 | |
+| Feature resolution | Error | At the square's edges | Without the detail restore |
+|---|---|---|---|
+| 100% | 4.25 | 8.7 | |
+| 85% | 4.41 | 10.6 | 7.9 |
+| 75% | 7.3 | 19.4 | 11.2 |
+| 67% | 5.78 | 14.3 | 10.1 |
+| 50% | 10.9 | 25.0 | 16.6 |
+| A blend of the two frames | 28.8 | | |
 
-Without the detail restore, 67% measured 8.4 and 50% 12.1. 67% beats 75%
-because it matches the guides' grid, and of tolerances from 1/32 to 1 a quarter
-measured the least error at the edges.
+67% beats 70% and 75% because it puts the feature on the game's two-thirds
+guide grid; 70%, 64% and 60% measured 7.4, 6.3 and 8.4 with a quarter
+tolerance, against 67%'s 6.1. 85% is no use: it is closer to full quality, but it loses the
+two-thirds guide grid and costs more than 100% (2.03 ms still and 2.43
+turning). Of tolerances from 1/32 to 1, a half measured the least error,
+overall and at the edges. Picking the nearest surface when the guide grid is
+coarser than the game's guides (at 50%) made no difference. Packing each axis
+foveated was also tried: a smooth cubic gives full resolution at the centre,
+falling towards the edges, within the same pixel count. It measured worse at
+every scale, at the centre too for 75% and 50%: the warp makes uniform motion
+non-uniform, which NGX and the restore handle worse.
 `XRFG_NATIVE_DLSSG_SCALE` and `XRFG_NATIVE_DLSSG_DETAIL` (the tolerance's
 reciprocal; 0 turns the restore off) override both for experiments.
 

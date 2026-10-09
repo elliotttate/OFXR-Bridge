@@ -74,9 +74,9 @@ constexpr UINT kSeedGroupWidth = 16;
 // The lowest reduced feature resolution, in percent of the eye's.
 constexpr UINT kMinScale = 25;
 // A reduced-resolution generated frame takes the real frame's detail where the
-// two differ by less than a quarter of the display range, fading towards it.
-// Of 1/32 to 1, a quarter measured the least error at moving edges.
-constexpr float kDetailFalloff = 4.0F;
+// two differ by less than half the display range, fading towards it. Of 1/32
+// to 1, a half measured the least error at moving edges.
+constexpr float kDetailFalloff = 2.0F;
 
 struct Params {
     UINT extent[2], color_slice, guide_slice;
