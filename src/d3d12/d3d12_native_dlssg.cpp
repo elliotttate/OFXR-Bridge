@@ -42,11 +42,13 @@ constexpr auto kAnyRead = kRead | kPixelRead;
 constexpr auto kWrite = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 constexpr auto kCommon = D3D12_RESOURCE_STATE_COMMON;
 // DLSS-G interpolates display-ready colour, so the pack shader encodes sRGB
-// views. Ten bits per channel cost no more memory than the 8-bit swapchain
-// and keep the resampled previous frame from rounding to 8-bit codes; the
-// generated alpha is not used, so its two bits do not matter.
-constexpr DXGI_FORMAT kColorFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
-constexpr DXGI_FORMAT kFallbackColorFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+// views. An 8-bit swapchain's frame is packed at 8 bits, which hold its codes
+// exactly and which NGX evaluates 2-4% faster. The reseed's resampled previous
+// frame falls between those codes, so it keeps ten bits in a texture of its
+// own; that measures less error than ten bits for both. The generated alpha is
+// not used, so the two-bit alpha does not matter.
+constexpr DXGI_FORMAT kTenBitColorFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
+constexpr DXGI_FORMAT kEightBitColorFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
 // A camera change that moves no pixel of the view further than this keeps the
 // NGX history instead of reseeding it with the aligned previous frame.
 constexpr float kReseedPixels = 0.1F;
@@ -91,7 +93,7 @@ class Transitions {
         }
         Entry *entry = find(r);
         if (!entry) {
-            // Two eyes touch at most 26 distinct resources.
+            // Two eyes touch at most 28 distinct resources.
             if (tracked_count_ == tracked_.size()) {
                 throw std::length_error("native DLSS-G transitions");
             }
@@ -152,6 +154,10 @@ class Transitions {
     UINT tracked_count_{}, pending_count_{};
 };
 
+bool eight_bit(DXGI_FORMAT f) {
+    return f == DXGI_FORMAT_R8G8B8A8_UNORM || f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB ||
+           f == DXGI_FORMAT_B8G8R8A8_UNORM || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+}
 bool srgb(DXGI_FORMAT f) {
     return f == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || f == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 }
@@ -377,6 +383,8 @@ struct D3D12NativeDlssG::Impl {
         NVSDK_NGX_Handle *handle{};
         NVSDK_NGX_Parameter *params{};
         ComPtr<ID3D12Resource> color, motion, depth;
+        // The reseed's colour, when it needs a format of its own.
+        ComPtr<ID3D12Resource> seed_color;
         std::array<ComPtr<ID3D12Resource>, kMaxOutputs> generated, disable;
         UINT width{}, height{}, outputs{};
     };
@@ -407,7 +415,7 @@ struct D3D12NativeDlssG::Impl {
     bool shared_stereo{true};
     UINT seam{kSeam};
     D3D12_RESOURCE_DESC source{};
-    DXGI_FORMAT view_format{}, color_format{kColorFormat};
+    DXGI_FORMAT view_format{}, color_format{kTenBitColorFormat}, seed_format{kTenBitColorFormat};
     UINT increment{}, rtv_increment{}, max_outputs{1};
     bool acquired{}, encode_srgb{};
     ComPtr<ID3D12Fence> completion;
@@ -516,6 +524,12 @@ struct D3D12NativeDlssG::Impl {
         hr = texture(DXGI_FORMAT_R32_FLOAT, f.depth, false, width, height);
         if (FAILED(hr)) {
             return hr;
+        }
+        if (seed_format != color_format) {
+            hr = texture(seed_format, f.seed_color, false, width, height);
+            if (FAILED(hr)) {
+                return hr;
+            }
         }
         f.width = width;
         f.height = height;
@@ -658,10 +672,9 @@ struct D3D12NativeDlssG::Impl {
         raw.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
         device->CreateShaderResourceView(resources[4], &raw, cpu(slot, base + 4));
         srv(slot, base + 5, fallback, formats[0], true);
-        const DXGI_FORMAT ff[]{color_format, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R32_FLOAT};
         for (UINT i = 0; i < 3; ++i) {
             D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
-            u.Format = ff[i];
+            u.Format = resources[6 + i]->GetDesc().Format;
             u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             device->CreateUnorderedAccessView(resources[6 + i], nullptr, &u,
                                               cpu(slot, base + 6 + i));
@@ -850,12 +863,13 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->source = source;
         p->view_format = format;
         p->encode_srgb = srgb(format);
-        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{kColorFormat};
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{kTenBitColorFormat};
         if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support,
                                                sizeof(support))) ||
             !(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE)) {
-            p->color_format = kFallbackColorFormat;
+            p->seed_format = kEightBitColorFormat;
         }
+        p->color_format = eight_bit(format) ? kEightBitColorFormat : p->seed_format;
         p->diagnostic_decisions = environment(L"XRFG_TEST_NATIVE_DLSSG_DECISIONS");
         p->capture_only = environment(L"XRFG_TEST_NATIVE_DLSSG_CAPTURE_ONLY");
         p->test_output = environment(L"XRFG_TEST_NATIVE_DLSSG");
@@ -1163,23 +1177,29 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                          alignment_pixels(av[i], bv[i], params.extent[0], params.extent[1]) >
                              kReseedPixels;
             }
+            // The seed's colour may be a texture of its own; its motion and depth
+            // are the feature's, which the reset does not read.
+            Impl::Feature seed = feature;
+            if (feature.seed_color) {
+                seed.color = feature.seed_color;
+            }
             // A reset clears the whole feature's history, so a reseed packs the
             // aligned A of every eye in it.
             if (reseed) {
-                p.begin_pack(t, feature, true);
+                p.begin_pack(t, seed, true);
                 Params first_params{};
                 for (UINT i = first; i <= last; ++i) {
                     const auto &ga = *ag->eyes[guide_index(i)];
                     auto pa = p.parameters(av[i], ga, i, UINT(av.size()));
                     set_mapping(pa, i);
-                    p.pack_input(list, t, slot, i * kBlocksPerEye * kBlock, feature, a, ga, pa, b,
+                    p.pack_input(list, t, slot, i * kBlocksPerEye * kBlock, seed, a, ga, pa, b,
                                  true);
                     if (i == first) {
                         first_params = pa;
                     }
                 }
-                p.end_pack(t, feature);
-                if (FAILED(p.evaluate(list, t, feature, bv[first], *ag->eyes[guide_index(first)],
+                p.end_pack(t, seed);
+                if (FAILED(p.evaluate(list, t, seed, bv[first], *ag->eyes[guide_index(first)],
                                       first_params, 1, 1, true))) {
                     t.restore();
                     return skip(Skip::evaluate_failed);
