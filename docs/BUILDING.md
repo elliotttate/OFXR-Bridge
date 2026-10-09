@@ -202,7 +202,20 @@ motion is slower), a 16 rather than 64 pixel seam, leaving the reseed's motion
 unwritten, a reset evaluated over smaller motion and depth rectangles (NGX
 requires the full colour extent), and NGX's undocumented
 `DLSSG.InternalWidth`, `DLSSG.DynamicResolution` and `DLSSG.EvalFlags`
-parameters. These feature versions accept only render preset 1.
+parameters. These feature versions accept only render preset 1. Every
+evaluation option measured within 3 us of the default: `notRenderingGameFrames`,
+`menuDetectionEnabled`, `colorBuffersHDR`, `cameraMotionIncluded`,
+`orthoProjection`, `automodeOverrideReset` and
+`minRelativeLinearDepthObjectSeparation` at 1 and 1000. Giving the reseed its
+own input textures, so both packs run before either evaluation, measured no
+faster and would cost about 220 MB more video memory at 3004x3004.
+
+Generating below the eye's resolution and upscaling the result is cheaper -
+at 3004x3004, 75% per axis takes a still/turning pair from 1.66/2.04 ms to
+1.28/1.61 ms and 67% to 1.11/1.36 ms - but it is a trade, not an
+optimisation: on the rotation sweep's detailed scene, the down-and-up resample
+alone adds an error of 1.2 (75%) to 1.4 (67%), four times what a native pair
+otherwise shows (0.3), on every generated frame between sharp real ones.
 
 sRGB swapchains are encoded by the pack shader into 10-bit
 private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
