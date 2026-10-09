@@ -239,7 +239,11 @@ speed. Each method had four interleaved rounds of ten seconds.
   that sharing.
 - NVIDIA flow's long span runs largely on the optical-flow engine, beside the
   game's rendering.
-- The track's sections load the GPU differently, so single rounds of a method
+- On a second track, Tatooine's King of the Racers podrace, the release build
+  measured the same order: OFXR + DLSS vectors 0.45 ms (116.7 fps), FidelityFX
+  flow 0.90 ms (115.5), native 5.2 ms (112.0) and NVIDIA medium flow 6.9 ms
+  (115.5).
+- The tracks' sections load the GPU differently, so single rounds of a method
   ranged by up to 11 frames a second.
 - On the Meta XR Simulator (1440x1584 per eye), every method held the
   simulator's 90 frames a second.
@@ -392,8 +396,8 @@ Blank frames compress to almost nothing in GPU memory, and NGX then measures
 - **Camera translation.** Full reprojection of camera translation, and
   separate guides for baked-in HUD and UI, remain future work. The bridge's
   existing limitation for camera translation still applies.
-- **Live testing so far** covers Galactic Racer under UEVR, on a Steam Frame
-  through SteamVR and on the Meta XR Simulator.
+- **Live testing so far** covers Galactic Racer under UEVR (two tracks), on a
+  Steam Frame through SteamVR and on the Meta XR Simulator.
 
 ## Using OFXR Bridge
 

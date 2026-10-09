@@ -142,8 +142,12 @@ measured:
 | Native DLSS FG 2X | 4.9 ms | 109.8 |
 | OFXR NVIDIA medium flow | 7.8 ms | 113.5 |
 
-The track's sections load the GPU differently, so single rounds of a method
-ranged by up to 11 frames a second; NVIDIA flow's long span runs largely on
+On a second track, Tatooine's King of the Racers podrace, four more
+interleaved rounds with the final build measured OFXR + DLSS vectors 0.45 ms
+at 116.7 frames a second, FidelityFX flow 0.90 ms at 115.5, native 5.2 ms at
+112.0 and NVIDIA medium flow 6.9 ms at 115.5: the same order. The tracks'
+sections load the GPU differently, so single rounds of a method ranged by up
+to 11 frames a second; NVIDIA flow's long span runs largely on
 the optical-flow engine beside the game's rendering. Offline at that size
 (`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
 takes 2.4 ms, so about half of the live figure is the GPU shared with the
