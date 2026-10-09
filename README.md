@@ -360,8 +360,8 @@ Changes kept, with their measured effect:
   3.38 and 2.99; before: 4.88 and 2.96). A moving scene that darkens errs
   0.08, against 45.7 before. With the game's vectors exact, OFXR + DLSS
   vectors is now the more accurate method, at about a sixth of the GPU time.
-  Native generation still handles content the vectors do not describe
-  better. In Hubris a pair rose from 0.32 to 0.37 ms, nearly all of it for
+  Where the vectors are wrong (shadows, translucency, particles, an object
+  writing no velocity), native generation measured no better. In Hubris a pair rose from 0.32 to 0.37 ms, nearly all of it for
   the HUD check. On the offline benchmark, whose frames disagree almost
   everywhere, it rose about 15%.
 
@@ -391,6 +391,12 @@ Tried and rejected:
   about 220 MB more video memory at 3004x3004.
 - **32-bit motion.** It is 2% slower, with worse depth edges (0.33 against
   0.21).
+- **The new frame's warped sample for the optical-flow methods too.** It
+  took FidelityFX's edge error from 45 to 34 on the scene below. But
+  estimated flow is unreliable where it would act, and the same-pixel blend,
+  which follows the camera, is already exact for a static world: a rotating
+  cropped view erred 4.8, against a limit of 1.0, even when gated on a 4-pixel
+  jump in the flow. The optical-flow methods keep the blend.
 - **Settings with no measurable effect:** 16-bit depth, a 16-pixel seam, the
   pack's thread-group shapes, NGX's undocumented `DLSSG.InternalWidth`,
   `DLSSG.DynamicResolution` and `DLSSG.EvalFlags` parameters, and every NGX

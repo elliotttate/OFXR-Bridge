@@ -3963,7 +3963,31 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
             127.5F + 45 * std::sin(x * 0.021F + y * 0.053F) + 30 * std::cos(y * 0.19F) +
                 16 * std::sin(x * 1.1F + y * 0.7F)};
     };
-    const auto scene = [&](float bg_shift, float fg_shift) {
+    // XRFG_TEST_SCALE_QUALITY_EFFECT adds content the game's vectors do not
+    // describe, which they give the background's motion: "shadow", the
+    // square's shadow moving with it over the background; "translucent", a
+    // translucent disc sliding the other way; "particles", small bright sprites
+    // each moving its own way; "novelocity", the square writing no vectors of
+    // its own, as materials that output no velocity do. The error is also
+    // reported where the effect shows, or for "novelocity" at the edges.
+    const char* effect_name = std::getenv("XRFG_TEST_SCALE_QUALITY_EFFECT");
+    const int effect = !effect_name ? 0 : !std::strcmp(effect_name, "shadow") ? 1
+        : !std::strcmp(effect_name, "translucent") ? 2 : !std::strcmp(effect_name, "particles") ? 3
+        : !std::strcmp(effect_name, "novelocity") ? 4 : 0;
+    struct Particle { float x, y, vx, vy; };
+    std::vector<Particle> particles;
+    {
+        std::uint32_t seed = 12345;
+        const auto random = [&] {
+            seed = seed * 1664525U + 1013904223U;
+            return float(seed >> 8) / float(1U << 24);
+        };
+        for (int i = 0; i < 150; ++i)
+            particles.push_back({60 + random() * 900, 60 + random() * 650,
+                                 (random() - 0.5F) * 40, (random() - 0.5F) * 40});
+    }
+    const auto scene = [&](float bg_shift, float fg_shift, int with_effect = -1) {
+        const int kind = with_effect < 0 ? effect : with_effect;
         StereoPattern pattern;
         for (UINT eye = 0; eye < kEyeCount; ++eye) {
             auto& bytes = pattern[eye];
@@ -3980,6 +4004,14 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                                     (int(std::floor((sx - fg_shift) / 6)) + int(sy / 6)) % 2 != 0;
                                 c = stripe ? std::array<float, 3>{240, 210, 40}
                                            : std::array<float, 3>{30, 60, 200};
+                            } else if (kind == 1 && inside(sx - 24, sy - 30, fg_shift)) {
+                                for (UINT k = 0; k < 3; ++k) c[k] *= 0.5F;
+                            }
+                            if (kind == 2) {
+                                const float dx = sx - (650 - 1.5F * fg_shift), dy = sy - 420;
+                                if (dx * dx + dy * dy < 70 * 70)
+                                    for (UINT k = 0; k < 3; ++k)
+                                        c[k] = 0.6F * c[k] + 0.4F * (k == 2 ? 255 : 230);
                             }
                             for (UINT k = 0; k < 3; ++k) sum[k] += c[k] / 16;
                         }
@@ -3988,6 +4020,25 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                                           direction_channel(sum[2]), 255};
                     std::copy(texel.begin(), texel.end(),
                               bytes.begin() + (std::size_t(y) * width + x) * kBytesPerPixel);
+                }
+            }
+            if (kind != 3) continue;
+            for (const auto& q : particles) {
+                const float cx = q.x + q.vx * fg_shift / 10, cy = q.y + q.vy * fg_shift / 10;
+                for (int y = int(cy) - 4; y <= int(cy) + 4; ++y) {
+                    for (int x = int(cx) - 4; x <= int(cx) + 4; ++x) {
+                        if (x < 0 || y < 0 || x >= int(width) || y >= int(height)) continue;
+                        float cover = 0;
+                        for (UINT j = 0; j < 4; ++j)
+                            for (UINT i = 0; i < 4; ++i)
+                                cover += std::abs(x + (i + 0.5F) / 4 - cx) < 2.5F &&
+                                         std::abs(y + (j + 0.5F) / 4 - cy) < 2.5F ? 1.0F / 16 : 0;
+                        const std::size_t offset = (std::size_t(y) * width + x) * kBytesPerPixel;
+                        const std::array<float, 3> spark{255, 240, 200};
+                        for (UINT k = 0; k < 3; ++k)
+                            bytes[offset + k] = std::uint8_t(std::lround(
+                                bytes[offset + k] * (1 - cover) + spark[k] * cover));
+                    }
                 }
             }
         }
@@ -4047,7 +4098,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
         }
     }
     // Per setting: overall, centre, outer and edge error, summed over eyes and slides.
-    std::vector<std::array<double, 4>> totals(settings.size());
+    std::vector<std::array<double, 5>> totals(settings.size());
     struct OfxrMethod {
         const char* name;
         xrfg::D3D12OpticalFlowBackend backend;
@@ -4063,7 +4114,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
          xrfg::D3D12OpticalFlowInputScale::full, false},
         {"OFXR NVIDIA medium flow", xrfg::D3D12OpticalFlowBackend::nvidia,
          xrfg::D3D12OpticalFlowInputScale::half, false}}};
-    std::vector<std::array<double, 4>> ofxr_totals(ofxr_methods.size());
+    std::vector<std::array<double, 5>> ofxr_totals(ofxr_methods.size());
     double blend_total = 0;
     // 3X: each of the two generated frames restores detail from its own point
     // along the motion, a third and two thirds of the way from A.
@@ -4088,8 +4139,26 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
         auto depth_b = box_depth(fg_motion);
         auto motion = create_and_upload_game_motion_field(fixture, gw, gh, [&](UINT, UINT mx, UINT my) {
             const bool fg = inside((mx + 0.5F) * width / gw, (my + 0.5F) * height / gh, fg_motion);
-            return std::array<float, 2>{-(fg ? fg_motion : bg_motion) * gw / width, 0.0F};
+            return std::array<float, 2>{-(fg && effect != 4 ? fg_motion : bg_motion) * gw / width, 0.0F};
         });
+        // Where the effect shows in the true frame, two pixels around.
+        std::vector<bool> effect_mask(std::size_t(width) * height, false);
+        if (effect) {
+            const auto plain = scene(bg_motion / 2, fg_motion / 2, 0);
+            for (int y = 0; y < int(height); ++y) {
+                for (int x = 0; x < int(width); ++x) {
+                    const std::size_t o = (std::size_t(y) * width + x) * kBytesPerPixel;
+                    bool differs = false;
+                    for (UINT eye = 0; eye < kEyeCount; ++eye)
+                        for (UINT c = 0; c < 3; ++c) differs |= plain[eye][o + c] != expected[eye][o + c];
+                    if (!differs) continue;
+                    for (int dy = -2; dy <= 2; ++dy)
+                        for (int dx = -2; dx <= 2; ++dx)
+                            if (x + dx >= 0 && y + dy >= 0 && x + dx < int(width) && y + dy < int(height))
+                                effect_mask[std::size_t(y + dy) * width + x + dx] = true;
+                }
+            }
+        }
         const auto error = [&](const StereoPattern& actual, UINT eye, int region) {
             double total = 0;
             std::size_t count = 0;
@@ -4101,14 +4170,15 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                     const bool band = y >= box_y && y < box_y + box_size &&
                         (std::abs(float(x) + 0.5F - left) < 12 ||
                          std::abs(float(x) + 0.5F - right) < 12);
-                    if ((region == 1 && !inner) || (region == 2 && inner) || (region == 3 && !band))
+                    if ((region == 1 && !inner) || (region == 2 && inner) || (region == 3 && !band) ||
+                        (region == 4 && !effect_mask[std::size_t(y) * width + x]))
                         continue;
                     const std::size_t offset = (std::size_t(y) * width + x) * kBytesPerPixel;
                     for (UINT c = 0; c < 3; ++c, ++count)
                         total += std::abs(int(actual[eye][offset + c]) - int(expected[eye][offset + c]));
                 }
             }
-            return total / double(count);
+            return count ? total / double(count) : 0.0;
         };
         const auto blend = midpoint_pattern(a_pattern, b_pattern);
         for (UINT eye = 0; eye < kEyeCount; ++eye) blend_total += error(blend, eye, 0);
@@ -4135,7 +4205,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
             const auto actual =
                 readback_pattern(fixture, output.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
             for (UINT eye = 0; eye < kEyeCount; ++eye) {
-                for (int region = 0; region < 4; ++region) {
+                for (int region = 0; region < 5; ++region) {
                     totals[s][region] += error(actual, eye, region);
                 }
             }
@@ -4208,7 +4278,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
             const auto actual =
                 readback_pattern(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
             for (UINT eye = 0; eye < kEyeCount; ++eye) {
-                for (int region = 0; region < 4; ++region) {
+                for (int region = 0; region < 5; ++region) {
                     ofxr_totals[method][region] += error(actual, eye, region);
                 }
             }
@@ -4327,12 +4397,13 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
         const auto& t = ofxr_totals[method];
         std::cout << "scale quality " << ofxr_methods[method].name << " mae=" << t[0] / runs
                   << " centre=" << t[1] / runs << " outer=" << t[2] / runs
-                  << " edge=" << t[3] / runs << '\n';
+                  << " edge=" << t[3] / runs << " effect=" << t[4] / runs << '\n';
     }
     for (std::size_t s = 0; s < settings.size(); ++s) {
         std::cout << "scale quality scale=" << settings[s].scale << " detail=" << settings[s].detail
                   << " mae=" << totals[s][0] / runs << " centre=" << totals[s][1] / runs
-                  << " outer=" << totals[s][2] / runs << " edge=" << totals[s][3] / runs << '\n';
+                  << " outer=" << totals[s][2] / runs << " edge=" << totals[s][3] / runs
+                  << " effect=" << totals[s][4] / runs << '\n';
     }
     std::cout << "scale quality OFXR+DLSS vectors 3X third_mae=" << ofxr_triple_totals[0] / runs
               << " two_thirds_mae=" << ofxr_triple_totals[1] / runs << '\n';

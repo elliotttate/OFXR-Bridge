@@ -394,12 +394,29 @@ than native generation everywhere, at the moving edges too (7.55 against 8.7),
 for about a sixth of the GPU time. Native generation at 67% errs more than
 both (13.6 at the edges), and at 50% far more (23.4), so the tray offers no
 step below 67%. Native generation needs the same DLSS guides as OFXR + DLSS
-vectors, so that is always the cheaper alternative to it. What this test
-cannot show is content the game's vectors do not describe - particles,
-transparency, shadows, reflections - where OFXR + DLSS vectors can only fall
-back on its samples' agreement and native generation's own flow and network
-still help. The optical-flow methods, for games without DLSS, lose the fast
-striped square entirely.
+vectors, so that is always the cheaper alternative to it. The optical-flow
+methods, for games without DLSS, lose the fast striped square entirely.
+
+`XRFG_TEST_SCALE_QUALITY_EFFECT` adds content the game's vectors do not
+describe to the same scene, carrying the background's vectors. `shadow` is
+the square's shadow moving with it over the background. `translucent` is a
+translucent disc sliding the other way. `particles` are 150 small bright
+sprites, each moving its own way. `novelocity` gives the square no vectors of
+its own, as materials that output no velocity do. Error where the effect
+shows, two pixels around (for `novelocity`, overall and at the edges):
+
+| Method | Shadow | Translucent | Particles | No velocity |
+|---|---|---|---|---|
+| OFXR + DLSS vectors | 6.16 | 8.75 | 30.6 | 16.9 / 62.4 |
+| Native DLSS FG, 100% | 5.93 | 10.8 | 32.4 | 17.1 / 47.9 |
+| Native DLSS FG, 67% | 7.15 | 10.4 | 36.1 | 16.9 / 53.7 |
+| OFXR FidelityFX flow, half / full | 14.8 / 14.0 | 22.9 / 21.4 | 42.2 / 41.7 | 15.8 / 13.7, 45 |
+| OFXR NVIDIA medium flow | 14.3 | 21.8 | 42.1 | 14.1 / 51.3 |
+
+Native generation is no better than OFXR + DLSS vectors where the vectors are
+wrong: NVIDIA's network leans on the same vectors. Particles defeat every
+method, and an object that writes no velocity defeats both vector methods,
+with optical flow a little better overall.
 
 OFXR + DLSS vectors measured 3.95 overall and 25.9 at the edges until its
 occlusion handling changed. It solves, per output pixel, for the point of B
@@ -462,6 +479,17 @@ of A and B at the same pixel, which showed both frames' edges at once. Now:
   patch's predictions only when the centre is explained and the patch is not
   flat, which kept its cost. `test_dlss_motion_vector_occlusion_edges` checks
   the occlusion (0.68), the overlay and the fade.
+
+The optical-flow methods keep their same-pixel blend. B's warped sample as
+their fallback took the scene's edge error from 45.2 to 34.0 (FidelityFX
+half), 45.6 to 35.3 (full) and 51.3 to 45.3 (NVIDIA), but it also makes
+content that changes in place step instead of cross-fading, failing the
+tests that keep A, the generated frame and B distinct. Gated, like game
+motion, on a flow 16 pixels away differing by more than a pixel, or by more
+than four, it still failed the cropped-view rotation test (4.8 and 4.4
+against a limit of 1.0). Estimated flow is wrong where it would act, while
+the blend, which follows the tracked camera, is already exact for a static
+world.
 
 Rejected: keeping the same-pixel blend wherever the pixel, or a 5-point patch
 around it, is unchanged between the frames, without asking the vector. Flat
