@@ -931,11 +931,14 @@ float4 synthesize_midpoint(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
                             if (covered.valid >= 0.5) output_color = saturate(covered.color);
                         } else if (disagreement > 0.1 && repeated_capture_flag() == 0) {
-                            // Near a motion edge - a vector 16 pixels away
-                            // differs by more than a pixel - disagreeing
-                            // samples are two surfaces instead. A's is usually
-                            // hidden behind what B shows, background a trailing
-                            // edge uncovers, so B's warped sample stands in.
+                            // Where the motion is not uniform - a vector 16
+                            // pixels away differs by a tenth of a pixel -
+                            // disagreeing samples are two surfaces instead. A's
+                            // is usually hidden behind what B shows, background
+                            // a trailing edge uncovers, so B's warped sample
+                            // stands in. On recorded game frames the tenth beat
+                            // a whole pixel: steep but smooth motion, such as
+                            // ground rushing past, gains from B's sample too.
                             float2 here = game_motion_texel(
                                 pixel - (1.0 - synthesis_fraction()) * last_displacement);
                             bool motion_edge = false;
@@ -943,7 +946,7 @@ float4 synthesize_midpoint(
                                 float2 offset = probe == 0 ? float2(16, 0) : probe == 1 ? float2(-16, 0)
                                               : probe == 2 ? float2(0, 16) : float2(0, -16);
                                 motion_edge = motion_edge ||
-                                    length(game_motion_texel(pixel + offset) - here) > 1.0;
+                                    length(game_motion_texel(pixel + offset) - here) > 0.1;
                             }
                             if (motion_edge) {
                                 output_color = saturate(lerp(
