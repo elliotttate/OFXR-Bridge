@@ -1046,6 +1046,10 @@ struct SessionState {
     bool vulkan_support{};
     xrfg::D3D12NvidiaOpticalFlowOptions nvidia_options{};
     bool dlss_motion_vectors{};
+    // For a game with a swapchain per eye, how many DLSS evaluations had been
+    // published when each eye's image was last released (left, right): an
+    // eye's evaluation comes before its release (resolve_dlss_motion_vectors).
+    std::array<std::atomic<std::uint64_t>, 2> eye_release_publication{};
     SessionGraphicsBinding graphics_binding{SessionGraphicsBinding::none};
     std::uint64_t graphics_binding_capabilities{};
     // Set once the runtime has refused a private swapchain. A runtime caps how
@@ -2181,6 +2185,9 @@ struct SwapchainState {
     // left, 1 right, -1 otherwise. It picks the eye's own DLSS evaluation
     // (resolve_dlss_motion_vectors). Written at the application's xrEndFrame.
     std::atomic<int> projection_eye{-1};
+    // How many DLSS evaluations had been published at this image's last
+    // release. Guarded by mutex.
+    std::uint64_t release_publication{};
     // SessionState::capture_at_end_frame: the image the application released
     // since its last xrEndFrame, whose history capture is still to be queued.
     // Set at the release in place of the capture, consumed at the top of the
@@ -6974,10 +6981,17 @@ XrResult layer_release_swapchain_image_impl(
         if (state->session->dlss_motion_vectors) {
             std::scoped_lock lock(state->mutex);
             if (*candidate_index < state->enumerated_d3d12_images.size()) {
+                const int eye = state->projection_eye.load(std::memory_order_relaxed);
+                const std::uint64_t now = xrfg::dlss_motion_vector_publications();
                 pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
                     state->enumerated_d3d12_images[*candidate_index].Get(),
                     state->session->d3d12_queue.Get(),
-                    state->projection_eye.load(std::memory_order_relaxed));
+                    eye,
+                    now,
+                    eye == 0 || eye == 1
+                        ? state->session->eye_release_publication[1 - eye].load(
+                              std::memory_order_relaxed)
+                        : 0);
             }
         }
         xrfg::D3D12HistoryCaptureTicket ticket{};
@@ -7060,6 +7074,14 @@ XrResult layer_release_swapchain_image_impl(
                 // it, the way the runtime shows only the last released image.
                 if (defer_capture) {
                     state->pending_end_frame_capture = released_index;
+                }
+                if (state->session->dlss_motion_vectors) {
+                    state->release_publication = xrfg::dlss_motion_vector_publications();
+                    const int eye = state->projection_eye.load(std::memory_order_relaxed);
+                    if (eye == 0 || eye == 1) {
+                        state->session->eye_release_publication[static_cast<std::size_t>(eye)].store(
+                            state->release_publication, std::memory_order_relaxed);
+                    }
                 }
             } else if (state->ownership_tracking_valid) {
                 // A release the runtime accepted with nothing waited here:
@@ -7148,10 +7170,16 @@ void capture_pending_end_frame_images(
                 if (session->dlss_motion_vectors) {
                     std::scoped_lock lock(state->mutex);
                     if (*index < state->enumerated_d3d12_images.size()) {
+                        const int eye = state->projection_eye.load(std::memory_order_relaxed);
                         motion_vectors = xrfg::resolve_dlss_motion_vectors(
                             state->enumerated_d3d12_images[*index].Get(),
                             session->d3d12_queue.Get(),
-                            state->projection_eye.load(std::memory_order_relaxed));
+                            eye,
+                            state->release_publication,
+                            eye == 0 || eye == 1
+                                ? session->eye_release_publication[1 - eye].load(
+                                      std::memory_order_relaxed)
+                                : 0);
                     }
                 }
                 capture_result = history->capture(*index, &ticket);

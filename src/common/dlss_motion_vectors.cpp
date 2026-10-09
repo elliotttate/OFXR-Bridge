@@ -470,10 +470,22 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
     }
 }
 
+std::uint64_t dlss_motion_vector_publications() noexcept {
+    try {
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        return state.statistics.published;
+    } catch (...) {
+        return 0;
+    }
+}
+
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,
     ID3D12CommandQueue* consumer_queue,
-    int eye) noexcept {
+    int eye,
+    std::uint64_t released_at,
+    std::uint64_t other_released_at) noexcept {
     try {
         if (!g_tracking_enabled.load(std::memory_order_acquire)) {
             report_dlss_motion_vector_status(DlssMotionVectorStatus::disabled);
@@ -561,70 +573,85 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // evaluation matches each eye's image by size, and the newest went to
         // both - with the capture at xrEndFrame, after both eyes, always the
         // eye DLSS ran last - so the other eye followed its motion, a double
-        // image wherever the two eyes' motion differs. The eye this image is
-        // submitted as now takes its own evaluation, in the order the stereo
-        // path gives two: two streams, or the game's one stream alternating
-        // eyes.
+        // image wherever the two eyes' motion differs. An eye's evaluation
+        // comes before its image is released: each eye now takes the newest
+        // evaluation published by its own image's release. Lies of P under
+        // UEVR evaluates one DLSS feature for each eye in turn, each just
+        // before that eye's release. Where both eyes' releases follow the same
+        // evaluation - both evaluated before either is released - the eyes go
+        // by the order the stereo path gives two streams, and for a single
+        // stream by the order they were evaluated, left first.
         if (!packed_stereo && !direct_match && eye_count == 1 &&
             (eye == 0 || eye == 1)) {
-            if (candidates.size() >= 2) {
-                std::sort(candidates.begin(), candidates.end(),
-                    [](const Candidate& a, const Candidate& b) {
-                        return a.frame->publication > b.frame->publication;
-                    });
-                candidates.resize(2);
-                const auto newest = candidates[0].frame->publication;
-                const auto oldest = candidates[1].frame->publication;
-                if (newest < oldest || newest - oldest > kMaximumStereoPublicationGap) {
-                    ++state.statistics.resolve_stale_pairs;
-                    state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
-                    return {};
-                }
-                std::sort(candidates.begin(), candidates.end(),
-                    [](const Candidate& a, const Candidate& b) {
-                        const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
-                        if (ao != bo) return ao < bo;
-                        return a.first_publication < b.first_publication;
-                    });
-                auto result = std::make_shared<DlssMotionVectorSet>();
-                result->eye_count = 1;
-                result->eyes[0] = candidates[static_cast<std::size_t>(eye)].frame;
-                ++state.statistics.matched;
-                return result;
+            // Streams no longer evaluated - Lies of P keeps one of the eyes'
+            // size from start-up - are not an eye's.
+            std::uint64_t newest_publication = 0;
+            for (const auto& candidate : candidates) {
+                newest_publication = std::max(newest_publication, candidate.frame->publication);
             }
-            if (candidates.size() == 1 && streams_with_frames == 1) {
-                const auto& current = candidates.front().frame;
-                const auto& previous = candidates.front().previous;
-                if (previous && current->stream == previous->stream &&
-                    current->epoch == previous->epoch &&
-                    current->serial == previous->serial + 1 &&
-                    current->publication > previous->publication &&
-                    current->publication - previous->publication <=
-                        kMaximumStereoPublicationGap) {
-                    // One stream for both eyes: the odd serial is the left
-                    // eye, as for alternating-eye renderers, unless the
-                    // inputs say otherwise. Each eye sees every other serial.
-                    const auto& odd = (current->serial & 1U) != 0 ? current : previous;
-                    const auto& even = (current->serial & 1U) != 0 ? previous : current;
-                    const bool swapped = input_offset(*even) < input_offset(*odd);
-                    const auto& chosen = (eye == 0) != swapped ? odd : even;
-                    // The chosen eye's evaluation of this frame has to be the
-                    // newest or the one just before it: a left eye evaluated
-                    // with the right still to come is this frame's.
-                    if (chosen == current || (current->serial & 1U) == 0) {
-                        auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
-                        frame->previous_serial = frame->serial > 2 ? frame->serial - 2 : 0;
-                        auto result = std::make_shared<DlssMotionVectorSet>();
-                        result->eye_count = 1;
-                        result->eyes[0] = std::move(frame);
-                        ++state.statistics.matched;
-                        return result;
-                    }
-                    ++state.statistics.resolve_stale_pairs;
-                    state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
-                    return {};
+            std::erase_if(candidates, [&](const Candidate& c) {
+                return newest_publication - c.frame->publication > kMaximumStereoPublicationGap;
+            });
+            std::vector<std::shared_ptr<const DlssMotionVectorFrame>> frames;
+            for (const auto& candidate : candidates) {
+                frames.push_back(candidate.frame);
+                if (candidate.previous && candidate.previous->epoch == candidate.frame->epoch) {
+                    frames.push_back(candidate.previous);
                 }
             }
+            std::sort(frames.begin(), frames.end(), [](const auto& a, const auto& b) {
+                return a->publication > b->publication;
+            });
+            const auto newest_by = [&](std::uint64_t limit) {
+                for (const auto& frame : frames) {
+                    if (limit == 0 || frame->publication <= limit) return frame;
+                }
+                return std::shared_ptr<const DlssMotionVectorFrame>{};
+            };
+            auto chosen = newest_by(released_at);
+            const auto other = other_released_at != 0
+                ? newest_by(other_released_at)
+                : std::shared_ptr<const DlssMotionVectorFrame>{};
+            bool shared_stream = candidates.size() == 1;
+            if (chosen && other && chosen == other) {
+                if (candidates.size() >= 2) {
+                    // Two streams: each stream's newest, in the stereo order.
+                    std::sort(candidates.begin(), candidates.end(),
+                        [](const Candidate& a, const Candidate& b) {
+                            const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
+                            if (ao != bo) return ao < bo;
+                            return a.first_publication < b.first_publication;
+                        });
+                    chosen = candidates[static_cast<std::size_t>(eye)].frame;
+                } else {
+                    // One stream: the two newest, in the order evaluated.
+                    const auto later = std::find(frames.begin(), frames.end(), chosen);
+                    const auto earlier = later + 1;
+                    chosen = eye == 1 ? *later
+                        : earlier != frames.end() ? *earlier
+                                                  : std::shared_ptr<const DlssMotionVectorFrame>{};
+                }
+            }
+            if (!chosen || frames.empty() ||
+                frames.front()->publication - chosen->publication > kMaximumStereoPublicationGap) {
+                ++state.statistics.resolve_stale_pairs;
+                state.statistics.status = DlssMotionVectorStatus::temporal_mismatch;
+                return {};
+            }
+            // One stream for both eyes - the other eye's evaluation is that
+            // stream's too - so each eye sees every other serial.
+            if (other && chosen && other != chosen) {
+                shared_stream = other->stream == chosen->stream;
+            }
+            auto frame = std::make_shared<DlssMotionVectorFrame>(*chosen);
+            if (shared_stream) {
+                frame->previous_serial = frame->serial > 2 ? frame->serial - 2 : 0;
+            }
+            auto result = std::make_shared<DlssMotionVectorSet>();
+            result->eye_count = 1;
+            result->eyes[0] = std::move(frame);
+            ++state.statistics.matched;
+            return result;
         }
 
         // Alternating-eye renderers such as Ghost of Tsushima's AER path reuse

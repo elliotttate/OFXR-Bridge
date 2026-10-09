@@ -2791,26 +2791,36 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
         });
     };
 
-    // A DLSS feature per eye, both evaluated before the capture.
+    const auto released = [] { return xrfg::dlss_motion_vector_publications(); };
+
+    // A DLSS feature per eye, each eye evaluated and then its image released.
+    std::uint64_t left_release = 0;
+    std::uint64_t right_release = 0;
     for (int frame = 0; frame < 2; ++frame) {
         publish(611, left_output.Get());
+        left_release = released();
         publish(622, right_output.Get());
+        right_release = released();
     }
-    const auto left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
-    const auto right = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    const auto left = xrfg::resolve_dlss_motion_vectors(
+        left_xr.Get(), fixture.queue(), 0, left_release, right_release);
+    const auto right = xrfg::resolve_dlss_motion_vectors(
+        right_xr.Get(), fixture.queue(), 1, right_release, left_release);
     require(left && right && left->eye_count == 1 && right->eye_count == 1 &&
             left->eyes[0]->stream == 611 && right->eyes[0]->stream == 622 &&
             left->eyes[0]->serial == 2 && right->eyes[0]->serial == 2,
         "per-eye swapchains did not each take their own eye's DLSS evaluation");
-    // The right eye evaluated first this frame: the eyes stay put.
+    // Both eyes evaluated, the right first, before either image is released:
+    // the streams keep their eyes.
     publish(622, right_output.Get());
     publish(611, left_output.Get());
-    const auto left_again = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
-    const auto right_again = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    const auto both = released();
+    const auto left_again = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0, both, both);
+    const auto right_again = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1, both, both);
     require(left_again && right_again && left_again->eyes[0]->stream == 611 &&
             right_again->eyes[0]->stream == 622 && left_again->eyes[0]->serial == 3 &&
             right_again->eyes[0]->serial == 3,
-        "per-eye swapchains swapped eyes with this frame's evaluation order");
+        "per-eye swapchains swapped eyes when both were evaluated before either release");
     // Without the eye, the newest as before.
     const auto unknown = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue());
     require(unknown && unknown->eyes[0]->stream == 611,
@@ -2826,26 +2836,49 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
     xrfg::retire_dlss_motion_vector_stream(622);
     xrfg::configure_dlss_motion_vector_tracking(true);
 
-    // One DLSS feature for both eyes, evaluated left then right: each eye
-    // sees every other serial.
-    publish(633, left_output.Get());
-    const auto first_left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
-    require(first_left && first_left->eyes[0]->serial == 1,
-        "the left eye did not take the first evaluation of one shared stream");
+    // One DLSS feature for both eyes, each evaluated just before its image's
+    // release, as Lies of P under UEVR does - whatever eye the stream's count
+    // began on, here the right - beside a stream of another size, as its
+    // spectator view's is.
+    // A stream of the eyes' size kept from start-up and no longer evaluated.
+    publish(655, left_output.Get());
+    const auto spectator = create_texture(width * 2, height);
+    fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+        xrfg::publish_dlss_motion_vectors({
+            644, spectator.Get(), motion.Get(), fixture.queue(), 0, 0, width * 2, height,
+            0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+            D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+    });
     publish(633, right_output.Get());
+    for (int frame = 0; frame < 2; ++frame) {
+        publish(633, left_output.Get());
+        left_release = released();
+        publish(633, right_output.Get());
+        right_release = released();
+    }
+    const auto shared_left = xrfg::resolve_dlss_motion_vectors(
+        left_xr.Get(), fixture.queue(), 0, left_release, right_release);
+    const auto shared_right = xrfg::resolve_dlss_motion_vectors(
+        right_xr.Get(), fixture.queue(), 1, right_release, left_release);
+    require(shared_left && shared_right && shared_left->eyes[0]->serial == 4 &&
+            shared_right->eyes[0]->serial == 5 &&
+            shared_left->eyes[0]->previous_serial == 2 &&
+            shared_right->eyes[0]->previous_serial == 3,
+        "one shared DLSS stream did not give each eye the evaluation before its release");
+    // Both evaluated before either release: left first.
     publish(633, left_output.Get());
-    const auto half = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
-    require(!half, "the right eye took the previous frame's evaluation of a shared stream");
     publish(633, right_output.Get());
-    const auto shared_left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
-    const auto shared_right = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
-    require(shared_left && shared_right && shared_left->eyes[0]->serial == 3 &&
-            shared_right->eyes[0]->serial == 4 &&
-            shared_left->eyes[0]->previous_serial == 1 &&
-            shared_right->eyes[0]->previous_serial == 2,
-        "one shared DLSS stream did not give each eye its own evaluation");
+    const auto shared_both = released();
+    const auto first = xrfg::resolve_dlss_motion_vectors(
+        left_xr.Get(), fixture.queue(), 0, shared_both, shared_both);
+    const auto second = xrfg::resolve_dlss_motion_vectors(
+        right_xr.Get(), fixture.queue(), 1, shared_both, shared_both);
+    require(first && second && first->eyes[0]->serial == 6 && second->eyes[0]->serial == 7,
+        "one shared DLSS stream evaluated before both releases did not go left first");
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_dlss_motion_vector_stream(633);
+    xrfg::retire_dlss_motion_vector_stream(644);
+    xrfg::retire_dlss_motion_vector_stream(655);
 }
 
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {

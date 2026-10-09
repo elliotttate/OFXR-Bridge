@@ -801,13 +801,38 @@ frames, looked right - what users of MSFS 2024 and CONTROL Resonant reported.
 Now an evaluation whose output is the image itself belongs to it.
 Otherwise, for an image the layer has seen submitted as one eye of a
 two-view projection (`note_projection_eyes`, flight record
-`presenter_transition` 750: a the swapchain, b the eye + 1), that eye takes
-its own evaluation: of two streams, by where their inputs sit and then by
-which was seen first, as for array images; of a game's single stream
-alternating eyes, the odd serial for the left eye as for alternating-eye
-renderers, never the previous frame's. `xrfg_d3d12_history_tests` checks
-both and the direct match (and fails without the change), and
-`xrfg_layer_projection_eyes` checks that a swapchain per eye is named its
+`presenter_transition` 750: a the swapchain, b the eye + 1), the layer notes
+at each release of it how many evaluations had been published, and the eye
+takes the newest evaluation published by its own image's release: a game
+evaluates an eye before it releases that eye's image. Where both eyes'
+releases follow the same evaluation (both evaluated before either is
+released), two streams go by where their inputs sit and then by which was
+seen first, as for array images, and a single stream by the order evaluated,
+left first. Streams no longer evaluated (more than four publications behind)
+are not an eye's, and a stream both eyes take is read as every other serial
+for each eye.
+
+Lies of P under UEVR showed why the release matters. It evaluates one DLSS
+feature for each eye in turn, each just before that eye's image is released
+(the flight log's `dlss_evaluation` records, a the DLSS handle, b the count
+captured): evaluation, left release, evaluation, right release, xrEndFrame.
+The first version of this fix took the odd evaluations of a single stream for
+the left eye; the capture hook, installed when UEVR loads the layer, can start
+counting on either eye, and a launch that began on the right gave the left
+eye the right eye's vectors and the right eye none (status temporal
+mismatch, used 0). Lies of P also keeps a stream of the eyes' size from
+start-up and evaluates another for its spectator view, so a stream counted as
+shared only when it was the only one never was. Live on the final version, a
+launch in stereo used both eyes' vectors from the first seconds (status used,
+no rejections after start-up), with OFXR + DLSS vectors 0.36 ms, FidelityFX
+0.87 ms and the hybrid 1.31 ms a pair at 119.6 frames a second, the fixed
+share's placement erring 0.0299 against 0.0450 for the stamps. UEVR does not
+reach separate eye images on every launch (in some the right eye is a 4x4
+image or the left a double-wide one); the vectors then go unused, as they
+should. `xrfg_d3d12_history_tests` checks two streams and one, each eye
+evaluated before its release and both before either, stale and other-size
+streams beside them, and the direct match (and fails without each change),
+and `xrfg_layer_projection_eyes` checks that a swapchain per eye is named its
 eye and a double-wide one none (`XRFG_TEST_SPLIT_EYE_ONE_LAYER` makes the
 call chain's split-eye run submit both views in one projection layer).
 

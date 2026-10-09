@@ -1,6 +1,7 @@
 #include "xrfg/ngx_guide_capture.hpp"
 #ifdef XRFG_NATIVE_DLSSG
 #include "xrfg/dlss_motion_vectors.hpp"
+#include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/third_party/uevr_api.h"
 #include <windows.h>
 #include <wrl/client.h>
@@ -203,6 +204,8 @@ void capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     }
     g.depth_infinite=infinite;
     publish_dlss_motion_vectors(g);
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_evaluation, 0,
+        g.stream, call, g.output_x);
     const HRESULT removed=md->GetDeviceRemovedReason();
     if(FAILED(removed))log("device_removed",static_cast<UINT>(removed),call);
     if(call<=8||call%300==0) {

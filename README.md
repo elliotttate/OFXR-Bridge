@@ -385,10 +385,16 @@ OpenXR session, and extrapolation wins if both are set.
   FidelityFX hybrid, which falls back to flow where the vectors do not fit
   (reported on Virtual Desktop in MSFS 2024 and CONTROL Resonant). An
   evaluation written straight into the image is now that image's; otherwise
-  the eye the swapchain is submitted as takes its own evaluation, in the
-  order the stereo path already gives two. Galactic Racer and Hubris submit
-  both eyes from one image and were never affected. The flight log names
-  each per-eye swapchain's eye (`presenter_transition` 750).
+  each eye takes the newest evaluation published by the time its own image
+  was released, as a game evaluates an eye and then releases it. Lies of P
+  under UEVR is such a game - one DLSS feature evaluated for each eye in turn,
+  each eye's image released just after - and live its vectors are now used for
+  both eyes (status "used", none rejected after start-up) where the first fix,
+  which went by the evaluations' count, gave a launch whose count began on
+  the right eye the wrong eye or none. Galactic Racer and Hubris submit both
+  eyes from one image and were never affected. The flight log names each
+  per-eye swapchain's eye (`presenter_transition` 750) and records every DLSS
+  evaluation (`dlss_evaluation`).
 - **The game is promised the time its frame is shown.** The display time a
   game is handed at xrWaitFrame assumed its frame would go down within a
   display period; a game rendering at half the display rate takes most of

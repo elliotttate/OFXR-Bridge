@@ -148,11 +148,17 @@ void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
 // eye: for an image that holds one eye of a two-view projection - a game with
 // a swapchain per eye - which eye it is (0 left, 1 right), or -1 when unknown
-// or when the image holds both.
+// or when the image holds both. released_at and other_released_at: how many
+// evaluations had been published (dlss_motion_vector_publications) when this
+// eye's image and the other eye's were last released, 0 when not known.
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,
     ID3D12CommandQueue* consumer_queue,
-    int eye = -1) noexcept;
+    int eye = -1,
+    std::uint64_t released_at = 0,
+    std::uint64_t other_released_at = 0) noexcept;
+// How many evaluations have been published so far.
+std::uint64_t dlss_motion_vector_publications() noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
 DlssMotionVectorStatistics dlss_motion_vector_statistics() noexcept;

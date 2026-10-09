@@ -123,6 +123,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::clock_origin: return "clock_origin";
     case BridgeFlightOperation::promise_correction: return "promise_correction";
     case BridgeFlightOperation::synthesis_fraction: return "synthesis_fraction";
+    case BridgeFlightOperation::dlss_evaluation: return "dlss_evaluation";
     }
     return "unknown";
 }
