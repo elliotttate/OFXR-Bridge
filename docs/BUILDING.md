@@ -125,7 +125,10 @@ own eye's guide. In Galactic Racer under UEVR on the Meta XR Simulator
 
 Scene motion leaves the medians unchanged; the heavier race widens the tails
 (native's 90th percentile rises from 1.08 to 1.5 ms) through contention with
-the game's own rendering.
+the game's own rendering. With the final build, four interleaved rounds of the
+same race measured OFXR + DLSS vectors 0.125 ms, FidelityFX flow 0.30 ms,
+native 1.04 ms and NVIDIA medium flow 2.45 ms, every method holding the
+simulator's 90 frames a second.
 
 On a Steam Frame through SteamVR (3004x3004 per eye at 120 Hz, with
 `power.pauseCompositorOnStandby` off so the session runs unworn), racing the
