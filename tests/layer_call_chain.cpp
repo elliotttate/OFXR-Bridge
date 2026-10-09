@@ -515,6 +515,28 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_end_session(XrSession) {
     return XR_SUCCESS;
 }
 
+// Whether the presenter's first call to the runtime found an application
+// wait the runtime still held un-begun: the case the presenter has to adopt
+// by beginning that frame. When the application has begun it first there is
+// nothing to adopt, and whether it has depends on the threads' timing.
+std::atomic<bool> g_presenter_first_call_seen{false};
+std::atomic<bool> g_presenter_started_over_application_wait{false};
+// With g_frame_loop_mutex held.
+void note_presenter_first_call() noexcept {
+    const auto is_application_thread = [](DWORD thread) {
+        return thread == g_test_application_thread_id ||
+            thread == g_application_wait_thread_id.load(std::memory_order_acquire);
+    };
+    if (is_application_thread(GetCurrentThreadId()) ||
+        g_presenter_first_call_seen.exchange(true)) {
+        return;
+    }
+    g_presenter_started_over_application_wait.store(
+        !g_waited_by_thread.empty() &&
+            is_application_thread(g_waited_by_thread.front()),
+        std::memory_order_relaxed);
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
     XrSession,
     const XrFrameWaitInfo*,
@@ -581,6 +603,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
         : 100;
     {
         std::scoped_lock lock(g_frame_loop_mutex);
+        note_presenter_first_call();
         if (!g_waited_display_times.empty()) {
             g_waits_while_unbegun.fetch_add(1, std::memory_order_relaxed);
             if (!g_log_path.empty()) {
@@ -628,6 +651,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_begin_frame(XrSession, const XrFrameBeginInf
     XrTime begun_time = 0;
     {
         std::scoped_lock lock(g_frame_loop_mutex);
+        note_presenter_first_call();
         if (g_begun_display_time || g_waited_display_times.empty()) {
             return XR_ERROR_CALL_ORDER_INVALID;
         }
@@ -3545,9 +3569,15 @@ int main(int argc, char** argv) {
         } else {
             // Every overlapping frame under the presenter but the first has
             // a previous frame to pair with; a run that primes instead
-            // submits the current copy alone.
+            // submits the current copy alone. A presenter that starts while
+            // the runtime holds the application's wait must begin it; one
+            // that starts after the application began it has nothing to
+            // adopt (about one run in eight), and either way it must never
+            // wait over a held frame.
+            const bool over_wait = g_presenter_started_over_application_wait.load();
             valid = sequence_succeeded && teardown_succeeded &&
-                promoted_during_pattern && adopted >= 1 && violations == 0 &&
+                promoted_during_pattern && (adopted >= 1 || !over_wait) &&
+                violations == 0 &&
                 synthetic_after + 2 >=
                     static_cast<std::size_t>(kOverlappingFrames) &&
                 g_submission_after_destroy.load() == 0 &&
@@ -3558,6 +3588,8 @@ int main(int argc, char** argv) {
                       << sequence_succeeded << " teardown="
                       << teardown_succeeded << " promoted="
                       << promoted_during_pattern << " adopted=" << adopted
+                      << " over-wait="
+                      << g_presenter_started_over_application_wait.load()
                       << " off-thread=" << off_thread
                       << " violations=" << violations << " synthetic="
                       << synthetic_after << " synthetic-total="
