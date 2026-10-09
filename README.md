@@ -165,9 +165,12 @@ feature.
 and 50%, applied the next time the game starts. Below 100%, NVIDIA generates
 at that fraction of each eye's resolution, and the bridge puts back the real
 frame's detail wherever it can follow the game's motion. Moving content in the
-generated frames is softer; occlusion edges soften most. In return, a 2X pair
-at 3004x3004 costs 1.71 ms at 67% and 1.36 ms at 50%, against 2.35 ms (turning
-head, offline). 67% suits games whose DLSS renders at two thirds (Quality).
+generated frames is softer; occlusion edges soften most. In return, Galactic
+Racer on a Steam Frame (3004x3004 per eye, 120 Hz, racing) rendered 106.3
+game frames a second at 67% and 107.8 at 50%, against 99.5 at 100% (OFXR +
+DLSS vectors: 112.5). Offline, a turning-head 2X pair costs 1.71 ms at 67% and
+1.36 ms at 50%, against 2.35 ms. 67% suits games whose DLSS renders at two
+thirds (Quality).
 
 | Where | Setting |
 |---|---|

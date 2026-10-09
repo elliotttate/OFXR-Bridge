@@ -293,7 +293,22 @@ generated, and softer. At 3004x3004 a turning-head 2X pair costs 1.71 ms at
 1.90; 3X turning: 2.49 and 2.03 against 3.50). Live in Galactic Racer on the
 Meta XR Simulator at 2160x2376 per eye, racing, two interleaved rounds
 measured 1.60 ms per pair at full resolution, 1.19 at 67% and 0.97 at 50%
-(OFXR + DLSS vectors: 0.26).
+(OFXR + DLSS vectors: 0.26). On the Steam Frame at 3004x3004 and 120 Hz,
+racing the Arcade time trial, five interleaved ten-second rounds per setting:
+
+| Method | Game frames a second (mean) | GPU span per pair (median) |
+|---|---|---|
+| Native DLSS FG 2X, 100% | 99.5 | 4.4-4.9 ms |
+| Native DLSS FG 2X, 67% | 106.3 | 1.49-1.51 ms |
+| Native DLSS FG 2X, 50% | 107.8 | 1.24-1.25 ms |
+| OFXR + DLSS vectors | 112.5 | 0.45 ms |
+
+The game's frame rate is the measure here: against OFXR + DLSS vectors' frame
+time, native costs the game about 1.6 ms a frame at full resolution, 1.0 at
+67% and 0.8 at 50%. A long pass's span overstates its cost, because the GPU
+runs the game's work in between: the full-resolution span is twice its
+offline time, while 75% (1.7 ms) and below match theirs. A feature per eye
+did not avoid that (5.0-5.3 ms at full resolution).
 
 `XRFG_TEST_NATIVE_DLSSG_SCALE_QUALITY=1` measures what that costs on a 1024x768
 scene whose detailed background slides 6 pixels while a striped square
