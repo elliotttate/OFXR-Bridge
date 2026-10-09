@@ -127,14 +127,24 @@ Scene motion leaves the medians unchanged; the heavier race widens the tails
 (native's 90th percentile rises from 1.08 to 1.5 ms) through contention with
 the game's own rendering.
 
-On a Steam Frame through SteamVR (3004x3004 per eye at 120 Hz, racing, with
-`power.pauseCompositorOnStandby` off so the session runs unworn), the same
-measurement gives OFXR + DLSS vectors 0.45 ms, FidelityFX flow 0.90 ms,
-native DLSS FG 5.4 ms and NVIDIA medium flow 8.1 ms, with the game at 119,
-106-113 and 111 frames a second for vectors, native and NVIDIA flow. Offline at
-that size (`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same
-native pair takes 2.5 ms, so about half of the live figure is the GPU shared
-with the game. With 310.9.1 a
+On a Steam Frame through SteamVR (3004x3004 per eye at 120 Hz, with
+`power.pauseCompositorOnStandby` off so the session runs unworn), racing the
+Arcade time trial at speed, four interleaved rounds of ten seconds per method
+measured:
+
+| Method | GPU per stereo pair (median) | Game frames a second |
+|---|---|---|
+| OFXR + DLSS vectors | 0.44 ms | 117.8 |
+| OFXR FidelityFX flow | 0.90 ms | 113.7 |
+| Native DLSS FG 2X | 4.9 ms | 109.8 |
+| OFXR NVIDIA medium flow | 7.8 ms | 113.5 |
+
+The track's sections load the GPU differently, so single rounds of a method
+ranged by up to 11 frames a second; NVIDIA flow's long span runs largely on
+the optical-flow engine beside the game's rendering. Offline at that size
+(`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
+takes 2.4 ms, so about half of the live figure is the GPU shared with the
+game. With 310.9.1 a
 pair there costs 1.94 ms with a still head and 2.42 ms turning (3X: 2.98 and
 3.54 ms), and a feature per eye would cost 17% more still and 11% more
 turning. Live in the game's lighter hub scene, where the GPU is not saturated,
@@ -197,9 +207,10 @@ scale. The same vectors in pixels with a unit scale measurably lose quality.
 The vectors are passed undilated and NGX dilates them at depth edges; dilating
 them in the pack measured the same and cost about 35 us more per pair.
 
-Of a 2X pair, OFXR's own work is the pack of B, the reseed's colour-only pack
-of the aligned A (turning head only) and the composition; NGX's evaluation is
-the rest. With SDK 310.9.1, NGX's evaluations alone take 1.22 ms of a 1.33 ms
+Of a 2X pair at 3004x3004, OFXR's own work is the pack of B (about 180 us),
+the reseed's colour-only pack of the aligned A (about 105 us, turning head
+only) and the composition (about 75 us); NGX's evaluations are the rest (the
+reset's about 250 us). With SDK 310.9.1, NGX's evaluations alone take 1.22 ms of a 1.33 ms
 pair at 2064x2208 (1.49 of 1.64 ms turning), and at 3004x3004 1.68 of 1.94 ms
 (2.05 of 2.41 ms). The
 remainder writes the full-resolution colour, motion and depth NGX takes in its
