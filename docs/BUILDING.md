@@ -765,7 +765,8 @@ came near. Live on the final build, in Galactic Racer on the Steam Frame at
 | Interpolate, 3X | 0.0211 | 0.0311 | 3.5% / 9.3% |
 | Extrapolate (against the last pair's motion continued) | 0.0126 | 0.0205 | 4.9% / 5.9% |
 
-In Hubris the cadence erred 0.0010 against 0.0124. Extrapolating, against the
+A second race on the final build, every method switched in turn: the cadence
+0.0087, the stamps 0.0165. In Hubris the cadence erred 0.0010 against 0.0124. Extrapolating, against the
 next frame's motion in hindsight (its hand-over interval spread over the
 display until it is shown), the cadence erred 0.0404 and the stamps 0.0451.
 `synthesis_fraction` records each pair's fraction and stamp gap in the flight

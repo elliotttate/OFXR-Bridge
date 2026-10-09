@@ -591,6 +591,12 @@ table, and native's and NVIDIA's flow cost more beside a running game:
 NVIDIA's flow was the one method that cost frames there, and the rounds
 after it were the ones SteamVR dropped to half the rate.
 
+Again on release 14 (the cadence placement and the per-eye vectors), one
+race, every method in turn: OFXR + DLSS vectors 0.38 ms, FidelityFX 0.83-0.85
+ms, the hybrid 1.47-1.70 ms, native 67% 1.64-2.21 ms, native 100% 2.15 ms and
+NVIDIA medium 5.35 ms a pair, the real frame 61.8-62.5 ms after the wait in
+every 120 Hz round - the same order and the same latency.
+
 At 2886x2886 per eye the GPU was saturated (110-114 frames a second for
 every method) and the spans were steady from round to round: OFXR + DLSS
 vectors 0.57-0.58 ms, FidelityFX 1.24 ms, native 67% 1.54-1.61 ms, the hybrid
