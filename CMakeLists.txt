@@ -1084,6 +1084,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_flight_logging.cmake")
 
         add_test(
+            NAME xrfg_layer_promise_shown_time
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/promise-shown-time"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_promise_shown_time.cmake")
+
+        add_test(
+            NAME xrfg_layer_promise_shown_time_extrapolate
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
+                "-DEXTRA_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_extrapolate.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/promise-shown-time-extrapolate"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_promise_shown_time.cmake")
+
+        add_test(
             NAME xrfg_layer_process_exclusion
             COMMAND "${CMAKE_COMMAND}"
                 "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"

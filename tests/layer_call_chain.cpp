@@ -121,6 +121,11 @@ bool g_steamvr_runtime_mode = false;
 // Another runtime's name, for the rules the layer keys on it.
 const char* g_runtime_name_override = nullptr;
 bool g_steamvr_presenter_mode = false;
+// promise-shown-time: the presenter path on a runtime whose display time
+// advances a whole period per wait, as a real one does, under an application
+// that takes a period and a half to render each frame - long enough that its
+// real frames go down after the time first promised for them.
+bool g_promise_mode = false;
 // Set while the application is inside xrEndFrame. The layer runs its inline
 // second wait/begin/end cycle from that call on this same thread, which is
 // exactly what a throttling SteamVR configuration slows down, so this tells
@@ -366,6 +371,10 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
 }
 
 [[nodiscard]] XrTime fake_camera_time(XrTime display_time) noexcept {
+    if (g_promise_mode) {
+        // A still head: the scenario is about time, not motion.
+        return 0;
+    }
     if (g_steamvr_presenter_mode || g_flight_simulator_mode) {
         return (display_time / kFakeDisplayPeriod) * 100;
     }
@@ -568,6 +577,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
             : XR_TRUE;
     g_next_display_time += g_flight_simulator_mode
         ? kFakeDisplayPeriod * 3
+        : g_promise_mode ? kFakeDisplayPeriod
         : 100;
     {
         std::scoped_lock lock(g_frame_loop_mutex);
@@ -2144,7 +2154,7 @@ int main(int argc, char** argv) {
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
             "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
-            "steamvr-own-time]\n";
+            "steamvr-own-time|promise-shown-time]\n";
         return EXIT_FAILURE;
     }
     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
@@ -2164,8 +2174,10 @@ int main(int argc, char** argv) {
         argc == 4 && std::strcmp(argv[3], "steamvr-layer-invalid") == 0;
     g_own_display_time_mode =
         argc == 4 && std::strcmp(argv[3], "steamvr-own-time") == 0;
+    g_promise_mode =
+        argc == 4 && std::strcmp(argv[3], "promise-shown-time") == 0;
     g_steamvr_presenter_mode = g_destroy_pending_space || g_dcs_mode ||
-        g_refuse_layer_mode || g_own_display_time_mode ||
+        g_refuse_layer_mode || g_own_display_time_mode || g_promise_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
     g_single_threaded_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-single-threaded") == 0;
@@ -3653,6 +3665,44 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         }
         std::cout << "OpenXR SteamVR own-display-time pairing test passed\n";
+        return EXIT_SUCCESS;
+    }
+
+    if (g_promise_mode) {
+        // Inline frames until the presenter is promoted, then enough paired
+        // frames for the layer to measure where real frames go down, move the
+        // promise, and show it there. The timing is checked from the flight
+        // log by layer_promise_shown_time.cmake.
+        bool frame_sequence_succeeded = true;
+        XrTime last_predicted = 0;
+        for (int index = 0; index < 320 && frame_sequence_succeeded; ++index) {
+            XrFrameState frame{XR_TYPE_FRAME_STATE};
+            frame_sequence_succeeded =
+                XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &frame)) &&
+                frame.predictedDisplayTime > last_predicted &&
+                XR_SUCCEEDED(begin_frame(session, &frame_begin_info));
+            last_predicted = frame.predictedDisplayTime;
+            if (index >= 4) {
+                std::this_thread::sleep_for(std::chrono::microseconds(
+                    kFakeDisplayPeriod * 3 / 2 / 1000));
+            }
+            frame_sequence_succeeded = frame_sequence_succeeded &&
+                capture_fresh_application_image() &&
+                submit_frame(frame.predictedDisplayTime);
+        }
+        const bool teardown_succeeded =
+            XR_SUCCEEDED(end_session(session)) &&
+            XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
+            XR_SUCCEEDED(destroy_session(session)) &&
+            XR_SUCCEEDED(destroy_instance(instance));
+        FreeLibrary(module);
+        if (!frame_sequence_succeeded || !teardown_succeeded) {
+            std::cerr << "promise-shown-time frame loop failed: frames="
+                      << frame_sequence_succeeded << " teardown="
+                      << teardown_succeeded << '\n';
+            return EXIT_FAILURE;
+        }
+        std::cout << "OpenXR promise-shown-time frame loop completed\n";
         return EXIT_SUCCESS;
     }
 

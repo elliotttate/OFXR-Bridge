@@ -1303,6 +1303,16 @@ struct SessionState {
     XrDuration presenter_display_period{};
     XrFrameState presenter_frame_state{XR_TYPE_FRAME_STATE};
     XrTime last_virtual_display_time{};
+    // Whole display periods the promise to the application is moved later
+    // by, so it names the time its real frames are actually shown at (see
+    // observe_promise_lateness). Written by the presenter, read at waits.
+    bool promise_shown_time{true};
+    std::atomic<std::int32_t> promise_correction_periods{};
+    // The presenter's window of measurements, in periods late against the
+    // uncorrected promise; its thread alone touches these.
+    std::array<std::int8_t, 64> promise_samples{};
+    std::uint32_t promise_sample_count{};
+    std::uint32_t promise_settle{};
     XrResult presenter_failure{XR_SUCCESS};
     std::uint64_t next_presenter_sequence{1};
     std::size_t outstanding_presenter_submissions{};
@@ -2347,6 +2357,88 @@ void enter_generation_quarantine(
     const XrDuration sooner =
         period * (static_cast<XrDuration>(state.frames_per_application_frame.load()) - 1);
     return virtual_period > sooner ? virtual_period - sooner : virtual_period;
+}
+
+// How far past the runtime's prediction the application's frame is promised:
+// the anchor above, and then as many display periods as its real frames have
+// been going down after that while generating.
+[[nodiscard]] XrDuration promised_display_offset(
+    const SessionState& state,
+    XrDuration virtual_period,
+    XrDuration period) noexcept {
+    const XrDuration anchor = extrapolation_shown_sooner(state, virtual_period, period);
+    if (!state.promise_shown_time || period <= 0 || virtual_period <= period) {
+        return anchor;
+    }
+    return anchor +
+        period * static_cast<XrDuration>(
+            state.promise_correction_periods.load(std::memory_order_relaxed));
+}
+
+// The anchor assumes the application hands its frame over within a display
+// period of its wait returning, so that the pair's first submission goes down
+// the period after. A game rendering at half the display rate takes most of
+// its two: measured in Galactic Racer at 120 Hz, the pair's first submission
+// went down a period later than that, so each real frame was shown a period
+// after the time it was promised extrapolating, and two after interpolating
+// with the deeper pipeline, which holds the synthetic a period more. The game
+// rendered every frame for a head pose that much early, and the runtime's
+// reprojection made up the difference. The order and the depth decide when
+// frames go down; this only makes the promise say so.
+//
+// Each real frame of a pair is measured, in whole periods, against the
+// promise it was given less the correction already in it. Once a window of
+// them nearly all agree the correction follows, so one late frame, or a scene
+// that alternates, changes nothing. Frames promised before a change are not
+// counted against it.
+void observe_promise_lateness(
+    SessionState& state,
+    XrDuration late,
+    XrDuration period) noexcept {
+    if (!state.promise_shown_time || period <= 0) {
+        return;
+    }
+    if (state.promise_settle > 0) {
+        --state.promise_settle;
+        return;
+    }
+    constexpr std::int32_t kMaximumCorrection = 3;
+    const std::int32_t current =
+        state.promise_correction_periods.load(std::memory_order_relaxed);
+    const double periods =
+        static_cast<double>(late) / static_cast<double>(period) + current;
+    const auto rounded = static_cast<std::int32_t>(
+        std::clamp(periods < 0.0 ? periods - 0.5 : periods + 0.5, -8.0, 8.0));
+    state.promise_samples[state.promise_sample_count++] =
+        static_cast<std::int8_t>(rounded);
+    if (state.promise_sample_count < state.promise_samples.size()) {
+        return;
+    }
+    state.promise_sample_count = 0;
+    std::array<std::uint32_t, 17> counts{};
+    for (const std::int8_t sample : state.promise_samples) {
+        ++counts[static_cast<std::size_t>(sample + 8)];
+    }
+    const auto best = std::max_element(counts.begin(), counts.end());
+    const std::uint32_t agreeing = *best;
+    // Nine in ten of a window: about a second of frames at 60 a second.
+    if (agreeing * 10 < state.promise_samples.size() * 9) {
+        return;
+    }
+    const std::int32_t target = std::clamp<std::int32_t>(
+        static_cast<std::int32_t>(best - counts.begin()) - 8, 0, kMaximumCorrection);
+    if (target == current) {
+        return;
+    }
+    state.promise_correction_periods.store(target, std::memory_order_relaxed);
+    // The frames already promised under the old correction.
+    state.promise_settle = 8;
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::promise_correction,
+        0,
+        static_cast<std::uint64_t>(target),
+        static_cast<std::uint64_t>(current),
+        agreeing);
 }
 
 void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept {
@@ -4837,6 +4929,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
     state->dlss_flow_hybrid =
         xrfg::implicit_layer::read_dlss_flow_hybrid(current_layer_directory());
+    state->promise_shown_time =
+        xrfg::implicit_layer::read_promise_shown_time(current_layer_directory());
     state->extrapolate =
         xrfg::implicit_layer::read_extrapolate(current_layer_directory());
     if (state->extrapolate != 0) {
@@ -5514,7 +5608,7 @@ XrResult layer_wait_frame_impl(
         // periods sooner.
         const XrTime anchor = add_display_duration(
             state->presenter_frame_state.predictedDisplayTime,
-            extrapolation_shown_sooner(*state, virtual_period,
+            promised_display_offset(*state, virtual_period,
                 state->presenter_frame_state.predictedDisplayPeriod));
         // A second wait inside one presenter frame has to come back later than
         // the first, so the guard below steps off the last time served. That
@@ -5587,7 +5681,7 @@ XrResult layer_wait_frame_impl(
                 state->frames_per_application_frame);
         const XrTime anchor = add_display_duration(
             state->last_inline_frame_state.predictedDisplayTime,
-            extrapolation_shown_sooner(*state, virtual_period,
+            promised_display_offset(*state, virtual_period,
                 state->last_inline_frame_state.predictedDisplayPeriod));
         // Same ceiling as the presenter path above, for the same reason: this
         // branch repeats for as long as the promotion takes, and each repeat
@@ -8211,6 +8305,9 @@ void continuous_presenter_main(
         // Which half of the pair the presenter submitted, kept at this scope so
         // the flight record below can carry it.
         bool fresh_synthetic = false;
+        // The application's display time for the newest real frame this
+        // submission is made from, for presenter_content.
+        XrTime submitted_content_time = 0;
         // Same, for the vsync lock. Recorded after presenter_mutex is released:
         // the presenter thread takes it every frame and logging under it has
         // deadlocked the layer twice.
@@ -8400,6 +8497,7 @@ void continuous_presenter_main(
                     : nullptr;
             XrFrameEndInfo submitted{XR_TYPE_FRAME_END_INFO};
             if (source != nullptr) {
+                submitted_content_time = source->displayTime;
                 submitted = *source;
                 submitted.next = nullptr;
                 submitted.displayTime = frame_state.predictedDisplayTime;
@@ -9205,6 +9303,22 @@ void continuous_presenter_main(
             request ? request->sequence : 0,
             static_cast<std::uint64_t>(frame_state.predictedDisplayTime),
             request ? (fresh_synthetic ? 2u : 1u) : 0u);
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::presenter_content,
+            request ? (fresh_synthetic ? 2 : 1) : 0,
+            request ? request->sequence : 0,
+            static_cast<std::uint64_t>(submitted_content_time),
+            static_cast<std::uint64_t>(frame_state.predictedDisplayTime));
+        // A generated pair's real frame: how late it went down against the
+        // time the application was promised.
+        if (request && request->owned_frame && !fresh_synthetic &&
+            submitted_content_time != 0 && XR_SUCCEEDED(end_result) &&
+            frame_state.shouldRender != XR_FALSE) {
+            observe_promise_lateness(
+                *state,
+                frame_state.predictedDisplayTime - submitted_content_time,
+                static_cast<XrDuration>(state->presenter_display_period));
+        }
         if (pending_vsync_lock) {
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::presenter_vsync_lock,

@@ -220,6 +220,25 @@ enum class BridgeFlightOperation : std::uint32_t {
     // swapchain released more than once between two xrEndFrames is captured
     // once, at its last release.
     deferred_capture,
+    // What each submission shows, for latency: result is presenter_
+    // submission's kind (2 synthetic, 1 current, 0 a repeat), a the sequence,
+    // b the display time the application was given for the newest real frame
+    // the submission is made from (its xrEndFrame's displayTime), c the
+    // display time it went down for. Matched to that frame's app_wait_frame,
+    // c less the wait's return is how old the newest real content is when
+    // shown: a frame the interpolating order holds back shows a display
+    // period older than one shown at once.
+    presenter_content,
+    // The performance counter at the log's time zero (a) and its frequency
+    // (b), written after the logger record, so a record's ms can be read as
+    // an absolute counter value: against runtimes whose XrTime is the
+    // counter in nanoseconds, as SteamVR's is, how long before a display
+    // time something happened.
+    clock_origin,
+    // The display time the game is promised moved by whole display periods to
+    // where its real frames go down: a the new correction in periods, b the
+    // old, c how many of the window's frames agreed.
+    promise_correction,
 };
 
 struct BridgeFlightToken {

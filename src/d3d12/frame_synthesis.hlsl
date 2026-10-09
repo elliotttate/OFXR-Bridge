@@ -585,6 +585,11 @@ float2 forward_flow_for_pixel(
 // travels 16 bits a value in UseGameMotion (x, y) and GameMotionPadding
 // (width, height).
 static bool hybrid_layout = false;
+// The extrapolation from both the vectors and the flow: the flow keeps its
+// constants, so the depth rectangle travels in the other view's mapping, and
+// each pass scores its point against A. The vectors-only entry point shares
+// only the packed output rectangle.
+static bool extrapolate_both = false;
 // How far the last synthesize_midpoint's two samples disagreed: what the
 // hybrid composition chooses by.
 static float last_disagreement = 1.0;
@@ -1068,9 +1073,9 @@ float game_depth(float2 q) {
     // The hybrid extrapolation keeps the flow's constants, and carries the
     // depth rectangle in the other view's mapping, which this view's draw
     // never reads.
-    float2 size = hybrid_layout ? PreviousMappings[1 - ViewIndex].SourceRect.zw
+    float2 size = extrapolate_both ? PreviousMappings[1 - ViewIndex].SourceRect.zw
                                 : float2(float(FlowBlockSize & 0xffffU), float(FlowBlockSize >> 16));
-    float2 origin = hybrid_layout ? PreviousMappings[1 - ViewIndex].SourceRect.xy
+    float2 origin = extrapolate_both ? PreviousMappings[1 - ViewIndex].SourceRect.xy
                                   : float2(float(FlowWidth), float(FlowHeight));
     int2 texel = int2(clamp(origin + uv * size, origin, origin + size - 1.0));
     return GameDepth.Load(int4(texel, 0, 0));
@@ -1114,18 +1119,26 @@ float4 extrapolate_pixel(float2 pixel, CameraSample here) {
     // within 48 pixels either way - no other surface can move in over it,
     // and its own solve is the answer: the search runs near motion edges
     // only. A smooth gradient, such as ground rushing past, is not a step.
+    // FidelityFX's flow is measured in blocks and steps by a few pixels
+    // between them without an edge: on recorded frames, a 6-pixel step
+    // threshold for it cost no accuracy and took 13% less time.
     float2 here_motion = extrapolation_motion_texel(pixel);
     bool smooth_motion = true;
-    [unroll] for (uint probe = 0; probe < 4; ++probe) {
+    // In the hybrid the flow pass takes its own point whatever the test says.
+    [unroll] for (uint probe = 0; probe < 4 && !(extrapolate_flow && extrapolate_both); ++probe) {
         float radius = (probe & 2) != 0 ? 48.0 : 16.0;
         float2 offset = (probe & 1) != 0 ? float2(0, radius) : float2(radius, 0);
         smooth_motion = smooth_motion && length(extrapolation_motion_texel(pixel + offset) +
                                   extrapolation_motion_texel(pixel - offset) - 2.0 * here_motion) <
-            (extrapolate_flow ? 3.0 : 1.0);
+            (extrapolate_flow ? 6.0 : 1.0);
     }
     // In the hybrid the vectors order the surfaces by depth; the flow only
-    // offers its own point.
-    uint candidates = smooth_motion || (extrapolate_flow && hybrid_layout) ? 1 : 9;
+    // offers its own point. Alone, the flow is too coarse for the outer ring:
+    // its neighbours' motion 40 pixels off belongs to other blocks' noise as
+    // often as to another surface, and the four nearest starts, 8 pixels off,
+    // erred less with better SSIM on recorded frames, at five starts not nine.
+    uint candidates = smooth_motion || (extrapolate_flow && extrapolate_both) ? 1
+                    : extrapolate_flow ? 5 : 9;
     // The hybrid's flow pass always takes one candidate; FXC warns that such
     // a loop runs once (3557) for that entry point alone.
 #pragma warning(disable : 3557)
@@ -1133,7 +1146,7 @@ float4 extrapolate_pixel(float2 pixel, CameraSample here) {
         float2 start = pixel;
         if (candidate > 0) {
             uint ring = (candidate - 1) / 4;
-            float radius = ring == 0 ? 12.0 : 40.0;
+            float radius = ring == 0 ? (extrapolate_flow ? 8.0 : 12.0) : 40.0;
             uint direction = (candidate - 1) % 4;
             float2 offset = direction == 0 ? float2(radius, 0) : direction == 1 ? float2(-radius, 0)
                           : direction == 2 ? float2(0, radius) : float2(0, -radius);
@@ -1172,7 +1185,7 @@ float4 extrapolate_pixel(float2 pixel, CameraSample here) {
     last_extrapolation_error = 1.0;
     if (b.valid >= 0.5) {
         output_color = saturate(b.color);
-        if (hybrid_layout) {
+        if (extrapolate_both) {
             float2 came_from = chosen + extrapolation_displacement(chosen);
             float4 b_low = 0.0, a_low = 0.0;
             [unroll] for (uint k = 0; k < 4; ++k) {
@@ -1211,6 +1224,7 @@ float4 SynthesizeExtrapolatedFlowPS(FullscreenVertex input) : SV_Target {
 // pixel, whichever's point explains A better. The vectors keep a tie.
 float4 SynthesizeExtrapolatedHybridPS(FullscreenVertex input) : SV_Target {
     hybrid_layout = true;
+    extrapolate_both = true;
     float4 vectors = extrapolate(input);
     float vectors_error = last_extrapolation_error;
     // Where the vectors' point explains A, the flow need not be asked.

@@ -557,18 +557,48 @@ void replay_held_out(const std::filesystem::path& directory) {
         require(operation_succeeded(synthesizer.submit_pair(capture_b, views2, views1, 0, 1, &pair,
                     std::nullopt, m.guides ? guides_b : nullptr, false, fraction)), "replay pair");
         fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
-        // The pair's GPU span on real content: one cold pair, for comparing
-        // configurations rather than as a benchmark.
-        xrfg::D3D12NvidiaGpuTiming timing{};
-        if (synthesizer.consume_nvidia_gpu_timing(&timing) == S_OK) {
+        // The pair's GPU span on real content. One pair is cold; with
+        // XRFG_TEST_REPLAY_TIMING_PAIRS=n the prime and pair are run n times
+        // more after scoring and the median of those is printed as well.
+        const auto pair_microseconds = [&]() -> double {
+            xrfg::D3D12NvidiaGpuTiming timing{};
+            if (synthesizer.consume_nvidia_gpu_timing(&timing) != S_OK) return -1.0;
             LARGE_INTEGER frequency{};
             QueryPerformanceFrequency(&frequency);
-            const double microseconds = timing.gpu_end_qpc > timing.gpu_begin_qpc
+            return timing.gpu_end_qpc > timing.gpu_begin_qpc
                 ? double(timing.gpu_end_qpc - timing.gpu_begin_qpc) * 1e6 / double(frequency.QuadPart)
                 : double(timing.total_microseconds);
+        };
+        if (const double microseconds = pair_microseconds(); microseconds >= 0.0) {
             std::cout << "replay " << m.name << " gpu_us=" << microseconds << std::endl;
         }
         score(m.name.c_str(), read_back_texture(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET));
+        if (const char* repeat = std::getenv("XRFG_TEST_REPLAY_TIMING_PAIRS")) {
+            std::vector<double> samples;
+            for (int run = 0; run < std::atoi(repeat); ++run) {
+                xrfg::D3D12HistoryCaptureTicket again_a{}, again_b{};
+                xrfg::D3D12FrameSynthesisTicket again_prime{}, again_pair{};
+                if (!operation_succeeded(synthesizer.wait_for_idle()) ||
+                    !operation_succeeded(history->capture(0, &again_a)) ||
+                    !operation_succeeded(history->commit(again_a)) ||
+                    !operation_succeeded(synthesizer.submit_prime(again_a, views0, 0, &again_prime,
+                        m.guides ? guides_a : nullptr))) break;
+                require_frame_start_gate(synthesizer, "replay timing frame-start gate");
+                if (!operation_succeeded(history->capture(1, &again_b)) ||
+                    !operation_succeeded(history->commit(again_b)) ||
+                    !operation_succeeded(synthesizer.submit_pair(again_b, views2, views1, 0, 1, &again_pair,
+                        std::nullopt, m.guides ? guides_b : nullptr, false, fraction))) break;
+                fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+                if (const double microseconds = pair_microseconds(); microseconds >= 0.0) {
+                    samples.push_back(microseconds);
+                }
+            }
+            if (!samples.empty()) {
+                std::sort(samples.begin(), samples.end());
+                std::cout << "replay " << m.name << " warm_gpu_us=" << samples[samples.size() / 2]
+                          << " runs=" << samples.size() << std::endl;
+            }
+        }
         require(operation_succeeded(synthesizer.wait_for_idle()), "replay drain");
     }
 #ifdef XRFG_NATIVE_DLSSG

@@ -650,23 +650,65 @@ ahead (1 + dt2/dt1 spans from A):
 | Search only near motion edges (second differences within 48 px) | 12.56 | 0.676 |
 | Nine candidates over three steps there (kept for `extrapolate=1`) | 12.68 | 0.679 |
 | From FidelityFX's flow alone, half / full resolution | 12.44 / 12.12 | 0.651 / 0.658 |
+| The flow's edge test at 6 px and its four nearest starts, 8 px off (kept) | 12.41 | 0.660 |
 | Vectors and flow, the better prediction per pixel (`extrapolate=2`) | 11.87 | 0.684 |
+
+The flow's search was tuned on the same triplets, timed warm on them
+(`XRFG_TEST_REPLAY_TIMING_PAIRS=7`, one replay at a time):
+
+| Flow extrapolation variant | Error | SSIM | Gradient error | GPU a pair |
+|---|---|---|---|---|
+| Edge test at 3 px, nine starts at 12 and 40 px | 12.46 | 0.652 | 12.40 | 1.94 ms |
+| Edge test at 6 px | 12.46 | 0.654 | 12.40 | 1.69 ms |
+| Edge test at 12 px | 12.52 | 0.654 | 12.43 | 1.47 ms |
+| Five starts, at 12 px | 12.39 | 0.658 | 12.20 | 1.35 ms |
+| 6 px, five starts at 12 px | 12.40 | 0.659 | 12.20 | 1.22 ms |
+| **6 px, five starts at 8 px** (kept) | **12.41** | **0.660** | **12.16** | **1.22 ms** |
+| 6 px, five starts at 20 px | 12.43 | 0.657 | 12.27 | 1.22 ms |
+| 9 px, five starts at 12 px | 12.43 | 0.659 | 12.22 | 1.15 ms |
+| 6 px, nine starts at 12 and 24 px | 12.40 | 0.657 | 12.31 | 1.68 ms |
+| Two steps instead of three | 13.05 | 0.641 | 12.64 | 1.67 ms |
+
+FidelityFX's flow comes in blocks, so its motion steps by a few pixels
+between them where there is no edge, and its neighbours 40 px off are another
+block's noise as often as another surface. On the same frames, timed the same
+way, extrapolating from the vectors costs 1.13 ms and from both 1.93 ms. In
+release 6 the vectors-only shader inherited the combined mode's constants
+layout and read depth from the wrong ones (13.83 error, SSIM 0.666); that is
+fixed.
 
 A shadow cast by the pod moves with the ground's vectors; the still-content
 hypothesis did not fix it, since the ground's texture moves under it, but the
 flow follows it. The per-pixel choice between the two compares each one's
 point against the frame before, blurred a little, and matches the better of
-the two per triplet (11.78). Live in Galactic Racer it cost a median 2.1-4.6
-ms a pair, against 1.1-1.25 ms from the vectors alone: real frames' vectors
-rarely explain the frame before closely enough to skip the flow. Its flow
-pass offers only its own point; letting it search too cost twice as much on
-the benchmark for 0.05 less error. The replay's single cold pair per
-configuration was too noisy to time it. The
+the two per triplet (11.78). Timed warm, live in Galactic Racer at 2316x2316
+per eye it cost 1.27-1.91 ms a pair, against 0.24 ms from the vectors alone
+and 1.44-1.74 ms from the flow before its tuning: real frames' vectors rarely
+explain the frame before closely enough to skip the flow, so FidelityFX's
+flow is most of its cost. Its flow pass offers only its own point; letting it
+search too cost twice as much on the benchmark for 0.05 less error. The
 layer shows the real frame at its own display time and the prediction a
 period later, with the deferred current copy and the deeper pipeline off and
 a two-slot synthetic ring; `xrfg_layer_extrapolate_*` check the order inline,
 on the presenter and pipelined. Live in Galactic Racer the flight log showed
 every real frame handed over before its prediction.
+
+Latency was measured from the flight log rather than inferred from that
+order. `presenter_content` records, per submission, the display time the game
+was promised for the newest real frame in it and the display time it went
+down for; `clock_origin` puts the log's clock on the performance counter,
+which is SteamVR's XrTime. Against the game's xrWaitFrame returns
+(`latency_compare.py` in the Galactic Racer test folder), a real frame went
+down 45.5-47.0 ms after the wait extrapolating, 54.1-55.3 ms for native
+generation interpolating in the same session, and 62.5 ms interpolating with
+the deeper pipeline. Those runs also showed every promise early: by a period
+extrapolating and two with the deeper pipeline, because the game took more
+than one display period to hand its frame over. `promise_shown_time` now
+follows the measured lateness in whole periods (90% of a 64-frame window);
+afterwards real frames went down at their promised time in every mode. At
+UEVR's full resolution the Jakku race loaded the GPU enough that SteamVR
+halved the rate in some rounds (its lead from wait to display then reads 27 or
+50-58 ms instead of 35.3); those rounds are left out.
 
 The test harness starts NVIDIA's `nvngx_update.exe` (five per process) with
 every NGX initialisation, and they linger for minutes. Sweeps of a few

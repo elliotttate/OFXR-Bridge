@@ -119,6 +119,9 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return "presenter_pair_release";
     case BridgeFlightOperation::recording: return "recording";
     case BridgeFlightOperation::deferred_capture: return "deferred_capture";
+    case BridgeFlightOperation::presenter_content: return "presenter_content";
+    case BridgeFlightOperation::clock_origin: return "clock_origin";
+    case BridgeFlightOperation::promise_correction: return "promise_correction";
     }
     return "unknown";
 }
@@ -155,6 +158,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::process_excluded:
     case BridgeFlightOperation::vulkan_bridge:
     case BridgeFlightOperation::recording:
+    case BridgeFlightOperation::clock_origin:
         return true;
     case BridgeFlightOperation::presenter_transition:
         return result == 600 || (result >= 700 && result < 800);
@@ -606,6 +610,11 @@ void BridgeFlightLogger::initialize(
             maximum_mb,
             flush ? 1u : 0u,
             GetCurrentProcessId());
+        event(
+            BridgeFlightOperation::clock_origin,
+            0,
+            static_cast<std::uint64_t>(impl_->origin.QuadPart),
+            static_cast<std::uint64_t>(impl_->frequency.QuadPart));
         if (wanted) {
             std::scoped_lock lock(impl_->control_mutex);
             impl_->start();
