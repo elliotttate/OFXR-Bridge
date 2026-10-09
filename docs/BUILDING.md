@@ -257,9 +257,9 @@ every evaluation option (`notRenderingGameFrames`, `menuDetectionEnabled`,
 `colorBuffersHDR`, `cameraMotionIncluded`, `orthoProjection`,
 `automodeOverrideReset`, and `minRelativeLinearDepthObjectSeparation` at 1 and
 1000), and giving the seed its own input textures so both packs run before
-either evaluation, which would also cost about 220 MB more video memory. On
-blank frames, 32-bit motion was slower. These feature versions accept only
-render preset 1.
+either evaluation, which would also cost about 220 MB more video memory.
+32-bit motion is 2% slower, and NGX's depth edges measure worse with it (0.33
+against 0.21). These feature versions accept only render preset 1.
 
 Generating below the eye's resolution and upscaling the result is cheaper -
 at 3004x3004 on blank frames, 75% per axis took a still/turning pair from
