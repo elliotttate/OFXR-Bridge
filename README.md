@@ -58,9 +58,20 @@ FPS overlay and the flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge)
   that the game hands to its D3D12 DLSS or Ray Reconstruction upscaler, along
   with their rectangles, motion scale, jitter and depth flags. Camera depth
   metadata comes from OpenXR depth submissions. When those are missing, it
-  comes from UEVR's public projection API. A cooperating producer can supply
-  the same guides through the V2 guide publication API instead. Snapshots copy
-  only the rectangle DLSS reads, and only the depth plane.
+  comes from UEVR's public projection API. A game with neither still states
+  its depth direction in its DLSS flags, and that direction is all NGX's
+  output depends on, so nominal planes stand in. A cooperating producer can
+  supply the same guides through the V2 guide publication API instead.
+  Snapshots copy only the rectangle DLSS reads, and only the depth plane.
+- **NGX finds the bundled `nvngx_dlssg.dll` even when the game started NGX
+  first.** NGX looks for a feature's DLL only along the search paths of the
+  process's first NGX initialisation, which is normally the game's own DLSS.
+  A game that ships no `nvngx_dlssg.dll` would then leave frame generation
+  "not found" for OFXR. So, when the OpenXR instance is created with a DLSS
+  method selected, the layer adds its own folder to the end of every NGX
+  initialisation's search paths. Engines create the instance before their
+  renderer, so this comes before the game's DLSS starts. A game's own copy
+  of the DLL, earlier in its list, still wins.
 - **Both eyes share one NGX feature.** The eyes are packed side by side into
   one double-width feature, with a 64-pixel seam that repeats each eye's edge.
   Most of an NGX evaluation's cost is fixed, so one wide evaluation costs far
@@ -276,6 +287,24 @@ speed. Each method had four interleaved rounds of ten seconds.
 - On the Meta XR Simulator (1440x1584 per eye), every method held the
   simulator's 90 frames a second.
 
+**Live, Hubris.** Hubris is a native Unreal Engine 4 VR game with DLSS 310.2.1
+and no DLSS Frame Generation of its own. It ran through SteamVR at 2568x2568
+per eye, in its menu scene. The game was not GPU-bound there, so every method
+held 119.5-119.9 frames a second. Each figure is the median of a ten-second
+round; repeated rounds agreed within 10 us.
+
+| Method | GPU per stereo pair (median) |
+|---|---|
+| OFXR + DLSS vectors | 0.32 ms |
+| OFXR FidelityFX flow | 0.67 ms |
+| Native DLSS FG 2X at 67% resolution | 1.40 ms |
+| Native DLSS FG 2X | 1.87 ms |
+| OFXR NVIDIA medium flow | 3.1 ms |
+
+Hubris needed two fixes to run native at all: the search-path change
+described in [How it works](#how-it-works), and depth taken from its DLSS
+flags, because it submits no OpenXR depth.
+
 **Where native's time goes.** NGX's own evaluations take most of a pair. At
 3004x3004 they take 1.66 of 1.89 ms with a still head, and 2.02 of 2.36 ms
 turning. OFXR's own work is the remainder: about 180 us to pack the new
@@ -420,6 +449,14 @@ Blank frames compress to almost nothing in GPU memory, and NGX then measures
   algorithms. If NGX later refuses a feature, the statistics report
   `native_unavailable` (status 8). A 3X request on an adapter without NGX
   multi-frame generation reports `multi_frame_unsupported` (status 9).
+- **NGX started before the layer.** The search-path change only works if the
+  layer loads before the game's DLSS starts NGX. If UEVR injects a game after
+  it has started, and the game ships no `nvngx_dlssg.dll`, native generation
+  is unavailable. OFXR + DLSS vectors still works there. If the session starts
+  on OFXR's FidelityFX or NVIDIA flow without DLSS vectors, the layer leaves
+  the search paths alone, and switching to native needs a game restart.
+  Setting `XRFG_TEST_NATIVE_DLSSG_VERBOSE=1` makes the layer record NGX's
+  answers in `%LOCALAPPDATA%\OFXR Bridge\NGX\ofxr-native-dlssg.log`.
 - **Fixed cadence.** Native mode uses NGX's fixed fractions, so it suits games
   that hold half or a third of the display rate. Away from that cadence, each
   generated image is shown at the wrong instant and motion judders. OFXR's own
@@ -428,7 +465,8 @@ Blank frames compress to almost nothing in GPU memory, and NGX then measures
   separate guides for baked-in HUD and UI, remain future work. The bridge's
   existing limitation for camera translation still applies.
 - **Live testing so far** covers Galactic Racer under UEVR (two tracks), on a
-  Steam Frame through SteamVR and on the Meta XR Simulator.
+  Steam Frame through SteamVR and on the Meta XR Simulator, and Hubris, a
+  native Unreal Engine 4 VR game, through SteamVR.
 
 ## Using OFXR Bridge
 

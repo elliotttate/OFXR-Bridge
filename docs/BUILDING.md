@@ -159,14 +159,65 @@ the still-head pair measured 1.93 ms. Skipping the reseed instead is worse: a qu
 unaligned history already triples the error of a reseeded pair on detailed
 content, so the 0.1 pixel threshold stays.
 
+The second game tested is Hubris, a native Unreal Engine 4 VR game with DLSS
+310.2.1 (delivered over the air by the driver) and no frame generation of its
+own, launched with `-hmd=OpenXRHMD -dx12` through SteamVR. It renders both
+eyes with one DLSS feature into a double-wide 5136x2568 swapchain and submits
+no OpenXR depth. In its menu scene, where the game is not GPU-bound and every
+method held 119.5-119.9 frames a second, the median GPU time per stereo pair
+was 0.32 ms for OFXR + DLSS vectors, 0.67 ms for FidelityFX flow, 1.40 ms for
+native at 67% resolution, 1.87 ms for native and 3.1 ms for NVIDIA medium
+flow. Native's two rounds measured 1.872 and 1.880 ms, and the vectors' 0.323
+both times. Starting on DLSS vectors and switching to native in the menu, and
+back, measured the same.
+
 A DLSS feature the game created before the capture hook was installed is
 recovered from its evaluation parameters, which normally still hold its
 creation flags. Without them, capture assumes render-resolution motion and
 takes the depth convention from the camera metadata.
 
+A game with no camera metadata at all - Hubris submits no OpenXR depth, and
+UEVR is not involved - still states its depth direction in the feature's
+`DepthInverted` flag, which its own DLSS relies on. Capture then publishes
+nominal 0.1 and 1000 planes (or NGX's own `DLSSG.CameraNear`/`CameraFar`
+parameters, if the game set them) in that direction. Offline, NGX's output
+was bit-identical for near planes from 0.01 to 100, finite or infinite, while
+the wrong direction took the moving-edge error from 8.7 to 35.3. While the
+convention is unknown, capture still publishes the motion, with no depth:
+OFXR + DLSS vectors needs nothing more, and native shows the current frame
+(`waiting_for_depth`).
+
 OFXR never shuts NGX down. The driver keeps one NGX instance per adapter for
 the whole process, and `NVSDK_NGX_D3D12_Shutdown1` shuts down every loaded
 feature module for that device, including the game's own DLSS upscaler.
+
+That shared instance also decides where feature DLLs come from: NGX searches
+the path list of the process's first initialisation only. In Hubris, which
+starts NGX for its own DLSS before OFXR does and ships no
+`nvngx_dlssg.dll`, OFXR's later initialisation succeeded, but the
+capabilities reported frame generation unavailable with
+`FrameGeneration.FeatureInitResult` 0xBAD00004 (feature not found).
+Creating the feature anyway failed with 0xBAD0000B, and loading OFXR's copy
+of the DLL into the process beforehand changed nothing. The SDK's static
+library routes every D3D12 initialisation through the core's exported
+`NVSDK_NGX_D3D12_Init_Ext` or `NVSDK_NGX_D3D12_Init_ProjectID`, with a copy of
+the caller's `NVSDK_NGX_FeatureCommonInfo` as the last argument. So when the
+OpenXR instance is created for D3D12 with native generation or DLSS vectors
+selected, the layer loads the driver's `_nvngx.dll` (from
+`HKLM\SOFTWARE\NVIDIA Corporation\Global\NGXCore\FullPath`) and hooks those
+two exports, appending its own folder to each call's path list. Engines
+create the instance before their renderer to choose the adapter, so the hook
+precedes the game's DLSS. In Hubris this made frame generation available,
+with up to five frames reported, and loaded OFXR's DLL. Paths the game lists
+come first, so a game's own `nvngx_dlssg.dll` - Galactic Racer ships 310.6.0
+with its Streamline plugin - is still the one used. A game that started NGX
+before the layer loaded, such as one UEVR injects later, and that ships no
+`nvngx_dlssg.dll` cannot run native generation; it still runs OFXR + DLSS
+vectors. `XRFG_TEST_NATIVE_DLSSG_NO_DISCOVERY=1` leaves the paths alone, to
+reproduce that case. With `XRFG_TEST_NATIVE_DLSSG_VERBOSE=1` the layer
+records NGX's initialisation result, the frame-generation capability values
+and any feature-creation failure in
+`%LOCALAPPDATA%\OFXR Bridge\NGX\ofxr-native-dlssg.log`.
 
 Nor does it initialise NGX twice for a device. A UEVR resolution change
 mid-race once faulted the GPU, with 3D HEIGHT and WIDTH CT violations, in the

@@ -13,8 +13,10 @@
 #include <cmath>
 #include <share.h>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace xrfg { namespace {
 using Microsoft::WRL::ComPtr;
@@ -182,9 +184,22 @@ void capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     g.camera_far=get<float>(p,"DLSSG.CameraFar",camera_far);
     // Unknown flags defer to the camera's own depth convention.
     g.depth_inverted=feature.flags_known?(feature.flags&NVSDK_NGX_DLSS_Feature_Flags_DepthInverted)!=0:inverted;
+    // A game with no camera metadata - a native VR game that submits no OpenXR
+    // depth, say - still states its depth direction in the feature's flags,
+    // which its own DLSS relies on. That is all NGX's result depends on: it
+    // measured bit-identical for near planes from 0.01 to 100, finite or
+    // infinite, while a wrong direction quadrupled the error at moving edges.
+    // So nominal planes stand in for the camera's.
+    if(!camera_valid&&feature.flags_known) {
+        camera_valid=true; inverted=g.depth_inverted; infinite=false;
+        g.camera_near=get<float>(p,"DLSSG.CameraNear",0.1F);
+        g.camera_far=get<float>(p,"DLSSG.CameraFar",1000.F);
+    }
     if(!camera_valid||inverted!=g.depth_inverted) {
+        // The motion alone still serves OFXR + DLSS vectors; native generation
+        // finds no depth and shows the current frame.
         if(call<=8||call%300==0)log("waiting_depth_convention",call,feature.flags,camera_valid,inverted);
-        return;
+        g.depth=nullptr;
     }
     g.depth_infinite=infinite;
     publish_dlss_motion_vectors(g);
@@ -230,7 +245,88 @@ void install(UINT i,const wchar_t* name,void* create_fn,void* eval_fn) {
     m.create=m.create_hook.original<Create>(); m.evaluate=m.evaluate_hook.original<Evaluate>();
     m.retained=retained; (void)m.create_hook.enable(); (void)m.evaluate_hook.enable(); log("hook_installed",i);
 }
+// NGX looks for a feature's module only along the path list of the process's
+// first initialisation, which is usually the game's own DLSS: OFXR's later
+// one succeeds yet reports frame generation not found when the game ships no
+// nvngx_dlssg.dll. OFXR's directory goes last on every initialisation's list,
+// so a game's own copy still wins. Both core entry points take the list as
+// their last argument; the SDK's static library routes every D3D12
+// initialisation through one of them.
+using InitExt=NVSDK_NGX_Result(*)(unsigned long long,const wchar_t*,ID3D12Device*,
+    NVSDK_NGX_Version,const NVSDK_NGX_FeatureCommonInfo*);
+using InitProject=NVSDK_NGX_Result(*)(const char*,NVSDK_NGX_EngineType,const char*,
+    const wchar_t*,ID3D12Device*,NVSDK_NGX_Version,const NVSDK_NGX_FeatureCommonInfo*);
+struct Discovery {
+    SafetyHookInline ext_hook, project_hook;
+    InitExt ext{}; InitProject project{};
+    std::wstring directory;
+};
+Discovery& discovery() { static auto* d=new Discovery; return *d; }
+struct DiscoveryInfo {
+    NVSDK_NGX_FeatureCommonInfo info{};
+    std::vector<const wchar_t*> paths;
+    const NVSDK_NGX_FeatureCommonInfo* with_directory(const NVSDK_NGX_FeatureCommonInfo* given) {
+        const auto& directory=discovery().directory;
+        if(given)info=*given;
+        const UINT count=given&&given->PathListInfo.Path?given->PathListInfo.Length:0;
+        for(UINT i=0;i<count;++i) {
+            const wchar_t* path=given->PathListInfo.Path[i];
+            if(path&&_wcsicmp(path,directory.c_str())==0)return given;
+            paths.push_back(path);
+        }
+        paths.push_back(directory.c_str());
+        info.PathListInfo.Path=paths.data();
+        info.PathListInfo.Length=static_cast<unsigned int>(paths.size());
+        log("ngx_discovery_paths",paths.size());
+        return &info;
+    }
+};
+NVSDK_NGX_Result init_ext(unsigned long long id,const wchar_t* data,ID3D12Device* device,
+    NVSDK_NGX_Version version,const NVSDK_NGX_FeatureCommonInfo* given) {
+    DiscoveryInfo extended; const NVSDK_NGX_FeatureCommonInfo* info=given;
+    try { info=extended.with_directory(given); } catch(...) {}
+    return discovery().ext(id,data,device,version,info);
+}
+NVSDK_NGX_Result init_project(const char* project,NVSDK_NGX_EngineType engine,
+    const char* engine_version,const wchar_t* data,ID3D12Device* device,
+    NVSDK_NGX_Version version,const NVSDK_NGX_FeatureCommonInfo* given) {
+    DiscoveryInfo extended; const NVSDK_NGX_FeatureCommonInfo* info=given;
+    try { info=extended.with_directory(given); } catch(...) {}
+    return discovery().project(project,engine,engine_version,data,device,version,info);
+}
+// The driver's NGX core, as the SDK finds it when nothing ships next to the
+// game.
+HMODULE load_ngx_core() {
+    if(auto core=GetModuleHandleW(L"_nvngx.dll")) { log("ngx_core_already_loaded"); return core; }
+    wchar_t directory[MAX_PATH]{}; DWORD size=sizeof(directory);
+    if(RegGetValueW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore",
+        L"FullPath",RRF_RT_REG_SZ,nullptr,directory,&size)!=ERROR_SUCCESS)return nullptr;
+    std::wstring path=directory; path+=L"\\_nvngx.dll";
+    return LoadLibraryExW(path.c_str(),nullptr,LOAD_WITH_ALTERED_SEARCH_PATH);
+}
 } // namespace
+void prepare_ngx_feature_discovery(const wchar_t* directory) noexcept {
+    try {
+        auto& d=discovery(); if(d.ext_hook||d.project_hook||!directory||!*directory)return;
+        const HMODULE core=load_ngx_core(); if(!core)return;
+        auto ext=GetProcAddress(core,"NVSDK_NGX_D3D12_Init_Ext");
+        auto project=GetProcAddress(core,"NVSDK_NGX_D3D12_Init_ProjectID");
+        if(!ext||!project)return;
+        HMODULE pin{};
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(&prepare_ngx_feature_discovery),&pin);
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
+            reinterpret_cast<LPCWSTR>(ext),&pin);
+        d.directory=directory;
+        d.ext_hook=safetyhook::create_inline(ext,reinterpret_cast<void*>(&init_ext),
+            SafetyHookInline::StartDisabled);
+        d.project_hook=safetyhook::create_inline(project,reinterpret_cast<void*>(&init_project),
+            SafetyHookInline::StartDisabled);
+        if(!d.ext_hook||!d.project_hook){d.ext_hook={};d.project_hook={};log("ngx_discovery_hook_failed");return;}
+        d.ext=d.ext_hook.original<InitExt>(); d.project=d.project_hook.original<InitProject>();
+        (void)d.ext_hook.enable(); (void)d.project_hook.enable(); log("ngx_discovery_hooked");
+    } catch(...) {}
+}
 void configure_ngx_guide_capture(ID3D12CommandQueue* queue,bool enabled) noexcept {
     try {
         auto& s=state(); {std::scoped_lock lock(s.mutex);
@@ -315,5 +411,6 @@ namespace xrfg {
 void configure_ngx_guide_capture(ID3D12CommandQueue*,bool) noexcept {}
 void stop_ngx_guide_capture(ID3D12CommandQueue*) noexcept {}
 void update_ngx_guide_depth(float,float,float,float) noexcept {}
+void prepare_ngx_feature_discovery(const wchar_t*) noexcept {}
 }
 #endif

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdarg>
 #include <cstdio>
 #include <cwchar>
 #include <share.h>
@@ -313,6 +314,25 @@ struct AdapterFrames {
 std::mutex ngx_mutex;
 std::vector<DeviceUse> ngx_devices;
 std::vector<AdapterFrames> ngx_frames;
+// With XRFG_TEST_NATIVE_DLSSG_VERBOSE, why native generation could not start
+// goes to ofxr-native-dlssg.log in the NGX log directory: NGX's own logs do
+// not record its capability answers.
+void diagnose(const char *format, ...) {
+    if (!environment(L"XRFG_TEST_NATIVE_DLSSG_VERBOSE")) return;
+    wchar_t local[32768]{};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
+    if (!*local) return;
+    const auto path = std::filesystem::path(local) / L"OFXR Bridge" / L"NGX" / L"ofxr-native-dlssg.log";
+    FILE *file = _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
+    if (!file) return;
+    std::fprintf(file, "%llu pid=%lu ", GetTickCount64(), GetCurrentProcessId());
+    va_list arguments;
+    va_start(arguments, format);
+    std::vfprintf(file, format, arguments);
+    va_end(arguments);
+    std::fputc('\n', file);
+    std::fclose(file);
+}
 HRESULT acquire_ngx(ID3D12Device *d) {
     std::scoped_lock lock(ngx_mutex);
     for (auto &e : ngx_devices) {
@@ -339,6 +359,7 @@ HRESULT acquire_ngx(ID3D12Device *d) {
     const auto result = NVSDK_NGX_D3D12_Init_with_ProjectID("2152e8d8-a3d7-4d4c-88a5-37f740f81036",
                                                             NVSDK_NGX_ENGINE_TYPE_CUSTOM,
                                                             "OFXR-Bridge", logs.c_str(), d, &info);
+    diagnose("NGX initialization result=0x%x", unsigned(result));
     if (NVSDK_NGX_FAILED(result)) {
         return DXGI_ERROR_UNSUPPORTED;
     }
@@ -361,13 +382,22 @@ void release_ngx(ID3D12Device *d) {
 // Requires acquire_ngx. Zero when frame generation is unavailable.
 std::uint32_t query_generated_frames() {
     NVSDK_NGX_Parameter *caps{};
-    if (NVSDK_NGX_FAILED(NVSDK_NGX_D3D12_GetCapabilityParameters(&caps)) || !caps) {
+    const auto queried = NVSDK_NGX_D3D12_GetCapabilityParameters(&caps);
+    if (NVSDK_NGX_FAILED(queried) || !caps) {
+        diagnose("capability query result=0x%x", unsigned(queried));
         return 0;
     }
-    int available = 0;
-    unsigned int frames = 1;
+    int available = 0, init_result = 0, needs_driver = 0;
+    unsigned int frames = 1, driver_major = 0, driver_minor = 0;
     caps->Get(NVSDK_NGX_Parameter_FrameGeneration_Available, &available);
     caps->Get(NVSDK_NGX_DLSSG_Parameter_MultiFrameCountMax, &frames);
+    caps->Get(NVSDK_NGX_Parameter_FrameGeneration_FeatureInitResult, &init_result);
+    caps->Get(NVSDK_NGX_Parameter_FrameGeneration_NeedsUpdatedDriver, &needs_driver);
+    caps->Get(NVSDK_NGX_Parameter_FrameGeneration_MinDriverVersionMajor, &driver_major);
+    caps->Get(NVSDK_NGX_Parameter_FrameGeneration_MinDriverVersionMinor, &driver_minor);
+    diagnose("frame generation available=%d frames=%u feature_init=0x%x needs_driver=%d "
+             "min_driver=%u.%u", available, frames, unsigned(init_result), needs_driver,
+             driver_major, driver_minor);
     NVSDK_NGX_D3D12_DestroyParameters(caps);
     return available ? std::max(frames, 1U) : 0;
 }
@@ -570,6 +600,8 @@ struct D3D12NativeDlssG::Impl {
         create.NativeBackbufferFormat = color_format;
         result = NGX_D3D12_CREATE_DLSSG(list, 1, 1, &f.handle, f.params, &create);
         if (NVSDK_NGX_FAILED(result)) {
+            diagnose("frame generation feature %ux%u creation result=0x%x", width, height,
+                     unsigned(result));
             f.handle = nullptr;
             return DXGI_ERROR_UNSUPPORTED;
         }

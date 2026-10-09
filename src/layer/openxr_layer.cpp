@@ -4515,6 +4515,18 @@ XrResult layer_create_api_layer_instance_impl(
     if (XR_FAILED(result)) {
         return result;
     }
+    // Before the renderer exists - an engine creates its OpenXR instance to
+    // choose the adapter - so before the game's DLSS initialises NGX. Either
+    // DLSS method qualifies: both already hook the game's DLSS, and the menu
+    // switches between them live.
+    try {
+        const auto desired = xrfg::embedded::snapshot().desired;
+        if (asked_d3d12 && (desired.frame_generation == 1 || desired.motion_vectors == 1) &&
+            GetEnvironmentVariableW(L"XRFG_TEST_NATIVE_DLSSG_NO_DISCOVERY", nullptr, 0) == 0) {
+            xrfg::prepare_ngx_feature_discovery(current_layer_directory().c_str());
+        }
+    } catch (...) {
+    }
 
     const bool loaded =
         load_function(next_get_instance_proc_addr, created_instance, "xrDestroyInstance", dispatch->destroy_instance) &&
