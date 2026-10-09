@@ -217,6 +217,17 @@ optimisation: on the rotation sweep's detailed scene, the down-and-up resample
 alone adds an error of 1.2 (75%) to 1.4 (67%), four times what a native pair
 otherwise shows (0.3), on every generated frame between sharp real ones.
 
+Running the pack and NGX on a compute queue, which NVIDIA can overlap with the
+game's graphics where queues of the same type time-slice, and composing on the
+synthesis queue once a fence passes, was also tried. NGX accepts a compute list
+and the output was identical, but the split never helped. Live in Galactic
+Racer on the Steam Frame, interleaved with the current path, it added 0.2 to
+0.7 ms to the median pair at every load tried. With the scene heavy enough to
+hold the game at about 90 of 120 frames a second (UEVR resolution scale 1.19),
+the game's frame rate and the number of pairs delivered were unchanged, and
+the 90th percentile rose from about 5.4 to 8.2 ms. Generation therefore stays
+on the one high-priority direct queue.
+
 sRGB swapchains are encoded by the pack shader into 10-bit
 private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
 and decoded again when the generated image is written; unchanged pixels
