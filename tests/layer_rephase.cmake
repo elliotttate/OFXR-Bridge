@@ -1,7 +1,7 @@
 # Runs the promise-shown-time call chain with XRFG_TEST_ADMISSION_WAIT_MS
 # making every pair look as if it had waited most of a display period at
 # admission, and checks from the flight log that the layer moves the
-# application's phase (presenter_transition 720): once twelve late pairs in a
+# application's phase (presenter_transition 720): once eight late pairs in a
 # row say so, with the pair hold that follows holding a presenter frame
 # longer, and then - since the waits stay where they were - again only after
 # a run twice as long.

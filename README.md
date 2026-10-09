@@ -356,10 +356,10 @@ OpenXR session, and extrapolation wins if both are set.
   wait before synthesis and, when nine in ten pairs of a window spend more
   than half a period there, holds the game one presenter frame longer once;
   live that left 1.7-6.8% of pairs there, each stretch over within a second,
-  and every full-rate round at 62 ms. Triggered instead by twelve late pairs
-  in a row, which single late pairs and short runs never reach, each slip is
-  moved after a fifth of a second: 1.3% of a race's full-rate pairs, the
-  longest run 13. While SteamVR runs at half the rate the
+  and every full-rate round at 62 ms. Triggered instead by a run of late
+  pairs - eight in a row, the length that left the fewest pairs slow over
+  three races' natural runs - each slip is moved within an eighth of a
+  second: 1.0% of a race's full-rate pairs, no run longer than 9. While SteamVR runs at half the rate the
   promise stops measuring too, where it had swung between one period and
   three. Details in [BUILDING.md](docs/BUILDING.md).
 - **The game is promised the time its frame is shown.** The display time a

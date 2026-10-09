@@ -9752,21 +9752,24 @@ void stop_continuous_presenter(
 // each real frame shown 70 ms after the game's wait instead of 62 at the same
 // 119.7 frames a second. Over a whole race, 57% of its pairs were like that.
 //
-// So when twelve pairs in a row - a fifth of a second - wait more than half
+// So when eight pairs in a row - an eighth of a second - wait more than half
 // a display period at admission, the next hold runs one presenter frame
 // longer, once. That starts the application's next frame a period later, so
 // the wait moves to after its hand-over. Single late pairs are common and
-// runs of up to a dozen end by themselves; the slips that stay ran 20 to 114
-// pairs in Galactic Racer. Judged over fixed windows of 32 instead, a slip
-// cost 32 to 64 pairs before it was moved: 1.7-6.8% of a race's pairs, from
-// 57% with no move at all. Not while the runtime runs at a multiple of the
+// runs of up to 14 ended by themselves in Galactic Racer, while the slips
+// that stay ran 20 pairs and more. A move made on a run that would have
+// ended costs a run of the same length to move back, so the length was
+// chosen on three races' runs: eight left the fewest pairs slow (12 about a
+// quarter more, 6 a little fewer for half again as many needless moves).
+// Judged over fixed windows of 32 instead, a slip cost 32 to 64 pairs: 1.7-
+// 6.8% of a race's pairs, from 57% with no move at all. Not while the runtime runs at a multiple of the
 // period, which moves both waits. The promise is left to its own
 // measurement; moving it with the phase only had the measurement move it
 // back. A move that leaves the waits where they were is not repeated until a
 // run twice as long has said so again.
 void observe_admission_wait(
     SessionState& state, std::chrono::nanoseconds waited) noexcept {
-    constexpr std::uint32_t kLateRun = 12;
+    constexpr std::uint32_t kLateRun = 8;
     constexpr std::uint32_t kLongestBackoff = 64;
     const auto period = std::chrono::nanoseconds(
         static_cast<std::int64_t>(state.presenter_display_period));

@@ -732,17 +732,22 @@ waits out a whole period before synthesis starts: the game rendered for a
 pose a period older. The game fell into that arrangement after a few seconds
 of SteamVR halving the rate and stayed in it, 57% of that race's pairs.
 
-`observe_admission_wait` watches the admission wait: when twelve pairs in a
+`observe_admission_wait` watches the admission wait: when eight pairs in a
 row wait more than half a display period there, the next pair hold runs one
 presenter frame longer, once, which moves the game's next frame a period
 later and the slack to after the hand-over. A move that leaves the waits
 where they were is retried only after a run twice as long (up to 64 times
-twelve), and nothing is counted while SteamVR runs at half the rate. At the
+eight), and nothing is counted while SteamVR runs at half the rate. At the
 true rate, isolated late pairs are common and runs of up to about a dozen end
 by themselves, while a slip that stays runs on until moved. Judged first over
 fixed windows of 32 pairs (nine in ten late), slips ran 20-59 pairs and the
-slow share was 1.2-4.3% of a race's full-rate pairs; with the run of twelve,
-1.3% with the longest run 13. Every round at the true rate measured 62 ms,
+slow share was 1.2-4.3% of a race's full-rate pairs; with a run of twelve,
+1.3% with the longest run 13; with eight, 1.0% with the longest 9. The
+length was chosen on the natural runs of a race with no moves at all (24
+slips; runs that ended by themselves up to 14 long), counting a move made on
+a run that would have ended as costing that run again to move back: over
+three races 6, 8, 10 and 12 came to about 354, 392, 456 and 503 slow pairs,
+with 13, 8, 5 and 2 needless moves. Every round at the true rate measured 62 ms,
 and no frame was lost to a move.
 Moving the promise with the phase was tried and removed: the measurement only
 moved it back. `xrfg_layer_rephase` checks the move and the back-off with
