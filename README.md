@@ -395,6 +395,22 @@ OpenXR session, and extrapolation wins if both are set.
   eyes from one image and were never affected. The flight log names each
   per-eye swapchain's eye (`presenter_transition` 750) and records every DLSS
   evaluation (`dlss_evaluation`).
+- **Tested in other Unreal Engine games.** On the Steam Frame, beside
+  Galactic Racer and Hubris:
+
+  | Game | How it runs | Placement error, fixed share / stamps | Per pair, live |
+  |---|---|---|---|
+  | Subnautica 2 | UE5, UEVR Native Stereo, ships DLSS-G | 0.0224 / 0.0406 | vectors 0.38 ms, FidelityFX 1.02, native 67% 1.36, hybrid 1.47, native 100% 1.77, NVIDIA medium 8.5 |
+  | Lies of P | UE4, UEVR Alternating/AFR | 0.0299 / 0.0450 | vectors 0.36 ms, FidelityFX 0.87, hybrid 1.31 (no native: the game ships no DLSS-G) |
+  | Kayak VR: Mirage | UE4, native OpenXR (`-hmd=OpenXRHMD -dx12`) | 0.0011 / 0.0253 | FidelityFX 1.03 ms, NVIDIA medium 5.7 (DLSS off in its menu) |
+  | RoboQuest VR | UE5, native OpenXR, no DLSS | 0.0016 / 0.0022 | FidelityFX 2.0-2.2 ms, NVIDIA medium 12 |
+
+  Run UEVR games in **Native Stereo**. Alternating/AFR gives each eye its own
+  swapchains, which takes more of SteamVR's sixteen than generation leaves
+  room for: in Subnautica 2 under AFR the second eye's rings were refused and
+  the session passed through without generating, where Native Stereo
+  generated from the start. Bootstrap Island uses OpenVR and is outside an
+  OpenXR layer's reach.
 - **The game is promised the time its frame is shown.** The display time a
   game is handed at xrWaitFrame assumed its frame would go down within a
   display period; a game rendering at half the display rate takes most of
