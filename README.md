@@ -272,10 +272,11 @@ does.
   The prediction shown after it is made for its own display time, so every
   frame on screen is that much fresher. (SteamVR's own lead from its wait to
   the display is 35.3 ms there; the rest is the game rendering.)
-- It costs 0.43 ms a pair offline at 3004x3004 per eye, and 0.71-1.11 ms live
-  in Galactic Racer before its search was cut to five candidates (below),
-  against 1.61-1.63 ms for native generation at 67% in the same rounds. From
-  FidelityFX's flow it costs 1.44 ms offline and 1.11-1.59 ms live. In Hubris, a native OpenXR Unreal Engine 4 game, it ran through
+- It costs 0.43 ms a pair offline at 3004x3004 per eye, and 0.66-0.72 ms live
+  in Galactic Racer (0.71-1.11 ms before its search was cut to five
+  candidates, below), against 1.57-1.79 ms for native generation at 67% in
+  the same rounds. From FidelityFX's flow it costs 1.44 ms offline and
+  1.11-1.76 ms live. In Hubris, a native OpenXR Unreal Engine 4 game, it ran through
   SteamVR at 0.29 ms a pair from the game's vectors and 1.12 ms from
   FidelityFX's flow, each real frame handed over before its prediction.
 - `extrapolate=2` also runs FidelityFX's flow beside the game's vectors and
@@ -451,8 +452,9 @@ speed. Each method had four interleaved rounds of ten seconds.
   simulator's 90 frames a second.
 - The two new modes, live on the same track, interleaved with native
   generation at 67% (1.61-1.82 ms): DLSS vectors + FidelityFX flow
-  1.58-1.71 ms, and extrapolation 0.71-1.11 ms from the game's vectors (before
-  its five-candidate search) and 1.11-1.59 ms from FidelityFX's flow.
+  1.58-1.71 ms, and extrapolation 0.66-0.72 ms from the game's vectors
+  (0.71-1.11 ms before its five-candidate search) and 1.11-1.76 ms from
+  FidelityFX's flow.
 
 **Latency, live.** Galactic Racer on a Steam Frame at 120 Hz, from the game's
 xrWaitFrame returning to its real frame going down, read from the flight log
