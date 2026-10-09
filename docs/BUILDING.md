@@ -167,7 +167,12 @@ evaluation's cost is fixed, so one double-width evaluation costs far less than
 one per eye; the seam keeps either eye's history from reaching the other.
 A single eye, or `XRFG_NATIVE_DLSSG_PER_EYE=1`, gives each eye its own feature
 at its submitted viewport size, and a shared feature NGX refuses falls back to
-that automatically. `XRFG_NATIVE_DLSSG_SEAM` overrides the seam width for
+that automatically. NGX refuses features wider or taller than 8192 pixels, so
+eyes too wide for both and a full seam narrow the seam to fit, down to 16
+pixels, and wider eyes (from 4089 pixels) get a feature each without a refused
+pair. The shared feature measured cheaper than one per eye at every size
+tried: by 29% (still head) and 28% (turning) at 1440x1584, 18% and 14% at
+2448x2448, 17% and 11% at 3004x3004, and 14% and 9% at 3600x3600. `XRFG_NATIVE_DLSSG_SEAM` overrides the seam width for
 experiments; without a seam the eyes visibly bleed into each other.
 
 A is rotationally mapped into B's camera plane; the same mapping removes

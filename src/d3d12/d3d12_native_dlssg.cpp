@@ -59,6 +59,11 @@ constexpr UINT kCreateRetryPairs = 120;
 // seam between them repeats each eye's edge, so neither eye's history reaches
 // the other unless its motion crosses half the seam.
 constexpr UINT kSeam = 64;
+// NGX refuses a feature wider or taller than this. Eyes too wide for both and
+// a full seam narrow the seam to fit, down to this; 8 to 128 pixels measured
+// alike. Wider still, each eye gets its own feature.
+constexpr UINT kMaxFeatureSize = 8192;
+constexpr UINT kMinSeam = 16;
 // Root constants per dispatch or draw.
 constexpr UINT kParams = 44;
 // The motion and depth rectangle a reset evaluation reads.
@@ -1080,20 +1085,27 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         }
         // Two eyes share one feature side by side, each eye's pack cell taking
         // the half of the seam beside it; otherwise each eye has its own.
-        const bool shared = p.shared_stereo && bv.size() == 2;
-        const UINT feature_count = shared ? 1 : UINT(bv.size());
         std::array<D3D12ImageRect, 2> eye_rect{};
         for (UINT i = 0; i < bv.size(); ++i) {
             eye_rect[i] = rect(bv[i], UINT(p.source.Width), p.source.Height);
         }
+        bool shared = p.shared_stereo && bv.size() == 2;
+        UINT seam = p.seam;
+        if (shared) {
+            const std::uint64_t eyes = std::uint64_t(eye_rect[0].width) + eye_rect[1].width;
+            seam = UINT(std::min<std::uint64_t>(seam, kMaxFeatureSize - std::min<std::uint64_t>(eyes, kMaxFeatureSize)));
+            shared = seam >= std::min(p.seam, kMinSeam) &&
+                     std::max(eye_rect[0].height, eye_rect[1].height) <= kMaxFeatureSize;
+        }
+        const UINT feature_count = shared ? 1 : UINT(bv.size());
         std::array<Placement, 2> place{};
         // Width and height, then the motion and depth grid's.
         std::array<std::array<UINT, 4>, 2> feature_size{};
         if (shared) {
-            const UINT w0 = eye_rect[0].width, w1 = eye_rect[1].width, half = p.seam / 2;
-            feature_size[0] = {w0 + p.seam + w1, std::max(eye_rect[0].height, eye_rect[1].height)};
+            const UINT w0 = eye_rect[0].width, w1 = eye_rect[1].width, half = seam / 2;
+            feature_size[0] = {w0 + seam + w1, std::max(eye_rect[0].height, eye_rect[1].height)};
             place[0] = {0, 0, 0, w0 + half};
-            place[1] = {0, w0 + p.seam, w0 + half, w1 + p.seam - half};
+            place[1] = {0, w0 + seam, w0 + half, w1 + seam - half};
         } else {
             for (UINT i = 0; i < bv.size(); ++i) {
                 feature_size[i] = {eye_rect[i].width, eye_rect[i].height};
