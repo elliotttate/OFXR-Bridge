@@ -644,7 +644,7 @@ ahead (1 + dt2/dt1 spans from A):
 | Variant | Error | SSIM |
 |---|---|---|
 | Showing frame 1 again | 20.62 | 0.489 |
-| 13 candidates, ordered by motion (faster nearer) | about 1.5 worse on Tatooine, where the cockpit moves with the camera | |
+| 13 candidates, ordered by motion (faster nearer), two triplets only | Tatooine a0: 36.8 (depth: 20.6), where the pod moves with the camera; Jakku seq1: 7.7 (7.3) | |
 | 13 candidates, ordered by the game's depth | 12.58 | 0.677 |
 | Plus a still-content hypothesis checked against A | 12.56 | 0.674 |
 | Search only near motion edges (second differences within 48 px) | 12.56 | 0.676 |
