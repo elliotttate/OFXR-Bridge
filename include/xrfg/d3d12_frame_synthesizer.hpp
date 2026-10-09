@@ -98,6 +98,8 @@ enum class D3D12OpticalFlowInputScale {
     full,
     three_quarter,
     half,
+    // A quarter per axis: measured for comparison, not offered.
+    quarter,
 };
 
 // The name the NVIDIA options and the tray settings already use.
@@ -133,6 +135,12 @@ struct D3D12NvidiaOpticalFlowOptions {
     // FidelityFX's flow as well and keep, per pixel, whichever prediction
     // explains the previous capture better: less error, more GPU time.
     bool extrapolate_hybrid{};
+    // With extrapolate: Meta's mesh warps instead of the per-pixel gather -
+    // Application SpaceWarp's from the game's vectors and depth,
+    // Asynchronous SpaceWarp's from FidelityFX's flow, and with
+    // extrapolate_hybrid the vectors' grid asking the flow per pixel where it
+    // does not explain the previous capture.
+    bool extrapolate_mesh{};
 };
 
 // A second synthetic produced from the same pair, for a session that hands

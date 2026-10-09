@@ -5095,7 +5095,7 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorSc
 // flow: without guides, from FidelityFX's optical flow instead. That needs a
 // hardware adapter: on WARP FidelityFX finds no flow in this scene. Its flow
 // is coarse on this small striped scene, so it is held to beating a repeat.
-void test_dlss_extrapolation(D3D12WarpFixture& fixture, bool flow = false) {
+void test_dlss_extrapolation(D3D12WarpFixture& fixture, bool flow = false, bool mesh = false) {
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     // FidelityFX takes larger jumps of this small scene for a cut.
@@ -5157,6 +5157,7 @@ void test_dlss_extrapolation(D3D12WarpFixture& fixture, bool flow = false) {
     xrfg::D3D12FrameSynthesizer synthesizer;
     xrfg::D3D12NvidiaOpticalFlowOptions options;
     options.extrapolate = true;
+    options.extrapolate_mesh = mesh;
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                 current_pointers, synthetic_pointers, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
                 xrfg::D3D12OpticalFlowBackend::fidelity_fx, options)),
@@ -5221,10 +5222,16 @@ void test_dlss_extrapolation(D3D12WarpFixture& fixture, bool flow = false) {
                 }
             }
         }
-        std::cout << (flow ? "flow " : "") << "extrapolation eye=" << eye << " mae=" << error / double(count)
+        std::cout << (flow ? "flow " : "") << (mesh ? "mesh " : "") << "extrapolation eye=" << eye
+                  << " mae=" << error / double(count)
                   << " repeat_mae=" << repeat / double(count)
                   << " uncovered_mae=" << uncovered / double(uncovered_count) << '\n';
-        require(flow ? error < repeat : error / double(count) < 2.0 && error < repeat * 0.1,
+        // The mesh moves a 16-pixel grid, so the cells across the object's
+        // sharp edges blend its motion with the background's: exact
+        // elsewhere, but not the gather's per-pixel edge.
+        require(flow ? error < repeat
+                     : mesh ? error < repeat * 0.2
+                            : error / double(count) < 2.0 && error < repeat * 0.1,
             "extrapolation did not move the scene on for eye " + std::to_string(eye));
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "extrapolation final drain failed");
@@ -6288,6 +6295,7 @@ int main() {
             test_rotation_aware_synthesis_beats_uncompensated_flow(native_fixture,
                 xrfg::D3D12OpticalFlowBackend::fidelity_fx,native_options);
             test_dlss_extrapolation(native_fixture, true);
+            test_dlss_extrapolation(native_fixture, true, true);
             native_fixture.require_no_debug_errors();
             std::cout << "Native DLSS FG stereo, real-copy, reset and missing-depth tests passed\n";
             return 0;
@@ -6318,6 +6326,7 @@ int main() {
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::overlay, true);
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::fade, true);
         test_dlss_extrapolation(fixture);
+        test_dlss_extrapolation(fixture, false, true);
         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);
         test_submission_backpressure_and_recovery(
             fixture,

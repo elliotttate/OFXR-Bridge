@@ -470,6 +470,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         bool hybrid{};
         bool extrapolate{};
         bool extrapolate_hybrid{};
+        bool extrapolate_mesh{};
     };
     std::vector<Method> methods{
         {"OFXR+DLSS vectors", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
@@ -497,15 +498,22 @@ void replay_held_out(const std::filesystem::path& directory) {
                                                 : xrfg::D3D12OpticalFlowBackend::fidelity_fx,
                      parts[2] == "full"            ? xrfg::D3D12OpticalFlowInputScale::full
                      : parts[2] == "three_quarter" ? xrfg::D3D12OpticalFlowInputScale::three_quarter
+                     : parts[2] == "quarter"       ? xrfg::D3D12OpticalFlowInputScale::quarter
                                                    : xrfg::D3D12OpticalFlowInputScale::half,
                      parts[0] == "vectors" || parts[0] == "hybrid"};
             m.hybrid = parts[0] == "hybrid";
             // extrapolate_flow extrapolates from FidelityFX's flow, without
             // guides, and extrapolate_hybrid from both.
+            // extrapolate_mesh and extrapolate_flow_mesh are Meta's mesh
+            // warps: Application SpaceWarp's from the vectors and depth,
+            // Asynchronous SpaceWarp's from the flow.
+            m.extrapolate_mesh = parts[0] == "extrapolate_mesh" || parts[0] == "extrapolate_flow_mesh" ||
+                                 parts[0] == "extrapolate_hybrid_mesh";
             m.extrapolate = parts[0] == "extrapolate" || parts[0] == "extrapolate_flow" ||
-                            parts[0] == "extrapolate_hybrid";
-            m.extrapolate_hybrid = parts[0] == "extrapolate_hybrid";
-            m.guides = m.guides || parts[0] == "extrapolate" || parts[0] == "extrapolate_hybrid";
+                            parts[0] == "extrapolate_hybrid" || m.extrapolate_mesh;
+            m.extrapolate_hybrid = parts[0] == "extrapolate_hybrid" || parts[0] == "extrapolate_hybrid_mesh";
+            m.guides = m.guides || parts[0] == "extrapolate" || parts[0] == "extrapolate_hybrid" ||
+                       parts[0] == "extrapolate_mesh" || parts[0] == "extrapolate_hybrid_mesh";
             m.preset = parts[1] == "slow"   ? xrfg::D3D12NvidiaPerformancePreset::slow
                        : parts[1] == "fast" ? xrfg::D3D12NvidiaPerformancePreset::fast
                                             : xrfg::D3D12NvidiaPerformancePreset::medium;
@@ -542,6 +550,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         options.hybrid = m.hybrid;
         options.extrapolate = m.extrapolate;
         options.extrapolate_hybrid = m.extrapolate_hybrid;
+        options.extrapolate_mesh = m.extrapolate_mesh;
         require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                     current_pointers, synthetic_pointers, f0.view_format,
                     D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options, true)), "replay synthesizer");

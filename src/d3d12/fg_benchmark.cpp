@@ -519,7 +519,14 @@ struct Context {
         : D3D12OpticalFlowInputScale::half;
     options.bidirectional = spec.bidirectional;
     options.hybrid = spec.kind == CaseKind::hybrid;
+    // As the layer runs the hybrid: its flow, which only patches what the
+    // vectors miss, a step below the configured half.
+    if (options.hybrid && options.input_scale == D3D12OpticalFlowInputScale::half) {
+        options.input_scale = D3D12OpticalFlowInputScale::quarter;
+    }
     options.extrapolate = benchmark::extrapolates(spec.kind);
+    // As the layer runs extrapolate=1: Meta's mesh warps.
+    options.extrapolate_mesh = options.extrapolate;
     if (spec.kind == CaseKind::native) {
         options.frame_generation = D3D12FrameGeneration::native_dlss;
         options.native_scale = static_cast<std::uint32_t>(spec.native_scale);

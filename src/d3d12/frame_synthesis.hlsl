@@ -348,6 +348,15 @@ void PackFlowInput(uint3 thread_id : SV_DispatchThreadID) {
         if (source_coordinate.y < float(Height)) {
             current_color =
                 bilinear_current_source(source_coordinate, slice);
+            // One bilinear tap filters 2x2 pixels; at a quarter, four of
+            // them cover the 4x4 the packed pixel stands for.
+            if (input_scale.x < 0.3) {
+                current_color = 0.25 * (
+                    bilinear_current_source(source_coordinate + float2(-1.0, -1.0), slice) +
+                    bilinear_current_source(source_coordinate + float2(1.0, -1.0), slice) +
+                    bilinear_current_source(source_coordinate + float2(-1.0, 1.0), slice) +
+                    bilinear_current_source(source_coordinate + float2(1.0, 1.0), slice));
+            }
         }
     } else if (thread_id.x < Width && local_y < Height) {
         current_color = CurrentFrame.Load(
@@ -1233,6 +1242,116 @@ float4 SynthesizeExtrapolatedHybridPS(FullscreenVertex input) : SV_Target {
     extrapolate_flow = true;
     float4 flow = extrapolate(input);
     return lerp(flow, vectors, saturate(1.0 + (last_extrapolation_error - vectors_error) * 8.0));
+}
+
+// Meta's warps: extrapolate=1's method since they measured better than the
+// gather above on recorded frames (from the vectors 12.00 error, SSIM 0.683
+// and 0.17 ms a pair against 12.63, 0.684 and 0.76 ms; from the flow 11.90,
+// 0.673 and 0.47 ms against 12.41, 0.660 and 1.21 ms). Both draw a grid
+// over the view, a vertex every kMeshCell pixels of the real frame B, each
+// moved on along its motion to where it will be when the prediction is
+// shown, and rasterise it over a plain copy of B (which shows only where the
+// moved grid pulls away from the view's edge). 16 pixels measured best:
+// 8 and 32 erred more, and finer cells were sharper but less accurate.
+// - Application SpaceWarp, as the Meta XR Simulator draws it: the game's
+//   vectors and depth. Each vertex takes the motion and depth of the nearest
+//   of four taps half a cell around it, so a moving surface's edge moves
+//   with it; the depth test keeps the nearest surface where the grid folds,
+//   and triangles stretch over what a moving surface uncovers.
+// - Asynchronous SpaceWarp, as Meta's PC runtime does it: optical flow and
+//   no depth; where the grid folds the smallest displacement wins.
+static const float kMeshCell = 16.0;
+
+struct MeshVertex {
+    float4 position : SV_Position;
+    float2 source : TEXCOORD0;
+};
+
+// Two triangles a cell: (0,0) (1,0) (0,1), then (1,0) (1,1) (0,1).
+uint2 mesh_corner(uint corner) {
+    return corner == 0 ? uint2(0, 0) : corner == 1 ? uint2(1, 0) : corner == 2 ? uint2(0, 1)
+         : corner == 3 ? uint2(1, 0) : corner == 4 ? uint2(1, 1) : uint2(0, 1);
+}
+
+MeshVertex extrapolate_mesh_vertex(uint vertex_id) {
+    float4 rect = PreviousMappings[ViewIndex].TargetRect;
+    uint columns = (uint)ceil(rect.z / kMeshCell);
+    uint cell = vertex_id / 6;
+    uint2 grid = uint2(cell % columns, cell / columns) + mesh_corner(vertex_id % 6);
+    float2 last = rect.xy + max(rect.zw - 1.0, float2(0.0, 0.0));
+    float2 q = min(rect.xy + float2(grid) * kMeshCell, last);
+    float s = 2.0 * synthesis_fraction();
+    bool depth = !extrapolate_flow && extrapolation_depth();
+    float2 tap = q;
+    float tap_depth = depth ? game_depth(q) : 0.0;
+    if (depth) {
+        [unroll] for (uint k = 0; k < 4; ++k) {
+            float2 t = clamp(q + float2((k & 1) != 0 ? 0.5 : -0.5, (k & 2) != 0 ? 0.5 : -0.5) * kMeshCell,
+                             rect.xy, last);
+            float t_depth = game_depth(t);
+            if (nearer(t_depth, tap_depth)) {
+                tap = t;
+                tap_depth = t_depth;
+            }
+        }
+    }
+    float2 d = extrapolation_displacement(tap);
+    float2 p = q - s * d;
+    // Nearer is smaller for the depth test.
+    float z = depth ? ((SynthesisFlags & 4u) != 0 ? 1.0 - tap_depth : tap_depth)
+                    : length(d) / 1024.0;
+    MeshVertex output;
+    float2 ndc = (p + 0.5 - rect.xy) / max(rect.zw, float2(1.0, 1.0)) * 2.0 - 1.0;
+    output.position = float4(ndc.x, -ndc.y, clamp(z, 0.0, 0.999), 1.0);
+    output.source = q;
+    return output;
+}
+
+MeshVertex ExtrapolateMeshVS(uint vertex_id : SV_VertexID) {
+    hybrid_layout = true;
+    return extrapolate_mesh_vertex(vertex_id);
+}
+
+MeshVertex ExtrapolateFlowMeshVS(uint vertex_id : SV_VertexID) {
+    extrapolate_flow = true;
+    return extrapolate_mesh_vertex(vertex_id);
+}
+
+float4 ExtrapolateMeshPS(MeshVertex input) : SV_Target {
+    return saturate(sample_current_target(input.source, Slice, ViewIndex).color);
+}
+
+// extrapolate=2 on the mesh: the grid from the game's vectors in the combined
+// mode's constants layout, and per pixel, where the vectors' point does not
+// explain A, FidelityFX's flow asked as the combined gather asks it.
+MeshVertex ExtrapolateMeshBothVS(uint vertex_id : SV_VertexID) {
+    hybrid_layout = true;
+    extrapolate_both = true;
+    return extrapolate_mesh_vertex(vertex_id);
+}
+
+float4 ExtrapolateMeshHybridPS(MeshVertex input) : SV_Target {
+    hybrid_layout = true;
+    extrapolate_both = true;
+    float2 q = input.source;
+    float4 vectors = saturate(sample_current_target(q, Slice, ViewIndex).color);
+    float2 came_from = q + extrapolation_displacement(q);
+    float4 b_low = 0.0, a_low = 0.0;
+    [unroll] for (uint k = 0; k < 4; ++k) {
+        float2 o = float2((k & 1) != 0 ? 0.5 : -0.5, (k & 2) != 0 ? 0.5 : -0.5);
+        b_low += sample_current_target(q + o, Slice, ViewIndex).color;
+        a_low += sample_previous_target(came_from + o, Slice, ViewIndex).color;
+    }
+    float vectors_error = rgb_error(b_low, a_low) * 0.25;
+    [branch] if (vectors_error < 0.02) return vectors;
+    extrapolate_flow = true;
+    float2 pixel = float2(uint2(input.position.xy));
+    float4 flow = extrapolate_pixel(pixel, sample_current_target(pixel, Slice, ViewIndex));
+    return lerp(flow, vectors, saturate(1.0 + (last_extrapolation_error - vectors_error) * 8.0));
+}
+
+float4 ExtrapolateMeshFillPS(FullscreenVertex input) : SV_Target {
+    return saturate(sample_current_target(float2(uint2(input.position.xy)), Slice, ViewIndex).color);
 }
 
 // The game's vectors and FidelityFX's optical flow both: per pixel, whichever

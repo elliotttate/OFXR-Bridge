@@ -234,10 +234,12 @@ every method where the scene moved, with the best SSIM:
 | A blend of the two frames | 12.99 | 0.607 |
 
 OFXR's methods generate at the instant the frame times say; native generation
-is fixed at a half, which costs it where frames come unevenly. It costs about
-as much as native generation at 67%: 1.6 ms a stereo pair offline at 3004x3004
-per eye, and 1.58-1.71 ms live in Galactic Racer on a Steam Frame, against
-1.64-1.73 ms for native at 67%. It takes the FidelityFX backend. With exact
+is fixed at a half, which costs it where frames come unevenly. Its flow, which
+only patches what the vectors miss, runs at a quarter per axis: on the
+recorded frames that erred 7.19 against 7.18 at half, for 11% less time. It
+costs 1.03 ms a stereo pair offline at 3004x3004 per eye (1.58-1.71 ms live
+in Galactic Racer on a Steam Frame with the half-resolution flow), against
+1.81 ms for native generation at 67%. It takes the FidelityFX backend. With exact
 synthetic vectors it errs more than the vectors alone at occlusions, where
 their two samples must disagree and the flow can look the better explanation.
 
@@ -251,19 +253,23 @@ follows the game's DLSS vectors and depth where the game has them, and
 FidelityFX's optical flow where it does not, as Meta's Asynchronous SpaceWarp
 does.
 
-- Each pixel of the prediction is the point of the real frame whose motion -
-  the game's vectors less the head's turn, which the runtime's own
-  reprojection supplies - carries it there by the time it is shown. Near a
-  motion edge, candidate motions from the neighbourhood are solved as well,
-  and the nearest surface by the game's depth wins; where none reaches the
-  pixel, background the moving content uncovers, the background beside it is
-  stretched over it, as Meta's mesh warp stretches.
+- It draws Meta's warps. A grid over each view, a vertex every 16 pixels of
+  the real frame, is moved on along the game's vectors (less the head's turn,
+  which the runtime's own reprojection supplies) and depth-tested, as the
+  Meta XR Simulator draws Application SpaceWarp: each vertex takes the motion
+  and depth of the nearest of four taps around it, so a moving surface's edge
+  moves with it, the nearest surface wins where the grid folds, and the grid
+  stretches over what moving content uncovers. Without the game's vectors,
+  FidelityFX's optical flow drives the same grid as Meta's Asynchronous
+  SpaceWarp does, the smallest motion winning where it folds.
 - Predicting a whole frame ahead from recorded frames, a harder test than the
-  half frame a headset needs, it erred 12.6 where the scene moved, against
-  20.6 for showing the last frame again, with SSIM 0.684 against 0.489. From
-  FidelityFX's flow instead it erred 12.4, with SSIM 0.660: the flow follows
-  a shadow the vectors move with the ground, but leaves more structure out of
-  place.
+  half frame a headset needs, it erred 12.0 where the scene moved, against
+  20.6 for showing the last frame again, with SSIM 0.683 against 0.489. From
+  FidelityFX's flow it erred 11.9, with SSIM 0.673: the flow follows a shadow
+  the vectors move with the ground, but leaves more structure out of place.
+  OFXR's own per-pixel gather, which it replaced, erred 12.6 and 12.4 (see
+  [Other changes](#other-changes-in-this-fork)); `[ofxr] extrapolate_mesh=0`
+  brings it back.
 - **Measured, it shows each frame a display period sooner.** Live in Galactic
   Racer on a Steam Frame at 120 Hz, a real frame went down 45.5-47.0 ms after
   the game's xrWaitFrame returned when extrapolating, against 54.1-55.3 ms
@@ -272,20 +278,19 @@ does.
   The prediction shown after it is made for its own display time, so every
   frame on screen is that much fresher. (SteamVR's own lead from its wait to
   the display is 35.3 ms there; the rest is the game rendering.)
-- It costs 0.43 ms a pair offline at 3004x3004 per eye, and 0.66-0.72 ms live
-  in Galactic Racer (0.71-1.11 ms before its search was cut to five
-  candidates, below), against 1.57-1.79 ms for native generation at 67% in
-  the same rounds. From FidelityFX's flow it costs 1.44 ms offline and
-  1.11-1.76 ms live. In Hubris, a native OpenXR Unreal Engine 4 game, it ran through
-  SteamVR at 0.29 ms a pair from the game's vectors and 1.12 ms from
-  FidelityFX's flow, each real frame handed over before its prediction.
-- `extrapolate=2` also runs FidelityFX's flow beside the game's vectors and
-  keeps, per pixel, whichever prediction explains the frame before better.
-  It erred least of all (11.88, SSIM 0.688). Timed warm, it costs 1.49 ms a
-  pair on the recorded frames, against 0.76 ms from the vectors and 1.22 ms
-  from the flow (1.27-1.91 ms live in Galactic Racer at 2316x2316 per eye with
-  the earlier nine-candidate search), so it is an INI option rather than a
-  tray one.
+- It costs 0.16 ms a pair offline at 3004x3004 per eye and 0.17 ms live in
+  Galactic Racer, cheaper than any interpolating method; native generation at
+  67% took 1.59-1.63 ms in the same rounds. From FidelityFX's flow it costs
+  0.48 ms offline and 0.78 ms live. In Hubris, a native OpenXR Unreal Engine 4
+  game, the earlier gather ran through SteamVR at 0.29 ms a pair from the
+  game's vectors and 1.12 ms from FidelityFX's flow, each real frame handed
+  over before its prediction.
+- `extrapolate=2` also runs FidelityFX's flow, at a quarter per axis: the
+  vectors' grid is drawn as above, and wherever a pixel's point does not
+  explain the frame before, the flow's prediction is asked for that pixel and
+  the better kept. It erred least of all (11.56, SSIM 0.682) for 0.86 ms a
+  pair on the recorded frames, against 0.17 ms from the vectors alone, so it
+  is an INI option rather than a tray one.
 - Content its vectors do not describe, such as a shadow on ground rushing
   past, moves with the vectors; there is no second frame to correct it.
   The deeper pipeline is turned off, since its held period would add the
@@ -303,6 +308,31 @@ hybrid needs the game's DLSS vectors. Both are read when the game starts its
 OpenXR session, and extrapolation wins if both are set.
 
 ## Other changes in this fork
+
+- **Extrapolation draws Meta's mesh warps.** A grid moved along the game's
+  vectors and depth (Application SpaceWarp) or along optical flow
+  (Asynchronous SpaceWarp) replaced OFXR's per-pixel gather, on the 42
+  recorded triplets predicting a whole frame ahead:
+
+  | Extrapolation | Error | SSIM | Gradient error | GPU a pair, recorded frames |
+  |---|---|---|---|---|
+  | Gather, DLSS vectors and depth | 12.63 | 0.684 | 11.17 | 0.76 ms |
+  | **Mesh, DLSS vectors and depth** | **12.00** | **0.683** | **10.89** | **0.17 ms** |
+  | Gather, FidelityFX flow | 12.41 | 0.660 | 12.16 | 1.22 ms |
+  | **Mesh, FidelityFX flow** | **11.90** | **0.673** | **11.49** | **0.47 ms** |
+  | Gather, both (`extrapolate=2`) | 11.88 | 0.688 | 10.98 | 1.49 ms |
+  | **Mesh, both, quarter-resolution flow** | **11.56** | **0.682** | **11.03** | **0.86 ms** |
+
+  The mesh is a little softer (sharpness 0.85 against 0.90) where triangles
+  stretch; the gather run over the mesh at motion edges, to sharpen them,
+  erred more (12.40), so the mesh's own depth-tested edges are kept. Its
+  cells were measured at 4, 8, 16, 24 and 32 pixels; 16 was the best.
+- **The hybrid's flow runs at a quarter resolution.** Where the flow only
+  patches what the game's vectors miss - the hybrid, and the combined
+  extrapolation - a quarter per axis measured the same as half (7.19 against
+  7.18; 11.56 against 11.53) for 11-16% less time. Alone the flow keeps its
+  half: FidelityFX interpolation lost 0.27 at a quarter and its extrapolation
+  0.71.
 
 - **The game is promised the time its frame is shown.** The display time a
   game is handed at xrWaitFrame assumed its frame would go down within a
@@ -478,14 +508,28 @@ the reference timed before and after agreed within 0.2% (drift 1.002).
 
 | Mode | Per pair | Mode | Per pair |
 |---|---|---|---|
-| OFXR + DLSS vectors | 0.50 ms | Extrapolation, DLSS vectors | 0.43 ms |
-| FidelityFX 50 / 75 / 100% | 0.59 / 0.88 / 1.31 ms | Extrapolation, FidelityFX 50 / 75 / 100% | 1.44 / 1.88 / 2.24 ms |
-| FidelityFX 3X | 0.81 ms | Hybrid 50 / 75 / 100% | 1.20 / 1.49 / 1.92 ms |
+| OFXR + DLSS vectors | 0.50 ms | Extrapolation, DLSS vectors | 0.16 ms |
+| FidelityFX 50 / 75 / 100% | 0.58 / 0.88 / 1.31 ms | Extrapolation, FidelityFX 50 / 75 / 100% | 0.48 / 0.77 / 1.20 ms |
+| FidelityFX 3X | 0.81 ms | Hybrid 50 (quarter flow) / 75 / 100% | 1.03 / 1.49 / 1.92 ms |
 | Native 100 / 67 / 50% | 2.58 / 1.81 / 1.47 ms | Native 3X 100 / 67 / 50% | 3.78 / 2.88 / 2.44 ms |
 | NVIDIA fast / medium / slow 50% | 2.47 / 2.89 / 4.41 ms | NVIDIA medium 50%, both ways | 4.49 ms |
 | Guide snapshot (game side) | 0.03 ms | | |
 
-The extrapolation rows were timed again after its tuning (drift 1.004).
+The extrapolation and hybrid rows were timed again on the mesh and the
+quarter-resolution flow (drift 1.000).
+
+**"Prefer FPS over latency", live.** The tray's option (the deeper pipeline,
+on by default) holds each synthetic a display period so synthesis has time
+to finish. Galactic Racer at 3004x3004 per eye on a Steam Frame, where the
+game only just reaches half the display rate, in two sessions each way. At
+that load SteamVR halved the rate in most rounds either way; across the
+rounds it held 120 Hz, the option on showed 110.6 frames a second against
+103.3 off (3 rounds against 11), and each real frame went down 35-43 ms
+after the game's wait against 17-27 ms (beyond SteamVR's own lead). It
+trades about 7% more frames shown for 17-24 ms of latency where the game is
+at its limit, and only latency where it is not; it stays on by default, as
+upstream ships it. Extrapolation turns it off and shows each frame sooner
+still.
 
 **Live, Hubris.** Hubris is a native Unreal Engine 4 VR game with DLSS 310.2.1
 and no DLSS Frame Generation of its own. It ran through SteamVR at 2568x2568
@@ -669,7 +713,7 @@ error. The absolute error alone favours a blur.
 | Variable | Effect |
 |---|---|
 | `XRFG_TEST_REPLAY_FIRST` | The first frame of the three. |
-| `XRFG_TEST_REPLAY_FLOWS` | OFXR configurations to run instead, `backend/preset/scale[/bi]` separated by commas: `vectors`, `hybrid`, `extrapolate` (the game's vectors and depth), `extrapolate_flow`, `extrapolate_hybrid` (both), `ffx` or `nvidia`; `slow`, `medium` or `fast`; `full`, `three_quarter` or `half`. |
+| `XRFG_TEST_REPLAY_FLOWS` | OFXR configurations to run instead, `backend/preset/scale[/bi]` separated by commas: `vectors`, `hybrid`, `extrapolate` (the game's vectors and depth), `extrapolate_flow`, `extrapolate_hybrid` (both), each through the gather, or `extrapolate_mesh`, `extrapolate_flow_mesh`, `extrapolate_hybrid_mesh` through Meta's mesh warps; `ffx` or `nvidia`; `slow`, `medium` or `fast`; `full`, `three_quarter`, `half` or `quarter`. |
 | `XRFG_TEST_REPLAY_TIMING_PAIRS=n` | After scoring, runs each method's prime and pair n times more and prints their median GPU time (`warm_gpu_us`): the cost on real content. The one pair it scores is cold. |
 | `XRFG_TEST_REPLAY_NATIVE_SCALES` | Native resolutions to run, for example `100,67`. `XRFG_TEST_REPLAY_NATIVE_ONLY=1` skips OFXR. |
 | `XRFG_TEST_REPLAY_EXTRAPOLATE=1` | Predict frame 2 from frames 0 and 1 instead. |

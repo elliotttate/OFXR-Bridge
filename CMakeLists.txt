@@ -135,6 +135,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_EXTRAPOLATE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_pixel_shader.hpp")
     set(XRFG_EXTRAPOLATE_FLOW_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_flow_pixel_shader.hpp")
     set(XRFG_EXTRAPOLATE_HYBRID_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_hybrid_pixel_shader.hpp")
+    set(XRFG_EXTRAPOLATE_MESH_VERTEX_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_mesh_vertex_shader.hpp")
+    set(XRFG_EXTRAPOLATE_FLOW_MESH_VERTEX_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_flow_mesh_vertex_shader.hpp")
+    set(XRFG_EXTRAPOLATE_MESH_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_mesh_pixel_shader.hpp")
+    set(XRFG_EXTRAPOLATE_MESH_FILL_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_mesh_fill_pixel_shader.hpp")
+    set(XRFG_EXTRAPOLATE_MESH_BOTH_VERTEX_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_mesh_both_vertex_shader.hpp")
+    set(XRFG_EXTRAPOLATE_MESH_HYBRID_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_mesh_hybrid_pixel_shader.hpp")
     set(XRFG_NVIDIA_PACK_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_pack_flow_input_shader.hpp")
     set(XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_pack_luma_input_shader.hpp")
     set(XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_synthesize_midpoint_pixel_shader.hpp")
@@ -151,6 +157,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_EXTRAPOLATE_PIXEL_HEADER}"
             "${XRFG_EXTRAPOLATE_FLOW_PIXEL_HEADER}"
             "${XRFG_EXTRAPOLATE_HYBRID_PIXEL_HEADER}"
+            "${XRFG_EXTRAPOLATE_MESH_VERTEX_HEADER}"
+            "${XRFG_EXTRAPOLATE_FLOW_MESH_VERTEX_HEADER}"
+            "${XRFG_EXTRAPOLATE_MESH_PIXEL_HEADER}"
+            "${XRFG_EXTRAPOLATE_MESH_FILL_PIXEL_HEADER}"
+            "${XRFG_EXTRAPOLATE_MESH_BOTH_VERTEX_HEADER}"
+            "${XRFG_EXTRAPOLATE_MESH_HYBRID_PIXEL_HEADER}"
             "${XRFG_NVIDIA_PACK_INPUT_HEADER}"
             "${XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER}"
             "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
@@ -189,6 +201,30 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeExtrapolatedHybridPS
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_EXTRAPOLATE_HYBRID_PIXEL_HEADER}" /Vn g_xrfg_extrapolate_hybrid_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E ExtrapolateMeshVS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EXTRAPOLATE_MESH_VERTEX_HEADER}" /Vn g_xrfg_extrapolate_mesh_vertex_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E ExtrapolateFlowMeshVS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EXTRAPOLATE_FLOW_MESH_VERTEX_HEADER}" /Vn g_xrfg_extrapolate_flow_mesh_vertex_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E ExtrapolateMeshPS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EXTRAPOLATE_MESH_PIXEL_HEADER}" /Vn g_xrfg_extrapolate_mesh_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E ExtrapolateMeshFillPS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EXTRAPOLATE_MESH_FILL_PIXEL_HEADER}" /Vn g_xrfg_extrapolate_mesh_fill_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T vs_5_1 /E ExtrapolateMeshBothVS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EXTRAPOLATE_MESH_BOTH_VERTEX_HEADER}" /Vn g_xrfg_extrapolate_mesh_both_vertex_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E ExtrapolateMeshHybridPS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EXTRAPOLATE_MESH_HYBRID_PIXEL_HEADER}" /Vn g_xrfg_extrapolate_mesh_hybrid_pixel_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackNvidiaFlowInput
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -234,6 +270,12 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_EXTRAPOLATE_PIXEL_HEADER}"
         "${XRFG_EXTRAPOLATE_FLOW_PIXEL_HEADER}"
         "${XRFG_EXTRAPOLATE_HYBRID_PIXEL_HEADER}"
+        "${XRFG_EXTRAPOLATE_MESH_VERTEX_HEADER}"
+        "${XRFG_EXTRAPOLATE_FLOW_MESH_VERTEX_HEADER}"
+        "${XRFG_EXTRAPOLATE_MESH_PIXEL_HEADER}"
+        "${XRFG_EXTRAPOLATE_MESH_FILL_PIXEL_HEADER}"
+        "${XRFG_EXTRAPOLATE_MESH_BOTH_VERTEX_HEADER}"
+        "${XRFG_EXTRAPOLATE_MESH_HYBRID_PIXEL_HEADER}"
         "${XRFG_FULLSCREEN_VERTEX_HEADER}"
         "${XRFG_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_PACK_INPUT_HEADER}"

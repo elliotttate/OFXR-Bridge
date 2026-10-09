@@ -306,6 +306,8 @@ template <typename Handle>
         scale_code = 0x10000U;
     } else if (options.input_scale == xrfg::D3D12NvidiaInputScale::half) {
         scale_code = 0x20000U;
+    } else if (options.input_scale == xrfg::D3D12NvidiaInputScale::quarter) {
+        scale_code = 0x30000U;
     }
     return code | (options.bidirectional ? 0x100U : 0U) | scale_code;
 }
@@ -997,6 +999,8 @@ struct SessionState {
     // each predicted from it, instead of interpolating before it. 2 also runs
     // FidelityFX's flow beside the game's vectors.
     int extrapolate{};
+    // Extrapolation with Meta's mesh warps rather than the gather.
+    bool extrapolate_mesh{true};
     // One private swapchain per output with staging textures, where the
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
@@ -4891,7 +4895,18 @@ void synthesis_modes(const SessionState& state, bool dlss_motion_vectors,
     const bool ofxr = options.frame_generation == xrfg::D3D12FrameGeneration::ofxr;
     options.extrapolate = state.extrapolate != 0 && ofxr;
     options.extrapolate_hybrid = state.extrapolate == 2 && ofxr;
+    options.extrapolate_mesh = state.extrapolate != 0 && state.extrapolate_mesh && ofxr;
     options.hybrid = state.dlss_flow_hybrid && ofxr && dlss_motion_vectors && !options.extrapolate;
+    // Where the flow only patches what the game's vectors miss, it runs at a
+    // quarter per axis rather than half: on the recorded frames the hybrid
+    // erred 7.19 against 7.18 (SSIM 0.815 both) for 11% less time, and the
+    // combined extrapolation 11.56 against 11.53 for 16% less. Alone the flow
+    // needs its half: FidelityFX interpolation lost 0.27 at a quarter and its
+    // extrapolation 0.71.
+    if ((options.hybrid || (options.extrapolate_hybrid && dlss_motion_vectors)) &&
+        options.input_scale == xrfg::D3D12OpticalFlowInputScale::half) {
+        options.input_scale = xrfg::D3D12OpticalFlowInputScale::quarter;
+    }
     if (options.hybrid || options.extrapolate) {
         backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     }
@@ -4933,6 +4948,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_promise_shown_time(current_layer_directory());
     state->extrapolate =
         xrfg::implicit_layer::read_extrapolate(current_layer_directory());
+    state->extrapolate_mesh =
+        xrfg::implicit_layer::read_extrapolate_mesh(current_layer_directory());
     if (state->extrapolate != 0) {
         // Extrapolation is there for latency, and its synthetics already
         // trail the real frame by a period: the deeper pipeline's held

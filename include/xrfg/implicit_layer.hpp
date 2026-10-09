@@ -122,6 +122,15 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_dlss_flow_hybrid(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] extrapolate_mesh`: extrapolate with Meta's mesh warps
+// (Application SpaceWarp's from the game's vectors and depth, Asynchronous
+// SpaceWarp's from optical flow; with extrapolate=2 the vectors' grid asks
+// the flow where it does not explain the frame before) rather than OFXR's
+// per-pixel gather. On unless set to 0, or with XRFG_TEST_EXTRAPOLATE_MESH=0. Read at
+// xrCreateSession.
+[[nodiscard]] bool read_extrapolate_mesh(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] promise_shown_time`: the display time the game is given for each
 // frame follows, in whole display periods, when its real frames have actually
 // been going down, so it renders for the head pose it is shown at. On unless

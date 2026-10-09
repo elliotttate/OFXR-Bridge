@@ -16,6 +16,12 @@
 #include "extrapolate_pixel_shader.hpp"
 #include "extrapolate_flow_pixel_shader.hpp"
 #include "extrapolate_hybrid_pixel_shader.hpp"
+#include "extrapolate_mesh_vertex_shader.hpp"
+#include "extrapolate_flow_mesh_vertex_shader.hpp"
+#include "extrapolate_mesh_pixel_shader.hpp"
+#include "extrapolate_mesh_fill_pixel_shader.hpp"
+#include "extrapolate_mesh_both_vertex_shader.hpp"
+#include "extrapolate_mesh_hybrid_pixel_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -67,6 +73,8 @@ struct NvidiaInputScaleRatio {
         return {3U, 4U};
     case D3D12NvidiaInputScale::half:
         return {1U, 2U};
+    case D3D12NvidiaInputScale::quarter:
+        return {1U, 4U};
     case D3D12NvidiaInputScale::full:
     default:
         return {1U, 1U};
@@ -799,6 +807,15 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> extrapolate_graphics_pipeline;
     ComPtr<ID3D12PipelineState> extrapolate_flow_graphics_pipeline;
     ComPtr<ID3D12PipelineState> extrapolate_hybrid_graphics_pipeline;
+    // The mesh warps (nvidia_options.extrapolate_mesh): the plain copy under
+    // the grid, the grid from the game's vectors and depth and from the
+    // flow, and the depth target the grid is tested against.
+    ComPtr<ID3D12PipelineState> extrapolate_mesh_fill_pipeline;
+    ComPtr<ID3D12PipelineState> extrapolate_mesh_pipeline;
+    ComPtr<ID3D12PipelineState> extrapolate_flow_mesh_pipeline;
+    ComPtr<ID3D12PipelineState> extrapolate_hybrid_mesh_pipeline;
+    ComPtr<ID3D12Resource> mesh_depth;
+    ComPtr<ID3D12DescriptorHeap> mesh_dsv_heap;
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
@@ -1180,6 +1197,64 @@ struct D3D12FrameSynthesizer::Impl {
             IID_PPV_ARGS(extrapolate_hybrid_graphics_pipeline.GetAddressOf()));
         if (FAILED(result)) {
             return result;
+        }
+
+        // Always created: extrapolate_mesh can change with a live control
+        // change, and the pipelines cost nothing until drawn.
+        {
+            graphics_description.PS = {
+                g_xrfg_extrapolate_mesh_fill_pixel_shader,
+                sizeof(g_xrfg_extrapolate_mesh_fill_pixel_shader),
+            };
+            result = device->CreateGraphicsPipelineState(
+                &graphics_description,
+                IID_PPV_ARGS(extrapolate_mesh_fill_pipeline.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            D3D12_GRAPHICS_PIPELINE_STATE_DESC mesh_description = graphics_description;
+            mesh_description.VS = {
+                g_xrfg_extrapolate_mesh_vertex_shader,
+                sizeof(g_xrfg_extrapolate_mesh_vertex_shader),
+            };
+            mesh_description.PS = {
+                g_xrfg_extrapolate_mesh_pixel_shader,
+                sizeof(g_xrfg_extrapolate_mesh_pixel_shader),
+            };
+            mesh_description.DepthStencilState.DepthEnable = TRUE;
+            mesh_description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+            mesh_description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            mesh_description.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+            result = device->CreateGraphicsPipelineState(
+                &mesh_description,
+                IID_PPV_ARGS(extrapolate_mesh_pipeline.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            mesh_description.VS = {
+                g_xrfg_extrapolate_flow_mesh_vertex_shader,
+                sizeof(g_xrfg_extrapolate_flow_mesh_vertex_shader),
+            };
+            result = device->CreateGraphicsPipelineState(
+                &mesh_description,
+                IID_PPV_ARGS(extrapolate_flow_mesh_pipeline.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
+            mesh_description.VS = {
+                g_xrfg_extrapolate_mesh_both_vertex_shader,
+                sizeof(g_xrfg_extrapolate_mesh_both_vertex_shader),
+            };
+            mesh_description.PS = {
+                g_xrfg_extrapolate_mesh_hybrid_pixel_shader,
+                sizeof(g_xrfg_extrapolate_mesh_hybrid_pixel_shader),
+            };
+            result = device->CreateGraphicsPipelineState(
+                &mesh_description,
+                IID_PPV_ARGS(extrapolate_hybrid_mesh_pipeline.GetAddressOf()));
+            if (FAILED(result)) {
+                return result;
+            }
         }
 
         graphics_description.PS = {
@@ -3018,7 +3093,15 @@ struct D3D12FrameSynthesizer::Impl {
                 slot.command_list->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
                 set_viewport_and_scissor(slot.command_list.Get(), target_views[view_index].image_rect,
                     static_cast<UINT>(image_description.Width), image_description.Height);
-                slot.command_list->DrawInstanced(3, 1, 0, 0);
+                if (nvidia_options.extrapolate && nvidia_options.extrapolate_mesh) {
+                    const HRESULT drawn = draw_extrapolation_mesh(slot.command_list.Get(), rtv,
+                        target_views[view_index].image_rect, static_cast<UINT>(image_description.Width),
+                        image_description.Height, extrapolate_mesh_pipeline.Get(),
+                        extrapolate_graphics_pipeline.Get());
+                    if (FAILED(drawn)) return drawn;
+                } else {
+                    slot.command_list->DrawInstanced(3, 1, 0, 0);
+                }
                 clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
                     static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
             }
@@ -3059,6 +3142,66 @@ struct D3D12FrameSynthesizer::Impl {
                 release_state)};
         slot.command_list->ResourceBarrier(static_cast<UINT>(finish.size()), finish.data());
         dred_marker(slot.command_list.Get(), "OFXR DLSS-vector complete");
+        return S_OK;
+    }
+
+    // The mesh warps' draw, in place of the full-screen triangle: a plain
+    // copy of the real frame, then the grid over it against a cleared depth
+    // target, then the gather's pipeline back for the next view.
+    [[nodiscard]] HRESULT draw_extrapolation_mesh(
+        ID3D12GraphicsCommandList* commands,
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+        const D3D12ImageRect& image_rect,
+        UINT width,
+        UINT height,
+        ID3D12PipelineState* mesh_pipeline,
+        ID3D12PipelineState* restore_pipeline) noexcept {
+        if (!mesh_depth || mesh_depth->GetDesc().Width != width ||
+            mesh_depth->GetDesc().Height != height) {
+            mesh_depth.Reset();
+            if (!mesh_dsv_heap) {
+                D3D12_DESCRIPTOR_HEAP_DESC heap{};
+                heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+                heap.NumDescriptors = 1;
+                const HRESULT heap_result = device->CreateDescriptorHeap(
+                    &heap, IID_PPV_ARGS(mesh_dsv_heap.GetAddressOf()));
+                if (FAILED(heap_result)) return heap_result;
+            }
+            D3D12_HEAP_PROPERTIES properties{};
+            properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+            D3D12_RESOURCE_DESC description{};
+            description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            description.Width = width;
+            description.Height = height;
+            description.DepthOrArraySize = 1;
+            description.MipLevels = 1;
+            description.Format = DXGI_FORMAT_D32_FLOAT;
+            description.SampleDesc.Count = 1;
+            description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+            D3D12_CLEAR_VALUE clear{};
+            clear.Format = DXGI_FORMAT_D32_FLOAT;
+            clear.DepthStencil.Depth = 1.0F;
+            const HRESULT created = device->CreateCommittedResource(
+                &properties, D3D12_HEAP_FLAG_NONE, &description,
+                D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear,
+                IID_PPV_ARGS(mesh_depth.GetAddressOf()));
+            if (FAILED(created)) return created;
+            device->CreateDepthStencilView(mesh_depth.Get(), nullptr,
+                mesh_dsv_heap->GetCPUDescriptorHandleForHeapStart());
+        }
+        const auto dsv = mesh_dsv_heap->GetCPUDescriptorHandleForHeapStart();
+        const D3D12ImageRect rect = resolved_rect(image_rect, width, height);
+        constexpr UINT kMeshCell = 16;
+        const UINT cells = ((rect.width + kMeshCell - 1) / kMeshCell) *
+                           ((rect.height + kMeshCell - 1) / kMeshCell);
+        commands->SetPipelineState(extrapolate_mesh_fill_pipeline.Get());
+        commands->DrawInstanced(3, 1, 0, 0);
+        commands->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0F, 0, 0, nullptr);
+        commands->OMSetRenderTargets(1, &rtv, FALSE, &dsv);
+        commands->SetPipelineState(mesh_pipeline);
+        commands->DrawInstanced(cells * 6, 1, 0, 0);
+        commands->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        commands->SetPipelineState(restore_pipeline);
         return S_OK;
     }
 
@@ -4097,7 +4240,19 @@ struct D3D12FrameSynthesizer::Impl {
                     target_views[view_index].image_rect,
                     static_cast<UINT>(image_description.Width),
                     image_description.Height);
-                slot.command_list->DrawInstanced(3, 1, 0, 0);
+                if (nvidia_options.extrapolate && nvidia_options.extrapolate_mesh) {
+                    // From the flow alone, or from both with the vectors'
+                    // grid asking the flow where it does not explain A.
+                    const HRESULT drawn = draw_extrapolation_mesh(slot.command_list.Get(), rtv,
+                        target_views[view_index].image_rect, static_cast<UINT>(image_description.Width),
+                        image_description.Height,
+                        guides ? extrapolate_hybrid_mesh_pipeline.Get() : extrapolate_flow_mesh_pipeline.Get(),
+                        guides ? extrapolate_hybrid_graphics_pipeline.Get()
+                               : extrapolate_flow_graphics_pipeline.Get());
+                    if (FAILED(drawn)) return drawn;
+                } else {
+                    slot.command_list->DrawInstanced(3, 1, 0, 0);
+                }
                 clear_synthetic_marker(slot.command_list.Get(), rtv, target_views[view_index],
                     static_cast<UINT>(image_description.Width), image_description.Height, debug_marker);
             }

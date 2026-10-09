@@ -636,7 +636,8 @@ nearest-depth vector of four taps, sky taking camera motion only, and the
 mesh stretching over disocclusions. OFXR's extrapolation gathers instead of
 splatting, in the same composition pass as its interpolation, but orders
 surfaces by the game's depth as AppSW does and stretches the background the
-same way. Whether a mesh warp would measure better is open.
+same way. A mesh warp, built since, measured better and replaced the gather
+for extrapolation (below).
 
 On the 42 triplets, predicting frame 2 from frames 0 and 1 a whole frame
 ahead (1 + dt2/dt1 spans from A):
@@ -715,6 +716,75 @@ afterwards real frames went down at their promised time in every mode. At
 UEVR's full resolution the Jakku race loaded the GPU enough that SteamVR
 halved the rate in some rounds (its lead from wait to display then reads 27 or
 50-58 ms instead of 35.3); those rounds are left out.
+
+#### Meta's mesh warps, measured
+
+The warps were drawn in the synthesizer as Meta draws them: a grid over each
+view, a vertex every cell of the real frame, each moved on along its motion
+to its display time and rasterised over a plain copy of the real frame
+(which shows only where the grid pulls away from the view's edge), against a
+depth target. From the game's vectors, as Application SpaceWarp in the Meta
+XR Simulator: each vertex takes the motion and depth of the nearest of four
+taps half a cell around it, the nearest surface wins where the grid folds,
+and triangles stretch over what moving content uncovers. From FidelityFX's
+flow, as Asynchronous SpaceWarp on PC: no depth, the smallest displacement
+wins. On the 42 triplets, a whole frame ahead, timed warm:
+
+| Variant | Error | SSIM | Sharpness | Gradient error | GPU a pair |
+|---|---|---|---|---|---|
+| Gather from the vectors (five candidates) | 12.63 | 0.684 | 0.898 | 11.17 | 0.76 ms |
+| Mesh from the vectors, 4 / 8 px cells | 12.17 / 12.05 | 0.676 / 0.681 | 0.906 / 0.874 | 11.29 / 11.01 | 0.40 / 0.24 ms |
+| **Mesh from the vectors, 16 px (kept)** | **12.00** | **0.683** | 0.853 | **10.89** | **0.17 ms** |
+| Mesh from the vectors, 24 / 32 px | 11.96 / 12.04 | 0.682 / 0.679 | 0.845 / 0.841 | 10.91 / 11.01 | 0.15 / 0.14 ms |
+| 8 px with the sample refined along the motion, 1 / 2 steps | 12.08 / 12.07 | 0.679 / 0.680 | 0.877 | 11.05 / 11.04 | 0.30 / 0.35 ms |
+| 16 px with the gather at motion edges over it | 12.40 | 0.672 | 0.939 | 11.61 | 0.73 ms |
+| Gather from the flow | 12.41 | 0.660 | 0.945 | 12.16 | 1.21 ms |
+| Mesh from the flow, 8 / 16 px (16 kept) | 11.90 / 11.90 | 0.673 / 0.673 | 0.846 / 0.844 | 11.51 / 11.49 | 0.54 / 0.47 ms |
+| 16 px, the largest displacement winning (the Steam Frame's rule) | 11.91 | 0.673 | 0.841 | 11.49 | 0.46 ms |
+| 16 px, each vertex taking the largest motion of four taps | 11.92 | 0.671 | 0.835 | 11.59 | 0.47 ms |
+| 16 px flow mesh with the gather at motion edges | 12.32 | 0.659 | 0.935 | 12.08 | 1.25 ms |
+| Gather from both (`extrapolate=2` before) | 11.88 | 0.688 | 0.888 | 10.98 | 1.49 ms |
+| **The vectors' mesh asking the flow where it misses (kept)** | **11.53** | 0.683 | 0.872 | 11.02 | 1.03 ms |
+| The same with a quarter-resolution flow (kept) | 11.56 | 0.682 | 0.869 | 11.03 | 0.86 ms |
+| Flow mesh with a quarter-resolution flow | 12.61 | 0.642 | 0.854 | 12.26 | 0.30 ms |
+
+The mesh is softer where its triangles stretch, but every other measure
+favours it, at the edges too: the gather's per-pixel search over the mesh at
+motion edges made it sharper and less accurate. On the synthetic sliding
+rectangle, the gather's best case, the mesh errs 3.6 against 0 at the
+rectangle's perfectly sharp edges (`test_dlss_extrapolation` holds it under a
+fifth of repeating the frame).
+
+#### How the Steam Frame does it
+
+The headset's own SteamVR (2.18.2) was read off the device and decompiled
+(`build/steamframe-re/REPORT.md` holds the full account). Streamed frames
+carry colour only, no depth or vectors, and by default each is shown through
+a rotation-only timewarp at display rate with a per-row pose for the rolling
+scan-out: that hides the stream's 45-55 ms of latency, and is likely what
+people praise. Its Motion Smoothing is off by default for the Frame; when
+on, the Snapdragon's vision hardware computes dense optical flow at 512x512
+per eye after the previous frame is turned to the new head pose, vectors are
+zeroed in 6-degree cells whose motion is inconsistent from frame to frame and
+where the image did not change, and a 512x512 grid mesh is pushed along them,
+the largest displacement winning without depth. Measured here, its overlap
+rule and a largest-motion dilation made no improvement to the flow mesh
+(above). It also confirms that the headset adds only a rotation warp to what
+is streamed, so the frames OFXR sends must be made for their real display
+time, which `promise_shown_time` does.
+
+#### Flow at a quarter resolution
+
+| Mode | Half: error / SSIM / GPU | Quarter: error / SSIM / GPU |
+|---|---|---|
+| FidelityFX interpolation | 7.86 / 0.779 / 0.58 ms | 8.13 / 0.768 / 0.42 ms |
+| Hybrid (vectors and flow) | 7.18 / 0.815 / 1.47 ms | 7.19 / 0.815 / 1.31 ms |
+| Flow mesh extrapolation | 11.90 / 0.673 / 0.47 ms | 12.61 / 0.642 / 0.30 ms |
+| Combined mesh extrapolation | 11.53 / 0.683 / 1.03 ms | 11.56 / 0.682 / 0.86 ms |
+
+The quarter is kept where the flow only patches the vectors. Its packed input
+averages four bilinear taps, so each packed pixel stands for its 4x4 rather
+than a quarter of them.
 
 The test harness starts NVIDIA's `nvngx_update.exe` (five per process) with
 every NGX initialisation, and they linger for minutes. Sweeps of a few
