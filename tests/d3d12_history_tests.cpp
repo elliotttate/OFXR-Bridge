@@ -4116,9 +4116,20 @@ void bench_native_dlss_layouts(D3D12WarpFixture& fixture) {
 // at a headset-class eye size, with engine guides at a DLSS-quality render
 // size. A still head keeps NGX history; a turning head changes the camera on
 // every pair. Each case runs at 2X and 3X.
+// XRFG_TEST_BENCH_EYE=WxH replaces a benchmark's per-eye size, such as a
+// Steam Frame's 3004x3004; the guides stay at two thirds of it.
+std::array<UINT, 2> bench_eye_size(UINT width, UINT height) {
+    if (const char* value = std::getenv("XRFG_TEST_BENCH_EYE")) {
+        UINT w = 0, h = 0;
+        if (std::sscanf(value, "%ux%u", &w, &h) == 2 && w >= 64 && h >= 64) return {w, h};
+    }
+    return {width, height};
+}
+
 void bench_native_dlss_pairs(D3D12WarpFixture& fixture) {
-    constexpr UINT width = 2064, height = 2208;
-    constexpr UINT render_width = 1376, render_height = 1472;
+    const auto eye = bench_eye_size(2064, 2208);
+    const UINT width = eye[0], height = eye[1];
+    const UINT render_width = width * 2 / 3, render_height = height * 2 / 3;
     constexpr UINT warmup = 8, measured = 96;
     std::array<ComPtr<ID3D12Resource>, 2> sources{
         create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_COMMON),
@@ -5148,8 +5159,10 @@ void test_nvidia_serialized_eye_context_stress(
 // the DLSS-vector and native methods add to every game frame.
 void bench_frame_generation_methods() {
     D3D12WarpFixture fixture(true);
-    constexpr UINT width = 2004, height = 2004;
-    constexpr UINT render_width = 1336, render_height = 1336;
+    const auto eye = bench_eye_size(2004, 2004);
+    const UINT width = eye[0], height = eye[1];
+    const UINT render_width = width * 2 / 3, render_height = height * 2 / 3;
+    std::cout << "fg bench " << width << "x" << height << " per eye\n";
     constexpr UINT warmup = 8, measured = 48;
     constexpr int shift = 12;
     using Backend = xrfg::D3D12OpticalFlowBackend;

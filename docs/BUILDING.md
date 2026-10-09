@@ -124,6 +124,18 @@ Scene motion leaves the medians unchanged; the heavier race widens the tails
 (native's 90th percentile rises from 1.08 to 1.5 ms) through contention with
 the game's own rendering.
 
+On a Steam Frame through SteamVR (3004x3004 per eye at 120 Hz, racing, with
+`power.pauseCompositorOnStandby` off so the session runs unworn), the same
+measurement gives OFXR + DLSS vectors 0.45 ms, FidelityFX flow 0.90 ms,
+native DLSS FG 4.3-5.3 ms and NVIDIA medium flow 8.1 ms. Offline at that size
+(`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
+takes 2.7 ms through the synthesizer, so about 2 ms of the live figure is the
+GPU shared with the game at that resolution. There a turning head's reseed
+adds 0.59 ms to 1.76 ms, and a feature per eye would cost 26% more still and
+15% more turning. Skipping the reseed instead is worse: a quarter pixel of
+unaligned history already triples the error of a reseeded pair on detailed
+content, so the 0.1 pixel threshold stays.
+
 A DLSS feature the game created before the capture hook was installed is
 recovered from its evaluation parameters, which normally still hold its
 creation flags. Without them, capture assumes render-resolution motion and
