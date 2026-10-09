@@ -376,7 +376,13 @@ void replay_held_out(const std::filesystem::path& directory) {
          xrfg::D3D12OpticalFlowInputScale::full, false},
         {"OFXR NVIDIA medium flow", xrfg::D3D12OpticalFlowBackend::nvidia,
          xrfg::D3D12OpticalFlowInputScale::half, false}}};
+    // XRFG_TEST_REPLAY_NATIVE_ONLY=1 skips OFXR's methods;
+    // XRFG_TEST_REPLAY_NATIVE_SCALES lists native resolutions (100,67).
+    const bool native_only = std::getenv("XRFG_TEST_REPLAY_NATIVE_ONLY") != nullptr;
     for (const auto& m : methods) {
+        if (native_only) break;
+        // XRFG_TEST_REPLAY_VECTORS_ONLY=1 runs only OFXR + DLSS vectors.
+        if (std::getenv("XRFG_TEST_REPLAY_VECTORS_ONLY") && !m.guides) continue;
         auto a = upload_dumped(fixture, f0.colour, colour_flags, D3D12_RESOURCE_STATE_RENDER_TARGET);
         auto b = upload_dumped(fixture, f2.colour, colour_flags, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const auto blank = [&] {
@@ -413,7 +419,15 @@ void replay_held_out(const std::filesystem::path& directory) {
         require(operation_succeeded(synthesizer.wait_for_idle()), "replay drain");
     }
 #ifdef XRFG_NATIVE_DLSSG
-    for (const char* scale : {"100", "67"}) {
+    std::vector<std::string> native_scales{"100", "67"};
+    if (const char* list = std::getenv("XRFG_TEST_REPLAY_NATIVE_SCALES")) {
+        native_scales.clear();
+        std::stringstream stream(list);
+        for (std::string item; std::getline(stream, item, ',');) native_scales.push_back(item);
+    }
+    if (std::getenv("XRFG_TEST_REPLAY_VECTORS_ONLY")) native_scales.clear();
+    for (const auto& scale_text : native_scales) {
+        const char* scale = scale_text.c_str();
         SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", scale);
         auto a = upload_dumped(fixture, f0.colour, colour_flags, D3D12_RESOURCE_STATE_RENDER_TARGET);
         auto b = upload_dumped(fixture, f2.colour, colour_flags, D3D12_RESOURCE_STATE_RENDER_TARGET);

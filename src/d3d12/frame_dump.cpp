@@ -32,9 +32,10 @@ bool FrameDump::wanted() noexcept {
     }
     if (directory_.empty() || sequence_ >= sequences_ || count_ == 0) return false;
     if (waiting_) {
-        // Started by a file named go in the directory, looked for twice a second.
-        if (frame_++ % 30 != 0 ||
-            GetFileAttributesW((directory_ / L"go").c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+        // Started by a file named go in the directory, looked for twice a
+        // second, and taken so that only one synthesizer answers it.
+        if (frame_++ % 30 != 0 || !MoveFileExW((directory_ / L"go").c_str(),
+                (directory_ / L"go.taken").c_str(), MOVEFILE_REPLACE_EXISTING)) return false;
         waiting_ = false;
         skip_ = 0;
         frame_ = 0;
