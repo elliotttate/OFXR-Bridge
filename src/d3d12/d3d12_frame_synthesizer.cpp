@@ -5067,10 +5067,14 @@ HRESULT D3D12FrameSynthesizer::flush_current_copy(
         // frame - measured as the real half's hand-over p90 going 1.0 to
         // 4.8 ms with a 14 ms tail while the synthetic's stayed flat, costing
         // 12-18 real frames a second at 13.6 megapixels an eye.
+        // A value this fence has not issued belongs to a synthesizer since
+        // rebuilt, whose work finished before it was replaced; waiting for it
+        // on this fence would park the consumer's queue for good.
         if (SUCCEEDED(result) && consumer_queue != nullptr &&
             consumer_queue != impl_->queue.Get() &&
             impl_->fence != nullptr &&
-            copy_fence_value != 0) {
+            copy_fence_value != 0 &&
+            copy_fence_value < impl_->next_fence_value) {
             static_cast<void>(consumer_queue->Wait(
                 impl_->fence.Get(),
                 copy_fence_value));
@@ -5187,8 +5191,10 @@ HRESULT D3D12FrameSynthesizer::synchronize_consumer_queue(
             return E_UNEXPECTED;
         }
         // Same queue on both sides means the submission is already ordered;
-        // the wait would be redundant rather than wrong.
-        if (queue == impl_->queue.Get()) {
+        // the wait would be redundant rather than wrong. A ticket this fence
+        // never issued came from a synthesizer since rebuilt, whose work
+        // finished first; on this fence its value would never arrive.
+        if (queue == impl_->queue.Get() || value >= impl_->next_fence_value) {
             return S_FALSE;
         }
         return queue->Wait(impl_->fence.Get(), value);

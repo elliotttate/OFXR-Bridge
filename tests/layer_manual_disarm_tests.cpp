@@ -55,6 +55,9 @@ int main(int argc, char** argv) {
     // "recorder": the flight recorder switched on, off and on again while a
     // session runs.
     const bool recorder_test = mode == "recorder";
+    // "steamvr-switch": a frame-generation setting changed from the tray while
+    // the SteamVR presenter is running with frames queued.
+    const bool switch_test = mode == "steamvr-switch";
     if (frame_loop_test && argc != 5 && argc != 6) return 1;
     const std::string loop_runtime = frame_loop_test ? argv[3] : "";
     const bool split_loop = frame_loop_test && std::string(argv[4]) == "split";
@@ -68,7 +71,7 @@ int main(int argc, char** argv) {
     if (!marker_mode.empty() && (mode != "d3d11" ||
         (marker_mode != "on" && marker_mode != "off" && marker_mode != "hidden"))) return 1;
     g_flight_simulator_mode = mode == "flight";
-    g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr";
+    g_steamvr_runtime_mode = g_steamvr_presenter_mode = mode == "steamvr" || switch_test;
     g_d3d11_interop_mode = mode == "d3d11";
     // The interop keeps the private rings; every D3D12 mode takes the
     // single-swapchain rings the shipped ini turns on.
@@ -416,6 +419,32 @@ int main(int argc, char** argv) {
         require(g_synthetic_release_calls.load() > 0, "generation active before Disarm");
         if (g_steamvr_presenter_mode || g_flight_simulator_mode)
             require(current.predictedDisplayPeriod == kFakeDisplayPeriod * 2, "presenter active before Disarm");
+        if (switch_test) {
+            // A new preset rebuilds the synthesizer, whose fence restarts its
+            // values. Frames the presenter still holds were made by the old one:
+            // flushing their real-frame copies against the new fence once had
+            // the application's queue wait for a value it would never reach,
+            // and SteamVR's xrEndFrame waited on that queue for ever.
+            using Request = int (*)(int, int, int, int, int);
+            const auto menu_request =
+                reinterpret_cast<Request>(GetProcAddress(module, "OFXR_EmbeddedRequestV1"));
+            require(menu_request != nullptr, "embedded menu export");
+            const auto synthetic_before = g_synthetic_release_calls.load();
+            require(menu_request(1, 0, 2, 1, 0) != 0, "request a preset change while generating");
+            for (int i = 0; i < 12; ++i) {
+                require(XR_SUCCEEDED(begin(session, nullptr)), "switched begin");
+                capture();
+                submit(current.predictedDisplayTime);
+                require(wait_for_queue_idle(), "switched GPU retirement");
+                require(XR_SUCCEEDED(wait(session, nullptr, &current)), "switched wait");
+            }
+            require(g_synthetic_release_calls.load() > synthetic_before,
+                "generation continues after a live setting change");
+            std::cout << "steamvr-switch: " << g_synthetic_release_calls.load() - synthetic_before
+                      << " synthetic frames after the change" << std::endl;
+            result = 0;
+            throw FinishedEarly{};
+        }
 #ifdef XRFG_EMBEDDED_MENU_TEST
         using Request = int (*)(int, int, int, int, int);
         auto menu_request = reinterpret_cast<Request>(GetProcAddress(module, "OFXR_EmbeddedRequestV1"));

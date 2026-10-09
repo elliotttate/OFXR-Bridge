@@ -11516,10 +11516,13 @@ void apply_embedded_control(
     if (state->control_revision == control.revision &&
         paused == state->pause_applied &&
         recording == state->recorder_applied) return;
-    if ((paused != state->pause_applied ||
-         recording != state->recorder_applied) &&
-        use_continuous_presenter &&
-        XR_FAILED(wait_for_presenter_idle(state))) return;
+    // Any change, not only a pause or the recorder: a settings change rebuilds
+    // the synthesizer, and frames the presenter still holds were made by the
+    // old one. Their deferred real-frame copies must be flushed by it; flushed
+    // against its successor's fence, whose values start again, they had the
+    // application's queue wait for a value it would never reach, and SteamVR's
+    // xrEndFrame waited on that queue for ever.
+    if (use_continuous_presenter && XR_FAILED(wait_for_presenter_idle(state))) return;
     state->menu_enabled = false;
     xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
     {

@@ -643,6 +643,11 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> frame-loop ${shape})
             set_tests_properties(xrfg_frame_loop_${shape_name} PROPERTIES TIMEOUT 60)
         endforeach()
+        # A frame-generation setting changed from the tray while the SteamVR
+        # presenter runs with frames queued.
+        add_test(NAME xrfg_layer_steamvr_live_switch COMMAND xrfg_layer_manual_disarm_tests
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic> steamvr-switch)
+        set_tests_properties(xrfg_layer_steamvr_live_switch PROPERTIES TIMEOUT 30)
         # The flight recorder switched on, off and on again in a running
         # session: the session records from before the switch head the file.
         add_test(NAME xrfg_layer_live_recorder COMMAND xrfg_layer_manual_disarm_tests
