@@ -348,7 +348,9 @@ Changes kept, with their measured effect:
   and near a motion edge a short search finds the surface in front. On the
   benchmark scene of a striped square sliding over a detailed background, the
   error fell from 3.95 to 1.81, and at the square's edges from 25.9 to 7.35.
-  Native generation measures 4.25 and 8.7 there. With the game's vectors
+  Native generation measures 4.25 and 8.7 there. At 3X, the frames a third
+  and two thirds of the way err 1.50 and 1.39 (native: 3.38 and 2.99; before:
+  4.88 and 2.96). With the game's vectors
   exact, OFXR + DLSS vectors is now the more accurate method at about a sixth
   of the GPU time. Native generation still handles content the vectors do not
   describe better. In Hubris the pair cost was unchanged at 0.33 ms. On the

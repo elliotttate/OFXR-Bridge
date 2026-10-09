@@ -4069,6 +4069,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
     // along the motion, a third and two thirds of the way from A.
     const std::array<const char*, 2> triple_scales{"100", "67"};
     std::array<std::array<double, 2>, 2> triple_totals{};
+    std::array<double, 2> ofxr_triple_totals{};
     auto second_output = create_source_texture(fixture, width, height);
     const std::array<xrfg::D3D12NativeDlssG::Output, 2> triple_outputs{
         {{output.Get()}, {second_output.Get()}}};
@@ -4212,9 +4213,81 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                 }
             }
         }
-        if (!triple) continue;
         const std::array<StereoPattern, 2> thirds{scene(bg_motion / 3, fg_motion / 3),
                                                   scene(bg_motion * 2 / 3, fg_motion * 2 / 3)};
+        {
+            // OFXR + DLSS vectors at 3X, against the same true frames.
+            std::array<ComPtr<ID3D12Resource>, 2> ofxr_sources{
+                create_source_texture(fixture, width, height),
+                create_source_texture(fixture, width, height)};
+            upload_pattern(fixture, ofxr_sources[0].Get(), a_pattern);
+            upload_pattern(fixture, ofxr_sources[1].Get(), b_pattern);
+            std::array<ComPtr<ID3D12Resource>, 2> currents{
+                create_source_texture(fixture, width, height),
+                create_source_texture(fixture, width, height)};
+            std::array<ComPtr<ID3D12Resource>, 2> synthetics{
+                create_source_texture(fixture, width, height),
+                create_source_texture(fixture, width, height)};
+            std::array<ID3D12Resource*, 2> source_pointers{ofxr_sources[0].Get(), ofxr_sources[1].Get()};
+            std::array<ID3D12Resource*, 2> current_pointers{currents[0].Get(), currents[1].Get()};
+            std::array<ID3D12Resource*, 2> synthetic_pointers{synthetics[0].Get(), synthetics[1].Get()};
+            auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+            require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                        source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+                    "scale quality OFXR 3X history initialization failed");
+            xrfg::D3D12FrameSynthesizer synthesizer;
+            require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                        history, current_pointers, synthetic_pointers, kFormat,
+                        D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx)),
+                    "scale quality OFXR 3X synthesizer initialization failed");
+            const auto vector_guides = [&](std::uint64_t serial) {
+                auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+                set->eye_count = kEyeCount;
+                for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                    auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                    f->stream = 295 + eye;
+                    f->epoch = 1;
+                    f->serial = serial;
+                    f->previous_serial = serial - 1;
+                    f->motion_vectors = motion;
+                    f->producer_queue = fixture.queue();
+                    f->output_width = width;
+                    f->output_height = height;
+                    f->motion_width = gw;
+                    f->motion_height = gh;
+                    f->motion_slice = f->output_slice = eye;
+                    f->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    set->eyes[eye] = f;
+                }
+                return set;
+            };
+            xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
+            require(operation_succeeded(history->capture(0, &capture_a)) &&
+                        operation_succeeded(history->commit(capture_a)),
+                    "scale quality OFXR 3X capture A failed");
+            xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+            require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime,
+                                                                 vector_guides(1))),
+                    "scale quality OFXR 3X prime failed");
+            require_frame_start_gate(synthesizer, "scale quality OFXR 3X frame-start gate");
+            require(operation_succeeded(history->capture(1, &capture_b)) &&
+                        operation_succeeded(history->commit(capture_b)),
+                    "scale quality OFXR 3X capture B failed");
+            require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
+                        std::nullopt, vector_guides(2), false, 1.0F / 3.0F,
+                        xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})),
+                    "scale quality OFXR 3X pair failed");
+            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+            for (UINT index = 0; index < 2; ++index) {
+                const auto actual = readback_pattern(fixture, synthetics[index].Get(),
+                                                     D3D12_RESOURCE_STATE_RENDER_TARGET);
+                for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                    ofxr_triple_totals[index] +=
+                        mean_absolute_rgb_error(actual, thirds[index], width, height, eye, margin);
+                }
+            }
+        }
+        if (!triple) continue;
         for (std::size_t s = 0; s < triple_scales.size(); ++s) {
             SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", triple_scales[s]);
             SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_DETAIL", nullptr);
@@ -4261,6 +4334,8 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                   << " mae=" << totals[s][0] / runs << " centre=" << totals[s][1] / runs
                   << " outer=" << totals[s][2] / runs << " edge=" << totals[s][3] / runs << '\n';
     }
+    std::cout << "scale quality OFXR+DLSS vectors 3X third_mae=" << ofxr_triple_totals[0] / runs
+              << " two_thirds_mae=" << ofxr_triple_totals[1] / runs << '\n';
     for (std::size_t s = 0; triple && s < triple_scales.size(); ++s) {
         std::cout << "scale quality 3X scale=" << triple_scales[s]
                   << " third_mae=" << triple_totals[s][0] / runs

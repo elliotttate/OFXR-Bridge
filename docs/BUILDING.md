@@ -451,7 +451,8 @@ and 0.326 ms, against 0.323 before.
 
 At 3X, against the true frames a third and two thirds of the way from A, 67%
 errs 4.9 and 4.6 where full resolution errs 3.4 and 3.0: each generated frame
-restores detail from its own point along the motion.
+restores detail from its own point along the motion. OFXR + DLSS vectors errs
+1.50 and 1.39 at 3X, against 4.88 and 2.96 before its occlusion handling.
 
 67% beats 70% and 75% because it puts the feature on the game's two-thirds
 guide grid; 70%, 64% and 60% measured 7.4, 6.3 and 8.4 with a quarter
