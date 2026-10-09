@@ -210,6 +210,12 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "nvidia_bidirectional") {
                     settings.nvidia_bidirectional = value == "1" ||
                         lower_ascii(value) == "true";
+                } else if (key == "dlss_flow_hybrid") {
+                    settings.dlss_flow_hybrid = value == "1" ||
+                        lower_ascii(value) == "true";
+                } else if (key == "extrapolate") {
+                    settings.extrapolate = value == "1" ||
+                        lower_ascii(value) == "true";
                 } else if (key == "deep_pipeline") {
                     settings.deep_pipeline = value == "1" ||
                         lower_ascii(value) == "true";
@@ -266,6 +272,8 @@ std::string serialize_settings(const LauncherSettings& settings) {
            nvidia_input_scale_ini_value(settings.nvidia_input_scale) +
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
+           "\r\ndlss_flow_hybrid=" + (settings.dlss_flow_hybrid ? "1" : "0") +
+           "\r\nextrapolate=" + (settings.extrapolate ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +
            "\r\nexcluded_processes=" + settings.excluded_processes +
@@ -498,6 +506,8 @@ std::string build_runtime_ini(
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
            "\r\nmotion_vectors=dlss" +
+           "\r\ndlss_flow_hybrid=" + (settings.dlss_flow_hybrid ? "1" : "0") +
+           "\r\nextrapolate=" + (settings.extrapolate ? "1" : "0") +
            "\r\nnvidia_preset=" +
            nvidia_preset_ini_value(settings.nvidia_preset) +
            "\r\nnvidia_input_scale=" +
