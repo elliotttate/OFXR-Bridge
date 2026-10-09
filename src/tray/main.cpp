@@ -68,6 +68,7 @@ enum MenuCommand : UINT {
     open_logs = 130,
     dlssg_scale_full = 131,
     dlssg_scale_two_thirds = 132,
+    dlssg_scale_half = 133,
     donate_creator = 138,
     donate_maintainer = 139,
     show_about = 140,
@@ -941,13 +942,14 @@ void show_context_menu(AppState& state) {
         generation_dlss, L"NVIDIA DLSS Frame Generation (experimental)");
     // Below 100%, NVIDIA generates at a lower resolution and the bridge puts
     // back the real frame's detail wherever it can follow the game's motion.
-    // There is no lower step: at 50% native generation measured no better at
-    // moving edges than OFXR + DLSS vectors, and worse elsewhere, for more GPU
-    // time. dlssg_resolution in the layer's INI still takes 25 to 100.
+    // On recorded Galactic Racer frames 67% and 50% had less error than 100%,
+    // though a sharp synthetic scene loses detail at 50%. dlssg_resolution in
+    // the layer's INI takes 25 to 100.
     if (HMENU dlssg_scale_menu = CreatePopupMenu()) {
         const struct { UINT command; int percent; const wchar_t* text; } scales[]{
             {dlssg_scale_full, 100, L"100% (sharpest)"},
             {dlssg_scale_two_thirds, 67, L"67% (faster, softer moving detail)"},
+            {dlssg_scale_half, 50, L"50% (fastest)"},
         };
         for (const auto& scale : scales) {
             AppendMenuW(dlssg_scale_menu,
@@ -1181,7 +1183,9 @@ void handle_command(AppState& state, UINT command) {
         break;
     case dlssg_scale_full:
     case dlssg_scale_two_thirds:
-        state.settings.native_scale = command == dlssg_scale_full ? 100 : 67;
+    case dlssg_scale_half:
+        state.settings.native_scale = command == dlssg_scale_full ? 100
+            : command == dlssg_scale_two_thirds ? 67 : 50;
         update_runtime_options(state, L"DLSS Frame Generation will use this resolution the next time the game starts.");
         break;
     case backend_fidelity_fx:

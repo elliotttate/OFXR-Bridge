@@ -330,7 +330,7 @@ against 0.21). These feature versions accept only render preset 1.
 
 Generating below the eye's resolution is a trade rather than an optimisation,
 so it is an option: `[ofxr] dlssg_resolution`, 25 to 100 percent per axis and
-100 by default. The tray offers 100 and 67 under **DLSS Frame Generation
+100 by default. The tray offers 100, 67 and 50 under **DLSS Frame Generation
 resolution** (`[tray] dlssg_resolution`), and `OFXR_RequestNativeDlssgScaleV2`
 changes it in a running game. Below 100 the pack averages the real frame into
 the smaller feature and maps the guides onto its grid. The composition then
@@ -392,9 +392,10 @@ with stays bilinear, since filtering both alike measured worse.
 With the game's vectors exact, as here, OFXR + DLSS vectors now has less error
 than native generation everywhere, at the moving edges too (7.55 against 8.7),
 for about a sixth of the GPU time. Native generation at 67% errs more than
-both (13.6 at the edges), and at 50% far more (23.4), so the tray offers no
-step below 67%. Native generation needs the same DLSS guides as OFXR + DLSS
-vectors, so that is always the cheaper alternative to it. The optical-flow
+both (13.6 at the edges), and at 50% far more (23.4). Real frames tell
+differently (below): there 67% and 50% erred alike, and less than 100%, so
+the tray offers 50% again. Native generation needs the same DLSS guides as
+OFXR + DLSS vectors, so that is always the cheaper alternative to it. The optical-flow
 methods, for games without DLSS, lose the fast striped square entirely.
 
 `XRFG_TEST_SCALE_QUALITY_EFFECT` adds content the game's vectors do not
@@ -474,7 +475,38 @@ close, the game's vectors did not describe the motion at any scale
 (`XRFG_TEST_REPLAY_VECTOR_GAIN` from 0 to 2, `_GUIDE_SHIFT` of a frame either
 way) and it erred 16.1 and 16.4, as much as a blend, while native generation,
 whose network has its own flow, erred 10.6 and 10.9 and the optical-flow
-methods 9.1 to 10.9. Hubris's menu, where only a glowing logo moves (0.2% of
+methods 9.1 to 10.9.
+
+Eight more triplets, recorded later in the same race with the one-shot
+trigger, gave, where the scene moved: OFXR + DLSS vectors 7.81, native 7.91
+at 67% and 8.05 at 100%, FidelityFX flow 8.14 (half) and 8.20 (full), NVIDIA
+flow 8.32, a blend 13.0. Over all fourteen, native generation at 67% had the
+least error (8.1), then 100% (8.2), optical flow (8.5-8.6) and OFXR + DLSS
+vectors (9.1). The same eight triplets checked three things:
+
+- OFXR + DLSS vectors' occlusion handling holds on real frames: the shader
+  before it measured 8.47 against 7.81, worse on six of the eight.
+- With the eyes put right, native generation uses the game's vectors well:
+  scaled by 0, 0.5 or 1 they measured 7.82, 8.26 and 7.55 at 100% (7.39 at
+  67% with 1).
+- Native generation's own settings, by its mean error:
+
+  | Resolution | No detail restore | Detail restore 2 (default) | Restore 4 |
+  |---|---|---|---|
+  | 100% | | 8.05 | |
+  | 85% | | 7.79 | |
+  | 75% | | 7.84 | |
+  | 67% | 8.35 | 7.91 | 7.90 |
+  | 50% | 8.59 | 7.91 | 7.89 |
+
+  Every reduced resolution beat full resolution, and 50% matched 67%: the
+  sharp synthetic scene overstates what generating at a lower resolution
+  loses in a game whose DLSS renders at two thirds of the output. The
+  detail restore is worth 0.4-0.7; strengths 2 and 4 measure alike. 85% is
+  best by a little, but it costs more than 100% (it loses the two-thirds
+  guide grid), so the tray offers 100%, 67% and 50%.
+
+Hubris's menu, where only a glowing logo moves (0.2% of
 the image) and its vectors do not describe it, ordered them FidelityFX flow
 8.7, native 10.5-11.5, NVIDIA flow 13.6 and OFXR + DLSS vectors 16.9, against
 a blend's 15.9. So the synthetic results overstate OFXR + DLSS vectors:

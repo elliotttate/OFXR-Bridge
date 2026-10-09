@@ -172,8 +172,8 @@ controls only configure OFXR's own algorithm. They do not tune NVIDIA's
 feature.
 
 **Optional: faster native generation at a lower resolution.** The tray's
-**DLSS Frame Generation resolution** submenu offers 100% (the default) and
-67%, applied the next time the game starts. At 67%, NVIDIA generates at two
+**DLSS Frame Generation resolution** submenu offers 100% (the default), 67%
+and 50%, applied the next time the game starts. At 67%, NVIDIA generates at two
 thirds of each eye's resolution, and the bridge puts back the real frame's
 detail wherever it can follow the game's motion. Moving content in the
 generated frames is softer; occlusion edges soften most. In return, Galactic
@@ -182,10 +182,11 @@ game frames a second at 67%, against 99.5 at 100% (OFXR + DLSS vectors:
 112.5). Offline, a turning-head 2X pair costs 1.74 ms at 67%, against 2.35 ms.
 67% suits games whose DLSS renders at two thirds (Quality).
 
-There is no lower step in the tray. At 50% (107.8 game frames a second), native
-generation's moving edges measured no better than OFXR + DLSS vectors', and
-everything else worse, for more GPU time. If you want a cheaper method than 67%,
-use OFXR + DLSS vectors.
+50% is faster again (107.8 game frames a second there; offline 1.40 ms a
+pair). On a sharp synthetic scene it loses visible detail at moving edges,
+but on recorded Galactic Racer frames 67% and 50% both had less error than
+100% (7.9 against 8.05, where the scene moved). If you want a cheaper method
+still, use OFXR + DLSS vectors.
 
 | Where | Setting |
 |---|---|
@@ -487,7 +488,10 @@ fix:
 Section by section the order changes: OFXR + DLSS vectors had the least
 error on some, but along one fast wall the game's vectors did not describe
 the motion at any scale and it erred as much as a blend, where NVIDIA's own
-flow kept native generation near the optical-flow methods.
+flow kept native generation near the optical-flow methods. Eight more
+triplets, recorded later in the same race, measured OFXR + DLSS vectors 7.8,
+native generation 7.9 at 67% and 8.05 at 100%, optical flow 8.1 to 8.3 and a
+blend 13.0. Over both sets native generation at 67% had the least error.
 
 The native pair and all-methods benchmarks generate from patterned frames.
 Blank frames compress to almost nothing in GPU memory, and NGX then measures
