@@ -1097,7 +1097,20 @@ float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
     float fill_rank = 0.0;
     bool filled = false;
     float2 fill_point = pixel;
-    [loop] for (uint candidate = 0; candidate < 13; ++candidate) {
+    // Where the game's motion is locally linear around the pixel - no step
+    // within 48 pixels either way - no other surface can move in over it,
+    // and its own solve is the answer: the search runs near motion edges
+    // only. A smooth gradient, such as ground rushing past, is not a step.
+    float2 here_motion = game_motion_texel(pixel);
+    bool smooth_motion = true;
+    [unroll] for (uint probe = 0; probe < 4; ++probe) {
+        float radius = (probe & 2) != 0 ? 48.0 : 16.0;
+        float2 offset = (probe & 1) != 0 ? float2(0, radius) : float2(radius, 0);
+        smooth_motion = smooth_motion && length(game_motion_texel(pixel + offset) +
+                                  game_motion_texel(pixel - offset) - 2.0 * here_motion) < 1.0;
+    }
+    uint candidates = smooth_motion ? 1 : 13;
+    [loop] for (uint candidate = 0; candidate < candidates; ++candidate) {
         float2 start = pixel;
         if (candidate > 0) {
             uint ring = (candidate - 1) / 4;

@@ -6003,7 +6003,7 @@ void bench_frame_generation_methods() {
         Backend backend;
         Preset preset;
         Scale scale;
-        bool game_motion, native, triple, hybrid = false;
+        bool game_motion, native, triple, hybrid = false, extrapolate = false;
     };
     const std::vector<Method> methods{
         {"OFXR FidelityFX, half-res flow", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, false},
@@ -6014,6 +6014,7 @@ void bench_frame_generation_methods() {
         {"OFXR FidelityFX + DLSS vectors", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false},
         {"OFXR NVIDIA + DLSS vectors", Backend::nvidia, Preset::medium, Scale::half, true, false, false},
         {"OFXR DLSS vectors + FidelityFX flow", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false, true},
+        {"OFXR DLSS vectors extrapolation", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false, false, true},
         {"OFXR FidelityFX 3X", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, true},
         {"OFXR NVIDIA OFA medium 3X", Backend::nvidia, Preset::medium, Scale::half, false, false, true},
 #ifdef XRFG_NATIVE_DLSSG
@@ -6055,6 +6056,7 @@ void bench_frame_generation_methods() {
         if (method.native) options.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
         options.native_scale = 100; // XRFG_NATIVE_DLSSG_SCALE times the others
         options.hybrid = method.hybrid;
+        options.extrapolate = method.extrapolate;
         xrfg::D3D12FrameSynthesizer synthesizer;
         require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                                                current_out, synthetic_out, kFormat,
@@ -6108,7 +6110,7 @@ void bench_frame_generation_methods() {
                 : std::nullopt;
             require_hresult(synthesizer.submit_pair(capture, views, views, 0, pair % 2, &ticket,
                                                     std::nullopt, guides(pair + 1), false,
-                                                    method.triple ? 1.0F / 3.0F : 0.5F, extra),
+                                                    method.extrapolate ? 1.5F : method.triple ? 1.0F / 3.0F : 0.5F, extra),
                             "bench pair");
             fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
             xrfg::D3D12NvidiaGpuTiming timing{};
