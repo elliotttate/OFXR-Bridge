@@ -405,7 +405,7 @@ struct D3D12NativeDlssG::Impl {
     std::uint64_t completion_value{};
     std::array<DecisionReadback, kSlots> decisions;
     UINT recorded_slot{kSlots};
-    bool diagnostic_decisions{}, capture_only{}, test_output{};
+    bool diagnostic_decisions{}, capture_only{}, test_output{}, reseed_every_pair{};
     FILE *decision_log{};
     Skip skip{Skip::none};
     UINT create_retry{};
@@ -838,6 +838,8 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->diagnostic_decisions = environment(L"XRFG_TEST_NATIVE_DLSSG_DECISIONS");
         p->capture_only = environment(L"XRFG_TEST_NATIVE_DLSSG_CAPTURE_ONLY");
         p->test_output = environment(L"XRFG_TEST_NATIVE_DLSSG");
+        // Measures a turning head's cost in a game while the head is still.
+        p->reseed_every_pair = environment(L"XRFG_TEST_NATIVE_DLSSG_RESEED_EVERY_PAIR");
         p->shared_stereo = !environment(L"XRFG_NATIVE_DLSSG_PER_EYE");
         p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
         HRESULT hr = acquire_ngx(device);
@@ -1127,7 +1129,7 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
         for (UINT f = 0; f < feature_count; ++f) {
             auto &feature = p.features[f];
             const UINT first = shared ? 0 : f, last = shared ? 1 : f;
-            bool reseed = false;
+            bool reseed = p.reseed_every_pair;
             for (UINT i = first; i <= last; ++i) {
                 const auto &ga = *ag->eyes[guide_index(i)];
                 const auto &gb = *bg->eyes[guide_index(i)];
