@@ -46,6 +46,7 @@ set(XRFG_NVIDIA_OPTICAL_FLOW_SDK_ROOT
     "Path to the NVIDIA Optical Flow SDK 5.0.7 root")
 
 add_library(xrfg_core STATIC
+    src/core/benchmark_model.cpp
     src/core/fps_overlay_model.cpp
     src/core/image.cpp
     src/core/optical_flow.cpp
@@ -429,7 +430,9 @@ if(WIN32 AND XRFG_BUILD_LAYER)
 
     if(XRFG_BUILD_STANDALONE)
         add_library(xrfg_standalone_core STATIC
+            src/tray/benchmark_labels.cpp
             src/tray/standalone_launcher.cpp
+            include/xrfg/benchmark_labels.hpp
             include/xrfg/standalone_launcher.hpp)
         target_include_directories(xrfg_standalone_core PUBLIC include)
         target_compile_features(xrfg_standalone_core PUBLIC cxx_std_20)
@@ -516,6 +519,17 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             endif()
             add_test(NAME xrfg_standalone_launcher_tests
                 COMMAND xrfg_standalone_launcher_tests)
+            # "Benchmark this PC": its catalogue, results file, speed-up
+            # arithmetic and the tray's lookups. No GPU.
+            add_executable(xrfg_benchmark_model_tests tests/benchmark_model_tests.cpp)
+            target_link_libraries(xrfg_benchmark_model_tests PRIVATE xrfg_standalone_core)
+            target_compile_features(xrfg_benchmark_model_tests PRIVATE cxx_std_20)
+            if(MSVC)
+                target_compile_options(xrfg_benchmark_model_tests PRIVATE /W4 /permissive- /EHsc)
+                target_compile_definitions(xrfg_benchmark_model_tests PRIVATE
+                    NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+            endif()
+            add_test(NAME xrfg_benchmark_model_tests COMMAND xrfg_benchmark_model_tests)
             add_executable(xrfg_tray_lifecycle_tests tests/tray_lifecycle_tests.cpp)
             target_link_libraries(xrfg_tray_lifecycle_tests PRIVATE
                 xrfg_standalone_core comctl32 gdi32 ole32 shell32 user32)
