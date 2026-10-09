@@ -123,6 +123,11 @@ struct D3D12NvidiaOpticalFlowOptions {
     // as well and take, per pixel, whichever of the two explains both frames
     // better.
     bool hybrid{};
+    // With the game's DLSS vectors, extrapolate past the current capture
+    // instead of interpolating before it, as Application SpaceWarp does:
+    // submit_pair's interpolation_fraction is then 1 plus how far past it,
+    // in spans from the previous capture to the current one, up to 3.
+    bool extrapolate{};
 };
 
 // A second synthetic produced from the same pair, for a session that hands

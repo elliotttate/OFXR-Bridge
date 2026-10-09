@@ -13,6 +13,7 @@
 #include "fullscreen_vertex_shader.hpp"
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_synthesize_midpoint_pixel_shader.hpp"
+#include "extrapolate_pixel_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -70,7 +71,7 @@ struct NvidiaInputScaleRatio {
     }
 }
 constexpr UINT kMaxReprojectionViews = 2;
-constexpr UINT kSrvDescriptorCount = 7;
+constexpr UINT kSrvDescriptorCount = 8;
 constexpr UINT kUavDescriptorCount = 3;
 constexpr UINT kDescriptorBlockSize =
     kSrvDescriptorCount + kUavDescriptorCount;
@@ -158,6 +159,26 @@ constexpr D3D12_RESOURCE_STATES kShaderReadState =
                    resource_format == view_format;
         default:
             return false;
+    }
+}
+
+// A readable view of a game's depth target.
+[[nodiscard]] DXGI_FORMAT depth_srv_format(DXGI_FORMAT format) noexcept {
+    switch (format) {
+    case DXGI_FORMAT_R32_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT:
+        return DXGI_FORMAT_R32_FLOAT;
+    case DXGI_FORMAT_R24G8_TYPELESS:
+    case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    case DXGI_FORMAT_R32G8X24_TYPELESS:
+    case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        return DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+    case DXGI_FORMAT_R16_TYPELESS:
+    case DXGI_FORMAT_D16_UNORM:
+        return DXGI_FORMAT_R16_UNORM;
+    default:
+        return format;
     }
 }
 
@@ -773,6 +794,7 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> graphics_pipeline;
     ComPtr<ID3D12PipelineState> game_motion_graphics_pipeline;
     ComPtr<ID3D12PipelineState> hybrid_graphics_pipeline;
+    ComPtr<ID3D12PipelineState> extrapolate_graphics_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
@@ -1119,6 +1141,17 @@ struct D3D12FrameSynthesizer::Impl {
         result = device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(hybrid_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result)) {
+            return result;
+        }
+
+        graphics_description.PS = {
+            g_xrfg_extrapolate_pixel_shader,
+            sizeof(g_xrfg_extrapolate_pixel_shader),
+        };
+        result = device->CreateGraphicsPipelineState(
+            &graphics_description,
+            IID_PPV_ARGS(extrapolate_graphics_pipeline.GetAddressOf()));
         if (FAILED(result)) {
             return result;
         }
@@ -1923,10 +1956,16 @@ struct D3D12FrameSynthesizer::Impl {
             const UINT block_count = backend == D3D12OpticalFlowBackend::nvidia
                 ? image_description.DepthOrArraySize
                 : 1U;
+            D3D12_SHADER_RESOURCE_VIEW_DESC null_depth = null_motion;
+            null_depth.Format = DXGI_FORMAT_R32_FLOAT;
             for (UINT block = 0; block < block_count; ++block) {
                 device->CreateShaderResourceView(nullptr, &null_motion,
                     offset_cpu_handle(cpu_start,
                         block * kDescriptorBlockSize + 6U,
+                        descriptor_increment));
+                device->CreateShaderResourceView(nullptr, &null_depth,
+                    offset_cpu_handle(cpu_start,
+                        block * kDescriptorBlockSize + 7U,
                         descriptor_increment));
             }
         }
@@ -2653,6 +2692,14 @@ struct D3D12FrameSynthesizer::Impl {
                 offset_cpu_handle(start,
                     eye * kDescriptorBlockSize + 6U,
                     descriptor_increment));
+            // Extrapolation orders surfaces by the game's depth.
+            D3D12_SHADER_RESOURCE_VIEW_DESC depth_view = description;
+            depth_view.Texture2DArray.FirstArraySlice = frame->depth &&
+                frame->depth->GetDesc().DepthOrArraySize > 1 ? frame->output_slice : 0;
+            depth_view.Format = frame->depth ? depth_srv_format(frame->depth->GetDesc().Format)
+                                             : DXGI_FORMAT_R32_FLOAT;
+            device->CreateShaderResourceView(frame->depth.Get(), &depth_view,
+                offset_cpu_handle(start, eye * kDescriptorBlockSize + 7U, descriptor_increment));
         }
         return S_OK;
     }
@@ -2824,10 +2871,25 @@ struct D3D12FrameSynthesizer::Impl {
             if (FAILED(result)) return result;
         }
 
-        std::array<D3D12_RESOURCE_BARRIER, 4> before{};
+        std::array<D3D12_RESOURCE_BARRIER, 6> before{};
         UINT before_count = 0;
         before[before_count++] = transition_barrier(previous_resource,
             D3D12_RESOURCE_STATE_COMMON, kShaderReadState);
+        // Extrapolation reads each eye's depth; eyes may share one target.
+        const auto depth_read = [&](UINT eye) {
+            const auto& guide = guides->eyes[eye];
+            if (!nvidia_options.extrapolate || !guide->depth ||
+                guide->depth_resource_state == kShaderReadState) return false;
+            for (UINT other = 0; other < eye; ++other)
+                if (guides->eyes[other]->depth.Get() == guide->depth.Get()) return false;
+            return true;
+        };
+        for (UINT eye = 0; eye < guides->eye_count; ++eye) {
+            if (depth_read(eye)) {
+                before[before_count++] = transition_barrier(guides->eyes[eye]->depth.Get(),
+                    guides->eyes[eye]->depth_resource_state, kShaderReadState);
+            }
+        }
         before[before_count++] = transition_barrier(current_resource,
             D3D12_RESOURCE_STATE_COMMON, kShaderReadState);
         for (UINT eye = 0; eye < guides->eye_count; ++eye) {
@@ -2845,7 +2907,8 @@ struct D3D12FrameSynthesizer::Impl {
         slot.command_list->SetDescriptorHeaps(1, heaps);
         slot.command_list->SetGraphicsRootSignature(root_signature.Get());
         const auto gpu_start = slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
-        slot.command_list->SetPipelineState(game_motion_graphics_pipeline.Get());
+        slot.command_list->SetPipelineState(nvidia_options.extrapolate
+            ? extrapolate_graphics_pipeline.Get() : game_motion_graphics_pipeline.Get());
         dred_marker(slot.command_list.Get(), "OFXR DLSS-vector compose");
         slot.command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -2864,8 +2927,11 @@ struct D3D12FrameSynthesizer::Impl {
 
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
+            // Extrapolation packs how far past the current capture, halved.
             parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
-                packed_synthesis_fraction(synthetic_output_fraction(output));
+                packed_synthesis_fraction(nvidia_options.extrapolate
+                    ? (synthetic_output_fraction(output) - 1.0F) * 0.5F
+                    : synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) * image_description.DepthOrArraySize;
             for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
@@ -2889,6 +2955,18 @@ struct D3D12FrameSynthesizer::Impl {
                 parameters.flow_height = guide->output_y;
                 parameters.flow_block_size = guide->output_width;
                 parameters.game_motion_padding = guide->output_height;
+                if (nvidia_options.extrapolate) {
+                    // The output rectangle packed as the hybrid packs it,
+                    // and the depth rectangle in the flow constants.
+                    parameters.use_game_motion = guide->output_x | (guide->output_y << 16U);
+                    parameters.game_motion_padding = guide->output_width | (guide->output_height << 16U);
+                    parameters.flow_width = guide->depth_x;
+                    parameters.flow_height = guide->depth_y;
+                    parameters.flow_block_size = guide->depth_width | (guide->depth_height << 16U);
+                    parameters.synthesis_flags = (parameters.synthesis_flags & ~0x0CU) |
+                        (guide->depth && guide->depth_width && guide->depth_height ? 8U : 0U) |
+                        (guide->depth_inverted ? 4U : 0U);
+                }
                 parameters.game_motion_rect = {
                     static_cast<float>(guide->motion_x),
                     static_cast<float>(guide->motion_y),
@@ -2922,8 +3000,14 @@ struct D3D12FrameSynthesizer::Impl {
 
         // As the other paths: the span ends before the current copy.
         end_timing_span(slot);
-        std::array<D3D12_RESOURCE_BARRIER, 5> after{};
+        std::array<D3D12_RESOURCE_BARRIER, 7> after{};
         UINT after_count = 0;
+        for (UINT eye = 0; eye < guides->eye_count; ++eye) {
+            if (depth_read(eye)) {
+                after[after_count++] = transition_barrier(guides->eyes[eye]->depth.Get(),
+                    kShaderReadState, guides->eyes[eye]->depth_resource_state);
+            }
+        }
         after[after_count++] = transition_barrier(previous_resource,
             kShaderReadState, D3D12_RESOURCE_STATE_COMMON);
         after[after_count++] = transition_barrier(current_resource,
@@ -4621,7 +4705,9 @@ struct D3D12FrameSynthesizer::Impl {
         const auto usable_fraction = [](float fraction) noexcept {
             return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
         };
-        synthetic_fraction = usable_fraction(interpolation_fraction);
+        synthetic_fraction = nvidia_options.extrapolate
+            ? std::clamp(interpolation_fraction, 1.0F, 3.0F)
+            : usable_fraction(interpolation_fraction);
         extra_synthetic_destination.reset();
         if (output_ticket == nullptr) {
             return E_POINTER;

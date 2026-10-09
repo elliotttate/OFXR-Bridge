@@ -217,14 +217,19 @@ void replay_held_out(const std::filesystem::path& directory) {
     // XRFG_TEST_REPLAY_FIRST picks the first of the three frames (0).
     const int first = std::getenv("XRFG_TEST_REPLAY_FIRST") ? std::atoi(std::getenv("XRFG_TEST_REPLAY_FIRST")) : 0;
     const auto frame_dir = [&](int i) { return directory / ("frame" + std::to_string(first + i)); };
+    // XRFG_TEST_REPLAY_EXTRAPOLATE=1 predicts frame 2 from frames 0 and 1
+    // instead: B is then frame 1, with its own vectors, and frame 2 the
+    // truth. Below, f1 is always the truth and f2 always B.
+    const bool extrapolate = std::getenv("XRFG_TEST_REPLAY_EXTRAPOLATE") != nullptr;
+    const int b_index = extrapolate ? 1 : 2, truth_index = extrapolate ? 2 : 1;
     const ReplayFrame f0 = load_replay_frame(frame_dir(0));
-    const ReplayFrame f1 = load_replay_frame(frame_dir(1));
-    const ReplayFrame f2 = load_replay_frame(frame_dir(2));
+    const ReplayFrame f1 = load_replay_frame(frame_dir(truth_index));
+    const ReplayFrame f2 = load_replay_frame(frame_dir(b_index));
     // XRFG_TEST_REPLAY_GUIDE_SHIFT takes frame2's guides from a neighbouring
     // frame instead, to test whether colour and guides line up in time.
     const int guide_shift = std::getenv("XRFG_TEST_REPLAY_GUIDE_SHIFT")
         ? std::atoi(std::getenv("XRFG_TEST_REPLAY_GUIDE_SHIFT")) : 0;
-    const ReplayFrame f2_guides = guide_shift ? load_replay_frame(frame_dir(2 + guide_shift)) : f2;
+    const ReplayFrame f2_guides = guide_shift ? load_replay_frame(frame_dir(b_index + guide_shift)) : f2;
     const UINT width = f0.colour.width, height = f0.colour.height;
     const UINT slices = f0.colour.array_size;
     std::cout << "replay " << directory.string() << ": " << width << "x" << height << "x" << slices
@@ -239,11 +244,14 @@ void replay_held_out(const std::filesystem::path& directory) {
     // XRFG_TEST_REPLAY_VECTOR_GAIN multiplies that, to find what the vectors span.
     const float gain = std::getenv("XRFG_TEST_REPLAY_VECTOR_GAIN")
         ? float(std::atof(std::getenv("XRFG_TEST_REPLAY_VECTOR_GAIN"))) : 1.0F;
-    const float vector_scale = gain * (dt2 > 0 ? (dt1 + dt2) / dt2 : 2.0F);
+    // Extrapolating, B's vectors span exactly B to A, and the truth lies
+    // dt1 past B: 1 + dt1 / dt2 in spans from A.
+    const float vector_scale = extrapolate ? gain : gain * (dt2 > 0 ? (dt1 + dt2) / dt2 : 2.0F);
     // XRFG_TEST_REPLAY_FRACTION puts OFXR's frame elsewhere, such as at a
     // half like native generation's.
     const float fraction = std::getenv("XRFG_TEST_REPLAY_FRACTION")
         ? float(std::atof(std::getenv("XRFG_TEST_REPLAY_FRACTION")))
+        : extrapolate ? 1.0F + (dt2 > 0 ? dt1 / dt2 : 1.0F)
         : dt1 + dt2 > 0 ? dt1 / (dt1 + dt2) : 0.5F;
     std::cout << "replay frame times " << dt1 << " and " << dt2 << " ms: fraction " << fraction
               << ", vectors x" << vector_scale << '\n';
@@ -272,7 +280,7 @@ void replay_held_out(const std::filesystem::path& directory) {
                 auto found = uploaded.find(name);
                 if (found != uploaded.end()) return found->second;
                 xrfg::DumpedTexture t;
-                require(xrfg::read_dumped_texture(frame_dir(&frame == &f0 ? 0 : 2 + guide_shift) / name, &t),
+                require(xrfg::read_dumped_texture(frame_dir(&frame == &f0 ? 0 : b_index + guide_shift) / name, &t),
                         "replay: guide " + name);
                 auto r = upload_dumped(fixture, t, D3D12_RESOURCE_FLAG_NONE,
                                        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
@@ -311,8 +319,9 @@ void replay_held_out(const std::filesystem::path& directory) {
         });
         return out;
     };
-    const std::vector<float> rgb0 = rgb(f0.colour), rgb2 = rgb(f2.colour);
-    // Where the scene moved between frames 0 and 2.
+    const std::vector<float> rgb0 = rgb(extrapolate ? f1.colour : f0.colour), rgb2 = rgb(f2.colour);
+    // Where the scene moved between frames 0 and 2 (extrapolating, between
+    // B and the truth).
     std::vector<std::uint8_t> moving(std::size_t(width) * height * slices, 0);
     for (std::size_t i = 0; i < moving.size(); ++i) {
         float d = 0;
@@ -459,6 +468,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         xrfg::D3D12NvidiaPerformancePreset preset{xrfg::D3D12NvidiaPerformancePreset::medium};
         bool bidirectional{};
         bool hybrid{};
+        bool extrapolate{};
     };
     std::vector<Method> methods{
         {"OFXR+DLSS vectors", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
@@ -471,8 +481,9 @@ void replay_held_out(const std::filesystem::path& directory) {
          xrfg::D3D12OpticalFlowInputScale::half, false}};
     // XRFG_TEST_REPLAY_FLOWS lists OFXR configurations to run instead, each
     // backend/preset/scale[/bi]: vectors, hybrid (vectors and FidelityFX
-    // flow), ffx or nvidia; slow, medium or fast; full, three_quarter or
-    // half. For example nvidia/fast/full/bi.
+    // flow), extrapolate (from the game's vectors and depth, for
+    // XRFG_TEST_REPLAY_EXTRAPOLATE), ffx or nvidia; slow, medium or fast;
+    // full, three_quarter or half. For example nvidia/fast/full/bi.
     if (const char* list = std::getenv("XRFG_TEST_REPLAY_FLOWS")) {
         methods.clear();
         std::stringstream stream(list);
@@ -488,6 +499,8 @@ void replay_held_out(const std::filesystem::path& directory) {
                                                    : xrfg::D3D12OpticalFlowInputScale::half,
                      parts[0] == "vectors" || parts[0] == "hybrid"};
             m.hybrid = parts[0] == "hybrid";
+            m.extrapolate = parts[0] == "extrapolate";
+            m.guides = m.guides || m.extrapolate;
             m.preset = parts[1] == "slow"   ? xrfg::D3D12NvidiaPerformancePreset::slow
                        : parts[1] == "fast" ? xrfg::D3D12NvidiaPerformancePreset::fast
                                             : xrfg::D3D12NvidiaPerformancePreset::medium;
@@ -522,6 +535,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         options.preset = m.preset;
         options.bidirectional = m.bidirectional;
         options.hybrid = m.hybrid;
+        options.extrapolate = m.extrapolate;
         require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                     current_pointers, synthetic_pointers, f0.view_format,
                     D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options)), "replay synthesizer");
@@ -547,7 +561,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         std::stringstream stream(list);
         for (std::string item; std::getline(stream, item, ',');) native_scales.push_back(item);
     }
-    if (std::getenv("XRFG_TEST_REPLAY_VECTORS_ONLY") ||
+    if (extrapolate || std::getenv("XRFG_TEST_REPLAY_VECTORS_ONLY") ||
         (std::getenv("XRFG_TEST_REPLAY_FLOWS") && !std::getenv("XRFG_TEST_REPLAY_NATIVE_SCALES")))
         native_scales.clear();
     for (const auto& scale_text : native_scales) {

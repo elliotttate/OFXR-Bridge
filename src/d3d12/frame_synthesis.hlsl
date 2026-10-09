@@ -5,6 +5,7 @@ Texture2D<uint> FlowAuxiliary : register(t3);
 Texture2D<int2> ForwardFlow : register(t4);
 Texture2D<uint> ForwardAuxiliary : register(t5);
 Texture2DArray<float2> GameMotionVectors : register(t6);
+Texture2DArray<float> GameDepth : register(t7);
 RWTexture2D<float4> PackedColor : register(u0);
 // The NVIDIA pack is compiled twice: once for BGRA8 inputs, and once with
 // XRFG_NVIDIA_LUMA_INPUT for R8 inputs, which the engine takes as grayscale
@@ -1034,6 +1035,111 @@ float4 SynthesizeMidpointPS(FullscreenVertex input) : SV_Target {
 
 float4 SynthesizeGameMotionMidpointPS(FullscreenVertex input) : SV_Target {
     return synthesize_midpoint(input, 1.0, false, false, false, true, false);
+}
+
+// Where the content at q of B (in the target camera) was in A, as an offset:
+// the motion the head's turn does not explain.
+float2 game_displacement(float2 q) {
+    float2 raw = game_motion_for_pixel(q, Slice, ViewIndex);
+    return map_source_to_target(q + raw, PreviousMappings[ViewIndex]).coordinate - q;
+}
+
+// Extrapolation, as Application SpaceWarp does it: no frame after B is
+// waited for. B's content moves on along the game's vectors, s times the
+// span from A to B, where s is twice the packed fraction. The runtime's own
+// reprojection turns the result to the head's pose when it is shown.
+//
+// The content at a pixel is the point q of B with q = pixel + s * d(q), d
+// being q's displacement towards A. Each candidate motion - the pixel's own
+// and its neighbours' - starts a solve; among those that reach a fixed point
+// the largest motion is taken, nearer under the parallax of a moving camera
+// and usually the object in front of what it passes. Where none does, the
+// pixel is background that B's moving content uncovers, and the least-moving
+// point the solves visited, background beside it, is stretched over it.
+// Extrapolation carries the depth rectangle in the optical-flow constants
+// (x, y, width | height << 16), and the output rectangle as the hybrid does.
+// Bit 3 of the flags says depth is there, bit 2 that nearer is larger.
+bool extrapolation_depth() {
+    return (SynthesisFlags & 8u) != 0;
+}
+float game_depth(float2 q) {
+    float4 output_rect = game_motion_output_rect();
+    float2 uv = (q - output_rect.xy + 0.5) / max(output_rect.zw, float2(1.0, 1.0));
+    float2 size = float2(float(FlowBlockSize & 0xffffU), float(FlowBlockSize >> 16));
+    float2 origin = float2(float(FlowWidth), float(FlowHeight));
+    int2 texel = int2(clamp(origin + uv * size, origin, origin + size - 1.0));
+    return GameDepth.Load(int4(texel, 0, 0));
+}
+bool nearer(float a, float b) {
+    return (SynthesisFlags & 4u) != 0 ? a > b : a < b;
+}
+
+float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
+    hybrid_layout = true;
+    uint2 integer_pixel = uint2(input.position.xy);
+    float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
+    if (integer_pixel.x >= Width || integer_pixel.y >= Height || Slice >= ArraySize) {
+        return output_color;
+    }
+    float2 pixel = float2(integer_pixel);
+    CameraSample here = sample_current_target(pixel, Slice, ViewIndex);
+    output_color = saturate(here.color);
+    if (repeated_capture_flag() != 0) {
+        return output_color;
+    }
+    float s = 2.0 * synthesis_fraction();
+    bool depth = extrapolation_depth();
+    // The surface each candidate settles on is ranked by B's depth there,
+    // or without depth by its motion; the hole fill by the opposite.
+    bool found = false;
+    float best_rank = 0.0;
+    float2 best_point = pixel;
+    float fill_rank = 0.0;
+    bool filled = false;
+    float2 fill_point = pixel;
+    [loop] for (uint candidate = 0; candidate < 13; ++candidate) {
+        float2 start = pixel;
+        if (candidate > 0) {
+            uint ring = (candidate - 1) / 4;
+            float radius = ring == 0 ? 8.0 : ring == 1 ? 24.0 : 64.0;
+            uint direction = (candidate - 1) % 4;
+            float2 offset = direction == 0 ? float2(radius, 0) : direction == 1 ? float2(-radius, 0)
+                          : direction == 2 ? float2(0, radius) : float2(0, -radius);
+            start = pixel + s * game_displacement(pixel + offset);
+        }
+        float2 q = start;
+        bool converged = false;
+        float motion = 0.0;
+        float2 settled = q;
+        [unroll] for (uint step = 0; step < 4; ++step) {
+            float2 d = game_displacement(q);
+            motion = length(d);
+            // The farthest point visited fills a hole.
+            float rank = depth ? game_depth(q) : -motion;
+            if (!filled || (depth ? nearer(fill_rank, rank) : rank > fill_rank)) {
+                fill_rank = rank;
+                fill_point = q;
+                filled = true;
+            }
+            float2 next = pixel + s * d;
+            converged = length(next - q) < 0.5;
+            settled = q;
+            q = next;
+        }
+        if (converged) {
+            float rank = depth ? game_depth(settled) : motion;
+            if (!found || (depth ? nearer(rank, best_rank) : rank > best_rank)) {
+                best_rank = rank;
+                best_point = settled;
+                found = true;
+            }
+        }
+    }
+    CameraSample b = sample_current_target(found ? best_point : fill_point, Slice, ViewIndex);
+    if (b.valid >= 0.5) {
+        output_color = saturate(b.color);
+    }
+    return output_color;
 }
 
 // The game's vectors and FidelityFX's optical flow both: per pixel, whichever

@@ -5087,6 +5087,145 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorSc
     require(operation_succeeded(history->invalidate()), "occlusion history invalidate failed");
 }
 
+// Extrapolation, as Application SpaceWarp does: half a span past B, from
+// B, its vectors towards A and its depth. A striped object nearer than a
+// detailed background moves 20 pixels a frame over it while the background
+// moves 6. Where the object will have gone, the background is unknown and
+// stretched; everywhere else the frame should be the scene half a frame on.
+void test_dlss_extrapolation(D3D12WarpFixture& fixture) {
+    constexpr UINT width = 256, height = 128;
+    constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
+    constexpr int background_motion = 6, object_motion = 20;
+    const auto in_object = [&](int x, int y, int shift) {
+        const int ox = x - shift;
+        return y >= object_top && y < object_bottom && ox >= object_left && ox < object_left + object_width;
+    };
+    const auto make_scene = [&](int background_shift, int object_shift) {
+        StereoPattern pattern;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto& bytes = pattern[eye];
+            bytes.resize(static_cast<std::size_t>(width) * height * kBytesPerPixel);
+            for (UINT y = 0; y < height; ++y) {
+                for (UINT x = 0; x < width; ++x) {
+                    const int ox = static_cast<int>(x) - object_shift;
+                    const int bx = static_cast<int>(x) - background_shift + 64;
+                    const RgbaBytes color = in_object(static_cast<int>(x), static_cast<int>(y), object_shift)
+                        ? ((ox / 5) % 2 ? RgbaBytes{240, 210, 40, 255} : RgbaBytes{30, 60, 200, 255})
+                        : RgbaBytes{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
+                                    static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
+                                    static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
+                    std::copy(color.begin(), color.end(), bytes.begin() +
+                        (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
+                }
+            }
+        }
+        return pattern;
+    };
+    const StereoPattern previous = make_scene(0, 0);
+    const StereoPattern current = make_scene(background_motion, object_motion);
+    const StereoPattern expected = make_scene(background_motion * 3 / 2, object_motion * 3 / 2);
+    auto game_motion = create_and_upload_game_motion_field(
+        fixture, width, height, [&](UINT, UINT x, UINT y) {
+            return std::array<float, 2>{static_cast<float>(
+                -(in_object(static_cast<int>(x), static_cast<int>(y), object_motion) ? object_motion
+                                                                                    : background_motion)), 0.0F};
+        });
+    // Reversed depth: the object is nearer, so larger.
+    static int depth_object_motion;
+    depth_object_motion = object_motion;
+    auto depth = create_native_test_depth(fixture, width, height, [](UINT, UINT x, UINT y) {
+        const int ox = static_cast<int>(x) - depth_object_motion;
+        return static_cast<int>(y) >= 32 && static_cast<int>(y) < 96 && ox >= 72 && ox < 152 ? 0.9F : 0.1F;
+    });
+    std::array<ComPtr<ID3D12Resource>, 2> sources{
+        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 2> current_destinations{
+        create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
+    std::array<ComPtr<ID3D12Resource>, 1> synthetic_destinations{create_source_texture(fixture, width, height)};
+    upload_pattern(fixture, sources[0].Get(), previous);
+    upload_pattern(fixture, sources[1].Get(), current);
+    std::array<ID3D12Resource*, 2> source_pointers{sources[0].Get(), sources[1].Get()};
+    std::array<ID3D12Resource*, 2> current_pointers{current_destinations[0].Get(), current_destinations[1].Get()};
+    std::array<ID3D12Resource*, 1> synthetic_pointers{synthetic_destinations[0].Get()};
+    auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+    require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(), source_pointers,
+                D3D12_RESOURCE_STATE_RENDER_TARGET)), "extrapolation history initialization failed");
+    xrfg::D3D12FrameSynthesizer synthesizer;
+    xrfg::D3D12NvidiaOpticalFlowOptions options;
+    options.extrapolate = true;
+    require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
+                current_pointers, synthetic_pointers, kFormat, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                xrfg::D3D12OpticalFlowBackend::fidelity_fx, options)),
+        "extrapolation synthesizer initialization failed");
+    const auto guides = [&](std::uint64_t serial) {
+        auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+        set->eye_count = kEyeCount;
+        for (UINT eye = 0; eye < kEyeCount; ++eye) {
+            auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+            f->stream = 411 + eye;
+            f->epoch = 4;
+            f->serial = serial;
+            f->previous_serial = serial - 1;
+            f->motion_vectors = game_motion;
+            f->depth = depth;
+            f->producer_queue = fixture.queue();
+            f->output_width = f->motion_width = f->depth_width = width;
+            f->output_height = f->motion_height = f->depth_height = height;
+            f->motion_slice = f->output_slice = eye;
+            f->depth_inverted = true;
+            f->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            f->depth_resource_state = D3D12_RESOURCE_STATE_COMMON;
+            set->eyes[eye] = f;
+        }
+        return set;
+    };
+    const ReprojectionViews views = make_reprojection_views();
+    xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
+    require(operation_succeeded(history->capture(0, &capture_a)) &&
+                operation_succeeded(history->commit(capture_a)), "extrapolation capture A failed");
+    xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+    require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
+        "extrapolation prime failed");
+    require_frame_start_gate(synthesizer, "extrapolation frame-start gate");
+    require(operation_succeeded(history->capture(1, &capture_b)) &&
+                operation_succeeded(history->commit(capture_b)), "extrapolation capture B failed");
+    require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
+                std::nullopt, guides(2), false, 1.5F)), "extrapolation pair failed");
+    fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+    const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[0].Get(),
+        D3D12_RESOURCE_STATE_RENDER_TARGET);
+    // Where the object's band is, away from the strip it uncovers.
+    const int uncovered_left = object_left + object_motion, uncovered_right = object_left + object_motion * 3 / 2;
+    for (UINT eye = 0; eye < kEyeCount; ++eye) {
+        double error = 0, repeat = 0, uncovered = 0;
+        std::size_t count = 0, uncovered_count = 0;
+        for (int y = object_top + 2; y < object_bottom - 2; ++y) {
+            for (int x = 8; x < static_cast<int>(width) - 8; ++x) {
+                const std::size_t offset = (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
+                const bool hole = x >= uncovered_left - 1 && x < uncovered_right + 1;
+                for (UINT c = 0; c < 3; ++c) {
+                    const int e = std::abs(int(actual[eye][offset + c]) - int(expected[eye][offset + c]));
+                    if (hole) {
+                        uncovered += e;
+                        ++uncovered_count;
+                        continue;
+                    }
+                    error += e;
+                    repeat += std::abs(int(current[eye][offset + c]) - int(expected[eye][offset + c]));
+                    ++count;
+                }
+            }
+        }
+        std::cout << "extrapolation eye=" << eye << " mae=" << error / double(count)
+                  << " repeat_mae=" << repeat / double(count)
+                  << " uncovered_mae=" << uncovered / double(uncovered_count) << '\n';
+        require(error / double(count) < 2.0 && error < repeat * 0.1,
+            "extrapolation did not move the scene on for eye " + std::to_string(eye));
+    }
+    require(operation_succeeded(synthesizer.wait_for_idle()), "extrapolation final drain failed");
+    require(operation_succeeded(history->invalidate()), "extrapolation history invalidate failed");
+}
+
 void test_rotation_aware_synthesis_beats_uncompensated_flow(
     D3D12WarpFixture& fixture,
     xrfg::D3D12OpticalFlowBackend backend =
@@ -6168,6 +6307,7 @@ int main() {
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::occlusion, true);
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::overlay, true);
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::fade, true);
+        test_dlss_extrapolation(fixture);
         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);
         test_submission_backpressure_and_recovery(
             fixture,
