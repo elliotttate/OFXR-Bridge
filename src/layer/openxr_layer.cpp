@@ -2173,6 +2173,11 @@ struct SwapchainState {
     std::vector<VkImage> enumerated_vulkan_images;
     std::optional<xrfg::D3D12HistoryCaptureTicket> last_released_capture;
     std::shared_ptr<const xrfg::DlssMotionVectorSet> last_released_motion_vectors;
+    // Which eye of a two-view projection this swapchain was last submitted
+    // as, when it holds that eye alone (a game with a swapchain per eye): 0
+    // left, 1 right, -1 otherwise. It picks the eye's own DLSS evaluation
+    // (resolve_dlss_motion_vectors). Written at the application's xrEndFrame.
+    std::atomic<int> projection_eye{-1};
     // SessionState::capture_at_end_frame: the image the application released
     // since its last xrEndFrame, whose history capture is still to be queued.
     // Set at the release in place of the capture, consumed at the top of the
@@ -6938,7 +6943,8 @@ XrResult layer_release_swapchain_image_impl(
             if (*candidate_index < state->enumerated_d3d12_images.size()) {
                 pending_motion_vectors = xrfg::resolve_dlss_motion_vectors(
                     state->enumerated_d3d12_images[*candidate_index].Get(),
-                    state->session->d3d12_queue.Get());
+                    state->session->d3d12_queue.Get(),
+                    state->projection_eye.load(std::memory_order_relaxed));
             }
         }
         xrfg::D3D12HistoryCaptureTicket ticket{};
@@ -7111,7 +7117,8 @@ void capture_pending_end_frame_images(
                     if (*index < state->enumerated_d3d12_images.size()) {
                         motion_vectors = xrfg::resolve_dlss_motion_vectors(
                             state->enumerated_d3d12_images[*index].Get(),
-                            session->d3d12_queue.Get());
+                            session->d3d12_queue.Get(),
+                            state->projection_eye.load(std::memory_order_relaxed));
                     }
                 }
                 capture_result = history->capture(*index, &ticket);
@@ -10185,6 +10192,46 @@ enqueue_presenter_submission(
            right.imageRect.offset.y < left_bottom;
 }
 
+// Records, for each swapchain that holds one eye of a two-view projection
+// alone, which eye it is (SwapchainState::projection_eye).
+void note_projection_eyes(
+    const ProjectionSnapshot& snapshot,
+    const ProjectionMappingResult& mappings) noexcept {
+    try {
+        if (mappings.reason != ProjectionMappingReason::ready) {
+            return;
+        }
+        for (const ProjectionResourceMapping& mapping : mappings.mappings) {
+            const auto swapchain = find_swapchain(mapping.application_swapchain);
+            if (!swapchain) {
+                continue;
+            }
+            int eye = -1;
+            if (mapping.views.size() == 1 && swapchain->create_info.arraySize == 1) {
+                const ProjectionViewReference& view = mapping.views.front();
+                if (view.projection_index < snapshot.layers.size() &&
+                    snapshot.layers[view.projection_index].views.size() == 2 &&
+                    view.view_index < 2) {
+                    eye = static_cast<int>(view.view_index);
+                }
+            }
+            const int previous =
+                swapchain->projection_eye.exchange(eye, std::memory_order_relaxed);
+            if (previous != eye) {
+                // 750: a swapchain's eye, a the swapchain, b the eye + 1 (0
+                // when it holds both or none), c the eye before + 1.
+                xrfg::bridge_flight_logger().event(
+                    xrfg::BridgeFlightOperation::presenter_transition,
+                    750,
+                    handle_value(mapping.application_swapchain),
+                    static_cast<std::uint64_t>(eye + 1),
+                    static_cast<std::uint64_t>(previous + 1));
+            }
+        }
+    } catch (...) {
+    }
+}
+
 [[nodiscard]] ProjectionMappingResult
 build_projection_resource_mappings(const ProjectionSnapshot& snapshot) noexcept {
     ProjectionMappingResult output{};
@@ -12516,6 +12563,7 @@ XrResult layer_end_frame_impl(
     if (has_projection) {
         resource_mappings = build_projection_resource_mappings(current_snapshot);
         log_projection_view_rects(*state, current_snapshot);
+        note_projection_eyes(current_snapshot, resource_mappings);
     } else {
         resource_mappings.reason = ProjectionMappingReason::no_projection_views;
     }

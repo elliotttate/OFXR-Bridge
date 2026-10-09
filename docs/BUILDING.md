@@ -774,6 +774,35 @@ repeated stamps and the rate halved part way (`XRFG_TEST_REPEAT_STAMP_EVERY`,
 `XRFG_TEST_THROTTLE_AFTER_WAITS`), that every pair is placed at the
 midpoint.
 
+#### DLSS vectors for a swapchain per eye
+
+`resolve_dlss_motion_vectors` matches the game's DLSS evaluations to the image
+being captured: both eyes' evaluations for an array image or a double-wide
+UEVR one, and for a single image the evaluation whose output has its size. A
+game with a swapchain per eye, each the size of its eye's DLSS output,
+matched both eyes' evaluations, and the newest went to both images. At a
+release-time capture that can be right (the eye just rendered), but the
+capture at xrEndFrame (`capture_at_end_frame=1`, the default for native
+D3D12 games) comes after both eyes, so one eye always took the other's
+vectors. Synthesis then followed the wrong eye's motion and composed the
+mismatch as a blend: a double image of the generated frames in OFXR's
+vectors mode, and wrong guides for native DLSS FG, while the hybrid, which
+falls back to FidelityFX flow per pixel where the vectors do not explain the
+frames, looked right - what users of MSFS 2024 and CONTROL Resonant reported.
+
+Now an evaluation whose output is the image itself belongs to it.
+Otherwise, for an image the layer has seen submitted as one eye of a
+two-view projection (`note_projection_eyes`, flight record
+`presenter_transition` 750: a the swapchain, b the eye + 1), that eye takes
+its own evaluation: of two streams, by where their inputs sit and then by
+which was seen first, as for array images; of a game's single stream
+alternating eyes, the odd serial for the left eye as for alternating-eye
+renderers, never the previous frame's. `xrfg_d3d12_history_tests` checks
+both and the direct match (and fails without the change), and
+`xrfg_layer_projection_eyes` checks that a swapchain per eye is named its
+eye and a double-wide one none (`XRFG_TEST_SPLIT_EYE_ONE_LAYER` makes the
+call chain's split-eye run submit both views in one projection layer).
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:

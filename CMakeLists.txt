@@ -1117,6 +1117,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(xrfg_layer_nvidia_fallback PROPERTIES TIMEOUT 60)
 
         add_test(
+            NAME xrfg_layer_projection_eyes
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/projection-eyes"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_projection_eyes.cmake")
+
+        add_test(
             NAME xrfg_layer_flight_logging
             COMMAND "${CMAKE_COMMAND}"
                 "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"

@@ -2754,6 +2754,100 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
     require(operation_succeeded(history->invalidate()), "motion history invalidate failed");
 }
 
+// A game with a swapchain per eye, each the size of its eye's DLSS output:
+// each eye's image takes its own eye's evaluation, whichever ran last. With
+// the capture at xrEndFrame both eyes have evaluated by then, and the newest
+// alone went to both, so one eye followed the other's motion.
+void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+    constexpr UINT width = 64;
+    constexpr UINT height = 32;
+    const auto create_texture = [&](UINT texture_width, UINT texture_height) {
+        D3D12_RESOURCE_DESC description =
+            stereo_texture_description(texture_width, texture_height);
+        description.DepthOrArraySize = 1;
+        description.Flags = D3D12_RESOURCE_FLAG_NONE;
+        const D3D12_HEAP_PROPERTIES properties = heap_properties(D3D12_HEAP_TYPE_DEFAULT);
+        ComPtr<ID3D12Resource> texture;
+        require_hresult(fixture.device()->CreateCommittedResource(
+            &properties, D3D12_HEAP_FLAG_NONE, &description,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(texture.GetAddressOf())),
+            "create per-eye DLSS texture");
+        return texture;
+    };
+    const auto left_output = create_texture(width, height);
+    const auto right_output = create_texture(width, height);
+    const auto motion = create_texture(width / 2, height / 2);
+    const auto left_xr = create_texture(width, height);
+    const auto right_xr = create_texture(width, height);
+    const auto publish = [&](std::uint64_t stream, ID3D12Resource* eye_output) {
+        fixture.execute_and_wait([&](ID3D12GraphicsCommandList* command_list) {
+            xrfg::publish_dlss_motion_vectors({
+                stream, eye_output, motion.Get(), fixture.queue(), 0, 0, width, height,
+                0, 0, width / 2, height / 2, 1.0F, 1.0F, 0.0F, 0.0F,
+                D3D12_RESOURCE_STATE_COMMON, false, false, command_list});
+        });
+    };
+
+    // A DLSS feature per eye, both evaluated before the capture.
+    for (int frame = 0; frame < 2; ++frame) {
+        publish(611, left_output.Get());
+        publish(622, right_output.Get());
+    }
+    const auto left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    const auto right = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(left && right && left->eye_count == 1 && right->eye_count == 1 &&
+            left->eyes[0]->stream == 611 && right->eyes[0]->stream == 622 &&
+            left->eyes[0]->serial == 2 && right->eyes[0]->serial == 2,
+        "per-eye swapchains did not each take their own eye's DLSS evaluation");
+    // The right eye evaluated first this frame: the eyes stay put.
+    publish(622, right_output.Get());
+    publish(611, left_output.Get());
+    const auto left_again = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    const auto right_again = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(left_again && right_again && left_again->eyes[0]->stream == 611 &&
+            right_again->eyes[0]->stream == 622 && left_again->eyes[0]->serial == 3 &&
+            right_again->eyes[0]->serial == 3,
+        "per-eye swapchains swapped eyes with this frame's evaluation order");
+    // Without the eye, the newest as before.
+    const auto unknown = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue());
+    require(unknown && unknown->eyes[0]->stream == 611,
+        "an image of unknown eye no longer took the newest evaluation");
+    // An evaluation written straight into the image is that image's.
+    publish(611, left_xr.Get());
+    publish(622, right_output.Get());
+    const auto direct = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 1);
+    require(direct && direct->eyes[0]->stream == 611 && direct->eyes[0]->serial == 4,
+        "an evaluation whose output is the image did not go to that image");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(611);
+    xrfg::retire_dlss_motion_vector_stream(622);
+    xrfg::configure_dlss_motion_vector_tracking(true);
+
+    // One DLSS feature for both eyes, evaluated left then right: each eye
+    // sees every other serial.
+    publish(633, left_output.Get());
+    const auto first_left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    require(first_left && first_left->eyes[0]->serial == 1,
+        "the left eye did not take the first evaluation of one shared stream");
+    publish(633, right_output.Get());
+    publish(633, left_output.Get());
+    const auto half = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(!half, "the right eye took the previous frame's evaluation of a shared stream");
+    publish(633, right_output.Get());
+    const auto shared_left = xrfg::resolve_dlss_motion_vectors(left_xr.Get(), fixture.queue(), 0);
+    const auto shared_right = xrfg::resolve_dlss_motion_vectors(right_xr.Get(), fixture.queue(), 1);
+    require(shared_left && shared_right && shared_left->eyes[0]->serial == 3 &&
+            shared_right->eyes[0]->serial == 4 &&
+            shared_left->eyes[0]->previous_serial == 1 &&
+            shared_right->eyes[0]->previous_serial == 2,
+        "one shared DLSS stream did not give each eye its own evaluation");
+    xrfg::configure_dlss_motion_vector_tracking(false);
+    xrfg::retire_dlss_motion_vector_stream(633);
+}
+
 void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(true);
     constexpr UINT width = 64;
@@ -6315,6 +6409,7 @@ int main() {
         test_double_wide_single_slice_views(fixture);
         test_stereo_motion_synthesis_beats_same_pixel_blend(fixture);
         test_dlss_motion_vector_stereo_stream_pairing(fixture);
+        test_dlss_motion_vector_per_eye_swapchains(fixture);
         test_dlss_guide_snapshots_copy_only_the_read_region(fixture);
         test_dlss_motion_vector_gpu_ingress(fixture);
         test_dlss_motion_vector_side_by_side(fixture);

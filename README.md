@@ -374,6 +374,21 @@ OpenXR session, and extrapolation wins if both are set.
   without the deeper pipeline, 0.0211 against 0.0311 at 3X and 0.0126
   against 0.0205 extrapolating; in Hubris 0.0010 against 0.0124. Details in
   [BUILDING.md](docs/BUILDING.md).
+- **Each eye gets its own DLSS vectors in games with a swapchain per eye.**
+  The game's DLSS vectors are matched to the image they belong to by size,
+  and a game that submits each eye from its own swapchain - each the size of
+  its eye's DLSS output - matched both eyes' evaluations. The newest went to
+  both; with the capture at xrEndFrame (the default for D3D12 games), that
+  is the eye DLSS ran last, every frame, so the other eye's generated frames
+  followed its motion: a double image of the generated frames, in OFXR's
+  vectors mode and native DLSS FG alike, but not in the DLSS vectors +
+  FidelityFX hybrid, which falls back to flow where the vectors do not fit
+  (reported on Virtual Desktop in MSFS 2024 and CONTROL Resonant). An
+  evaluation written straight into the image is now that image's; otherwise
+  the eye the swapchain is submitted as takes its own evaluation, in the
+  order the stereo path already gives two. Galactic Racer and Hubris submit
+  both eyes from one image and were never affected. The flight log names
+  each per-eye swapchain's eye (`presenter_transition` 750).
 - **The game is promised the time its frame is shown.** The display time a
   game is handed at xrWaitFrame assumed its frame would go down within a
   display period; a game rendering at half the display rate takes most of

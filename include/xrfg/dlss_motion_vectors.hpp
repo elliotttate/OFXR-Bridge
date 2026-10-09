@@ -146,9 +146,13 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept;
 // completed. A live disable intentionally retains them until this safe point.
 void retire_disabled_dlss_motion_vector_resources() noexcept;
 void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept;
+// eye: for an image that holds one eye of a two-view projection - a game with
+// a swapchain per eye - which eye it is (0 left, 1 right), or -1 when unknown
+// or when the image holds both.
 std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     ID3D12Resource* output,
-    ID3D12CommandQueue* consumer_queue) noexcept;
+    ID3D12CommandQueue* consumer_queue,
+    int eye = -1) noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
 DlssMotionVectorStatistics dlss_motion_vector_statistics() noexcept;

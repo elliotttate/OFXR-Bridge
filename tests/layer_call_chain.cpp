@@ -2567,6 +2567,14 @@ int main(int argc, char** argv) {
             eye_projections[index].viewCount = 1;
             eye_projections[index].views = &projection_views[index];
         }
+        // XRFG_TEST_SPLIT_EYE_ONE_LAYER: one projection layer holding both
+        // views, each on its own swapchain, as games with a swapchain per eye
+        // submit them (layer_projection_eyes.cmake).
+        const bool one_layer = std::getenv("XRFG_TEST_SPLIT_EYE_ONE_LAYER") != nullptr;
+        if (one_layer) {
+            eye_projections[0].viewCount = 2;
+            eye_projections[0].views = projection_views.data();
+        }
 
         XrCompositionLayerQuad passthrough_quad{XR_TYPE_COMPOSITION_LAYER_QUAD};
         passthrough_quad.space = g_space;
@@ -2579,13 +2587,22 @@ int main(int argc, char** argv) {
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(
                 &passthrough_quad);
         g_expected_passthrough_layer = passthrough_base;
-        const XrCompositionLayerBaseHeader* layers[] = {
+        const XrCompositionLayerBaseHeader* all_layers[] = {
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(
                 &eye_projections[0]),
             reinterpret_cast<const XrCompositionLayerBaseHeader*>(
                 &eye_projections[1]),
             passthrough_base,
         };
+        const XrCompositionLayerBaseHeader* one_layer_layers[] = {
+            all_layers[0],
+            passthrough_base,
+        };
+        const XrCompositionLayerBaseHeader* const* layers =
+            one_layer ? one_layer_layers : all_layers;
+        const std::uint32_t layer_count = one_layer
+            ? static_cast<std::uint32_t>(std::size(one_layer_layers))
+            : static_cast<std::uint32_t>(std::size(all_layers));
 
         auto submit_frame = [&](XrTime display_time) {
             XrViewLocateInfo locate_info{XR_TYPE_VIEW_LOCATE_INFO};
@@ -2616,8 +2633,7 @@ int main(int argc, char** argv) {
             frame_end_info.displayTime = display_time;
             frame_end_info.environmentBlendMode =
                 XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-            frame_end_info.layerCount =
-                static_cast<std::uint32_t>(std::size(layers));
+            frame_end_info.layerCount = layer_count;
             frame_end_info.layers = layers;
             return XR_SUCCEEDED(end_frame(session, &frame_end_info));
         };
@@ -2727,10 +2743,10 @@ int main(int argc, char** argv) {
             end_records.size() == 4 &&
             // The first frame arms and passes through, the second primes, and
             // the pair is the third.
-            record_matches(0, 100, SubmittedTarget::original, 100, 3, true, 2) &&
-            record_matches(1, 200, SubmittedTarget::current, 200, 3, true, 2) &&
-            record_matches(2, 300, SubmittedTarget::synthetic, 300, 3, true, 2) &&
-            record_matches(3, 400, SubmittedTarget::current, 300, 3, true, 2) &&
+            record_matches(0, 100, SubmittedTarget::original, 100, layer_count, true, layer_count - 1) &&
+            record_matches(1, 200, SubmittedTarget::current, 200, layer_count, true, layer_count - 1) &&
+            record_matches(2, 300, SubmittedTarget::synthetic, 300, layer_count, true, layer_count - 1) &&
+            record_matches(3, 400, SubmittedTarget::current, 300, layer_count, true, layer_count - 1) &&
             g_wait_frame_calls.load(std::memory_order_relaxed) == 4 &&
             g_begin_frame_calls.load(std::memory_order_relaxed) == 4 &&
             g_end_frame_calls.load(std::memory_order_relaxed) == 4 &&
