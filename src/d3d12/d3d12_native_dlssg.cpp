@@ -16,6 +16,7 @@
 #ifdef XRFG_NATIVE_DLSSG
 #include "native_dlssg_pack_shader.hpp"
 #include "native_dlssg_pixel_shader.hpp"
+#include "native_dlssg_seed_shader.hpp"
 #include "native_dlssg_vertex_shader.hpp"
 #include <DirectXMath.h>
 // SDK 310.6 and later split the D3D helpers out and deprecate the old name.
@@ -57,15 +58,18 @@ constexpr UINT kCreateRetryPairs = 120;
 // the other unless its motion crosses half the seam.
 constexpr UINT kSeam = 64;
 // Root constants per dispatch or draw.
-constexpr UINT kParams = 46;
+constexpr UINT kParams = 42;
+// The motion and depth rectangle a reset evaluation reads.
+constexpr UINT kResetGuideSize = 64;
+// SeedNativeDlssG's group width; its groups are 8 high, like the pack's.
+constexpr UINT kSeedGroupWidth = 16;
 
 struct Params {
     UINT extent[2], color_slice, guide_slice;
     float output_rect[4], motion_rect[4], depth_rect[4];
     float motion_scale[2], jitter_delta[2], rotation[4];
     float source_tangents[4], target_tangents[4];
-    UINT motion_slice, reversed_depth, pack_previous, encode_srgb;
-    float depth_convention[4];
+    UINT motion_slice, encode_srgb, padding[2];
     UINT eye_x, cell_x, cell_width, cell_height;
     float motion_normal[2];
 };
@@ -393,7 +397,7 @@ struct D3D12NativeDlssG::Impl {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<ID3D12RootSignature> root;
-    ComPtr<ID3D12PipelineState> pack, compose;
+    ComPtr<ID3D12PipelineState> pack, seed, compose;
     std::array<ComPtr<ID3D12DescriptorHeap>, kSlots> heaps;
     std::array<ComPtr<ID3D12DescriptorHeap>, kSlots> rtvs;
     std::array<std::array<Block, 2 * kBlocksPerEye>, kSlots> blocks;
@@ -579,6 +583,11 @@ struct D3D12NativeDlssG::Impl {
         if (FAILED(hr)) {
             return hr;
         }
+        cs.CS = {g_xrfg_native_dlssg_seed_shader, sizeof(g_xrfg_native_dlssg_seed_shader)};
+        hr = device->CreateComputePipelineState(&cs, IID_PPV_ARGS(&seed));
+        if (FAILED(hr)) {
+            return hr;
+        }
         D3D12_GRAPHICS_PIPELINE_STATE_DESC ps{};
         ps.pRootSignature = root.Get();
         ps.VS = {g_xrfg_native_dlssg_vertex_shader, sizeof(g_xrfg_native_dlssg_vertex_shader)};
@@ -687,11 +696,7 @@ struct D3D12NativeDlssG::Impl {
         p.color_slice = slice(view, view_index, views, source.DepthOrArraySize);
         p.guide_slice = g.depth->GetDesc().DepthOrArraySize == 1 ? 0 : g.output_slice;
         p.motion_slice = g.motion_slice;
-        p.reversed_depth = g.depth_inverted;
         p.encode_srgb = encode_srgb;
-        p.depth_convention[0] = g.camera_near;
-        p.depth_convention[1] = g.camera_far;
-        p.depth_convention[2] = g.depth_infinite ? 1.0F : 0.0F;
         p.output_rect[0] = float(r.offset_x);
         p.output_rect[1] = float(r.offset_y);
         p.output_rect[2] = float(r.width);
@@ -719,9 +724,9 @@ struct D3D12NativeDlssG::Impl {
     }
     // The eyes of a feature pack disjoint cells, so no barrier separates
     // their dispatches. NGX reads the inputs as non-pixel shader resources.
-    void begin_pack(Transitions &t, Feature &f) {
+    void begin_pack(Transitions &t, Feature &f, bool colour_only = false) {
         for (auto *r : {f.color.Get(), f.motion.Get(), f.depth.Get()}) {
-            t.to(r, kCommon, kWrite);
+            if (!colour_only || r == f.color.Get()) t.to(r, kCommon, kWrite);
         }
     }
     void end_pack(Transitions &t, Feature &f) {
@@ -729,21 +734,25 @@ struct D3D12NativeDlssG::Impl {
             t.to(r, kCommon, kRead);
         }
     }
+    // A seed writes only the aligned colour and reads no guides.
     void pack_input(ID3D12GraphicsCommandList *list, Transitions &t, UINT slot, UINT base,
                     Feature &f, ID3D12Resource *color, const DlssMotionVectorFrame &g,
-                    const Params &p, ID3D12Resource *fallback) {
+                    const Params &p, ID3D12Resource *fallback, bool seeding = false) {
         descriptors(slot, base, f, color, g, 0, fallback);
-        t.to(g.motion_vectors.Get(), g.resource_state, kRead);
-        t.to(g.depth.Get(), g.depth_resource_state, kRead);
+        if (!seeding) {
+            t.to(g.motion_vectors.Get(), g.resource_state, kRead);
+            t.to(g.depth.Get(), g.depth_resource_state, kRead);
+        }
         t.flush();
         ID3D12DescriptorHeap *hh[]{heaps[slot].Get()};
         list->SetDescriptorHeaps(1, hh);
         list->SetComputeRootSignature(root.Get());
-        list->SetPipelineState(pack.Get());
+        list->SetPipelineState(seeding ? seed.Get() : pack.Get());
         list->SetComputeRootDescriptorTable(0, gpu(slot, base));
         list->SetComputeRootDescriptorTable(1, gpu(slot, base + 6));
         list->SetComputeRoot32BitConstants(2, kParams, &p, 0);
-        list->Dispatch((p.cell_width + 7) / 8, (p.cell_height + 7) / 8, 1);
+        const UINT width = seeding ? kSeedGroupWidth : 8;
+        list->Dispatch((p.cell_width + width - 1) / width, (p.cell_height + 7) / 8, 1);
     }
     // One evaluation covers every eye of the feature. The camera describes
     // the first of them; motion carries everything else.
@@ -808,6 +817,13 @@ struct D3D12NativeDlssG::Impl {
         o.multiFrameCount = count;
         o.multiFrameIndex = index;
         o.mvecsSubrectSize = o.depthSubrectSize = o.backbufferSubrectSize = {e.width, e.height};
+        // A reset's output is the same whatever motion and depth it gets, so
+        // the seed packs only colour and NGX reads a token rectangle of them.
+        // The colour must still cover the whole feature.
+        if (reset) {
+            o.mvecsSubrectSize = o.depthSubrectSize = {std::min(e.width, kResetGuideSize),
+                                                       std::min(e.height, kResetGuideSize)};
+        }
         const auto result = NGX_D3D12_EVALUATE_DLSSG(list, e.handle, e.params, &in, &o);
         if (NVSDK_NGX_FAILED(result)) {
             report("evaluate failed", unsigned(result));
@@ -1150,14 +1166,14 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
             // A reset clears the whole feature's history, so a reseed packs the
             // aligned A of every eye in it.
             if (reseed) {
-                p.begin_pack(t, feature);
+                p.begin_pack(t, feature, true);
                 Params first_params{};
                 for (UINT i = first; i <= last; ++i) {
                     const auto &ga = *ag->eyes[guide_index(i)];
                     auto pa = p.parameters(av[i], ga, i, UINT(av.size()));
                     set_mapping(pa, i);
-                    pa.pack_previous = 1;
-                    p.pack_input(list, t, slot, i * kBlocksPerEye * kBlock, feature, a, ga, pa, b);
+                    p.pack_input(list, t, slot, i * kBlocksPerEye * kBlock, feature, a, ga, pa, b,
+                                 true);
                     if (i == first) {
                         first_params = pa;
                     }

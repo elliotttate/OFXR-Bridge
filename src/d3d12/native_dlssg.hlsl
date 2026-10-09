@@ -21,10 +21,8 @@ cbuffer Params : register(b0) {
     float4 SourceTangents;
     float4 TargetTangents;
     uint MotionSlice;
-    uint ReversedDepth;
-    uint PackPrevious;
     uint EncodeSrgb;
-    float4 DepthConvention; // near, far, infinite, unused
+    uint2 Padding; // keeps MotionNormal on a 16-byte boundary
     // Where this eye sits in the feature's private textures, and the cell of
     // them this dispatch writes: the eye plus its share of any seam beside it.
     uint EyeX;
@@ -70,29 +68,42 @@ float4 sample_color(float2 coordinate) {
                 f.y);
 }
 
-[numthreads(8, 8, 1)] void PackNativeDlssG(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= CellWidth || id.y >= CellHeight) {
+// Both eyes can share one feature, side by side. Pixels of the cell outside
+// the eye - the seam between eyes, or rows below a shorter eye - repeat the
+// eye's nearest edge, so NGX sees each eye as if alone.
+bool pack_cell(uint3 id, out uint2 cell, out uint2 p) {
+    cell = uint2(CellX + id.x, id.y);
+    p = uint2(clamp(int2(cell) - int2(EyeX, 0), int2(0, 0), int2(Extent) - 1));
+    return id.x < CellWidth && id.y < CellHeight;
+}
+
+// Reseeds the feature with A aligned into B's camera. A reset evaluation reads
+// only colour - NGX's output does not change whatever motion and depth it is
+// given - so the seed writes neither. Its rotated bilinear reads measure
+// faster in wider groups than B's pack does.
+[numthreads(16, 8, 1)] void SeedNativeDlssG(uint3 id : SV_DispatchThreadID) {
+    uint2 cell, p;
+    if (!pack_cell(id, cell, p)) {
         return;
     }
-    // Both eyes can share one feature, side by side. Pixels of the cell
-    // outside the eye - the seam between eyes, or rows below a shorter eye -
-    // repeat the eye's nearest edge, so NGX sees each eye as if alone.
-    uint2 cell = uint2(CellX + id.x, id.y);
-    uint2 p = uint2(clamp(int2(cell) - int2(EyeX, 0), int2(0, 0), int2(Extent) - 1));
     float2 uv = (float2(p) + 0.5) / float2(Extent);
     float3 ray = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
                         lerp(TargetTangents.z, TargetTangents.w, uv.y), -1);
     float3 previous_ray = rotate(ray, Rotation);
     float2 previous_uv = source_uv(previous_ray, SourceTangents);
-    if (PackPrevious != 0) {
-        if (previous_ray.z >= -0.00001 || any(previous_uv < 0) || any(previous_uv > 1)) {
-            Color[cell] = display_texel(CurrentFallback.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
-            Motion[cell] = 0;
-            Depth[cell] = ReversedDepth != 0 ? 0 : 1;
-            return;
-        }
-        uv = previous_uv;
+    if (previous_ray.z >= -0.00001 || any(previous_uv < 0) || any(previous_uv > 1)) {
+        Color[cell] = display_texel(CurrentFallback.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
+    } else {
+        Color[cell] = display(sample_color(OutputRect.xy + previous_uv * float2(Extent) - 0.5));
     }
+}
+
+[numthreads(8, 8, 1)] void PackNativeDlssG(uint3 id : SV_DispatchThreadID) {
+    uint2 cell, p;
+    if (!pack_cell(id, cell, p)) {
+        return;
+    }
+    float2 uv = (float2(p) + 0.5) / float2(Extent);
     // A rotated edge can land exactly at UV 1. Fractional guide rectangles
     // also occur when the color viewport is smaller than the guide output.
     int2 depth_lo = int2(DepthRect.xy);
@@ -101,39 +112,22 @@ float4 sample_color(float2 coordinate) {
     int2 motion_hi = max(motion_lo, int2(ceil(MotionRect.xy + MotionRect.zw)) - 1);
     int2 dp = clamp(int2(DepthRect.xy + uv * DepthRect.zw), depth_lo, depth_hi);
     int2 mp = clamp(int2(MotionRect.xy + uv * MotionRect.zw), motion_lo, motion_hi);
-    float z = SourceDepth.Load(int4(dp, GuideSlice, 0));
     // NGX dilates the vectors at depth edges itself, as it does for a game's
     // own frame generation; doing it here measured no different and cost more.
     // Jitter and MV_Scale follow the bridge's existing guide contract.
     float2 mv = SourceMotion.Load(int4(mp, MotionSlice, 0));
-    if (PackPrevious != 0) {
-        Color[cell] = display(sample_color(OutputRect.xy + uv * float2(Extent) - 0.5));
-        Motion[cell] = 0; // the reset seed has no predecessor
-        float normal_z = ReversedDepth != 0 ? 1 - z : z;
-        float n = DepthConvention.x, far_plane = DepthConvention.y;
-        float linear_z =
-            DepthConvention.z != 0
-                ? n / max(1 - normal_z, 0.000001)
-                : n * far_plane / max(far_plane - normal_z * (far_plane - n), 0.000001);
-        float target_z = linear_z / max(-previous_ray.z, 0.00001);
-        float target_depth = DepthConvention.z != 0
-                                 ? 1 - n / target_z
-                                 : far_plane * (target_z - n) / (target_z * (far_plane - n));
-        Depth[cell] = saturate(ReversedDepth != 0 ? 1 - target_depth : target_depth);
-    } else {
-        Color[cell] = display_texel(SourceColor.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
-        float2 backward = mv * MotionScale + JitterDelta;
-        float2 a_uv = (float2(p) + 0.5 + backward) / float2(Extent);
-        float3 a_ray = float3(lerp(SourceTangents.x, SourceTangents.y, a_uv.x),
-                              lerp(SourceTangents.z, SourceTangents.w, a_uv.y), -1);
-        float4 inverse_rotation = float4(-Rotation.xyz, Rotation.w);
-        float3 b_ray = rotate(a_ray, inverse_rotation);
-        float2 b_uv = source_uv(b_ray, TargetTangents);
-        // As a fraction of the whole feature, which may hold both eyes.
-        Motion[cell] = (b_uv - (float2(p) + 0.5) / float2(Extent)) * float2(Extent) * MotionNormal;
-        // Dilation chooses motion, while depth remains at the original pixel.
-        Depth[cell] = SourceDepth.Load(int4(dp, GuideSlice, 0));
-    }
+    Color[cell] = display_texel(SourceColor.Load(int4(int2(OutputRect.xy) + int2(p), ColorSlice, 0)));
+    float2 backward = mv * MotionScale + JitterDelta;
+    float2 a_uv = (float2(p) + 0.5 + backward) / float2(Extent);
+    float3 a_ray = float3(lerp(SourceTangents.x, SourceTangents.y, a_uv.x),
+                          lerp(SourceTangents.z, SourceTangents.w, a_uv.y), -1);
+    float4 inverse_rotation = float4(-Rotation.xyz, Rotation.w);
+    float3 b_ray = rotate(a_ray, inverse_rotation);
+    float2 b_uv = source_uv(b_ray, TargetTangents);
+    // As a fraction of the whole feature, which may hold both eyes.
+    Motion[cell] = (b_uv - (float2(p) + 0.5) / float2(Extent)) * float2(Extent) * MotionNormal;
+    // Dilation chooses motion, while depth remains at the original pixel.
+    Depth[cell] = SourceDepth.Load(int4(dp, GuideSlice, 0));
 }
 
 struct Vertex {

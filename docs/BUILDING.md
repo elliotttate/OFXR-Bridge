@@ -134,8 +134,8 @@ native DLSS FG 4.3-5.3 ms and NVIDIA medium flow 8.1 ms. Offline at that size
 (`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
 takes 2.7 ms through the synthesizer with SDK 310.5.3, so about 2 ms of the
 live figure is the GPU shared with the game at that resolution. With 310.9.1 a
-pair there costs 1.98 ms with a still head and 2.58 ms turning (3X: 3.05 and
-3.75 ms), and a feature per eye would cost 17% more still and 11% more
+pair there costs 1.98 ms with a still head and 2.49 ms turning (3X: 3.06 and
+3.66 ms), and a feature per eye would cost 17% more still and 11% more
 turning. Live in the game's lighter hub scene, where the GPU is not saturated,
 the still-head pair measured 1.93 ms. Skipping the reseed instead is worse: a quarter pixel of
 unaligned history already triples the error of a reseeded pair on detailed
@@ -160,11 +160,16 @@ that automatically. `XRFG_NATIVE_DLSSG_SEAM` overrides the seam width for
 experiments; without a seam the eyes visibly bleed into each other.
 
 A is rotationally mapped into B's camera plane; the same mapping removes
-tracked rotation/FOV motion from engine vectors, and transforms A depth into
-that plane. When that alignment moves any pixel by more than a tenth of a
-pixel, the feature is reseeded with the aligned A before evaluating B; a still
-head or a translation alone keeps the history. A reset clears a shared
-feature's history for both eyes, so a reseed packs the aligned A of both.
+tracked rotation/FOV motion from engine vectors. When that alignment moves any
+pixel by more than a tenth of a pixel, the feature is reseeded with the
+aligned A before evaluating B; a still head or a translation alone keeps the
+history. A reset clears a shared feature's history for both eyes, so a reseed
+packs the aligned A of both. It packs only A's colour: NGX's output from a
+reset is bit-identical whatever motion and depth it is given, even noise
+(checked with SDK 310.5.3 and 310.9.1), so the seed writes neither and the
+reset reads a 64-pixel square of them. With the seed's own 16x8 thread groups,
+which suit its rotated bilinear reads better than the pack's 8x8, a turning
+pair at 3004x3004 costs 2.49 rather than 2.58 ms; a still head is unchanged.
 Keeping the history through small rotations instead, and aligning the
 generated image into B's camera in the compose pass, saves the reseed but
 measured two to five times the error on detailed content even at a quarter
@@ -172,9 +177,9 @@ pixel of rotation; `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` repeats that
 quality measurement for the reseeding path.
 This preserves OFXR's current B pose/FOV contract and its bit-exact real-frame
 copy. On an RTX 5090 at 2064x2208 per eye with SDK 310.9.1, a stereo pair
-takes about 1.36 ms of GPU time at 2X with a still head and 1.71 ms with a
-turning head, and 2.05/2.46 ms at 3X; through the synthesizer at 2004x2004 a
-2X pair takes 1.58 ms. Both benchmarks generate from patterned frames: blank
+takes about 1.35 ms of GPU time at 2X with a still head and 1.67 ms with a
+turning head, and 2.05/2.41 ms at 3X; through the synthesizer at 2004x2004 a
+2X pair takes 1.53 ms. Both benchmarks generate from patterned frames: blank
 ones compress to almost nothing in GPU memory, and NGX then measures 20-25%
 faster than it does on real content. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
 and run `xrfg_d3d12_history_tests` to repeat that measurement;
@@ -191,11 +196,11 @@ scale. The same vectors in pixels with a unit scale measurably lose quality.
 The vectors are passed undilated and NGX dilates them at depth edges; dilating
 them in the pack measured the same and cost about 35 us more per pair.
 
-Of a 2X pair at 2064x2208 per eye, OFXR's own work is the pack of B (about
-72 us), the reseed's pack of the aligned A (about 71 us, turning head only) and
-the composition (about 26 us per output); NGX's evaluation is the rest. With
-SDK 310.9.1, NGX's evaluations alone take 1.24 ms of a 1.36 ms pair (1.50 of
-1.71 ms turning), and at 3004x3004 1.72 of 1.99 ms (2.14 of 2.59 ms). The
+Of a 2X pair, OFXR's own work is the pack of B, the reseed's colour-only pack
+of the aligned A (turning head only) and the composition; NGX's evaluation is
+the rest. With SDK 310.9.1, NGX's evaluations alone take 1.24 ms of a 1.35 ms
+pair at 2064x2208 (1.49 of 1.67 ms turning), and at 3004x3004 1.72 of 1.98 ms
+(2.11 of 2.49 ms). The
 remainder writes the full-resolution colour, motion and depth NGX takes in its
 own feature layout and composes its output, about 350 MB per pair at
 3004x3004: as long as the RTX 5090's memory bandwidth needs to move it. With
@@ -204,19 +209,17 @@ still measure the same. 8-bit colour for NGX instead of 10-bit makes a pair
 3-4% faster, but it is a trade: it rounds away the precision of the reseed's
 resampled A, raising the rotation sweep's error by about a quarter (0.32 to
 0.40), while a still head and the other quality tests measure the same or
-slightly better. Measured on blank frames, these other choices were no faster
-or slower: 16x16 or 32x8 pack groups instead of 8x8 (8x8 overlaps NGX best),
-32-bit motion (slower), leaving the reseed's motion
-unwritten, a reset evaluated over smaller motion and depth rectangles (NGX
-requires the full colour extent), and NGX's undocumented
-`DLSSG.InternalWidth`, `DLSSG.DynamicResolution` and `DLSSG.EvalFlags`
-parameters. These feature versions accept only render preset 1. Every
-evaluation option measured within 3 us of the default: `notRenderingGameFrames`,
-`menuDetectionEnabled`, `colorBuffersHDR`, `cameraMotionIncluded`,
-`orthoProjection`, `automodeOverrideReset` and
-`minRelativeLinearDepthObjectSeparation` at 1 and 1000. Giving the reseed its
-own input textures, so both packs run before either evaluation, measured no
-faster and would cost about 220 MB more video memory at 3004x3004.
+slightly better. These also measured no faster or slower, within about 15 us
+at 3004x3004: 16x16, 32x8 or 16x8 groups for B's pack (wider groups help only
+the seed), NGX's undocumented `DLSSG.InternalWidth` (50 and 75%),
+`DLSSG.DynamicResolution` and `DLSSG.EvalFlags` (0, 1, 2, 4, 8) parameters,
+every evaluation option (`notRenderingGameFrames`, `menuDetectionEnabled`,
+`colorBuffersHDR`, `cameraMotionIncluded`, `orthoProjection`,
+`automodeOverrideReset`, and `minRelativeLinearDepthObjectSeparation` at 1 and
+1000), and giving the seed its own input textures so both packs run before
+either evaluation, which would also cost about 220 MB more video memory. On
+blank frames, 32-bit motion was slower. These feature versions accept only
+render preset 1.
 
 Generating below the eye's resolution and upscaling the result is cheaper -
 at 3004x3004 on blank frames, 75% per axis took a still/turning pair from
