@@ -273,6 +273,8 @@ does.
 
 | Where | Hybrid | Extrapolation |
 |---|---|---|
+| The tray menu, **Frame generation method** | **Interpolate, DLSS vectors + FidelityFX flow** | **Extrapolate, SpaceWarp-style** |
+| Tray settings (`tray.ini`) | `[tray] dlss_flow_hybrid=1` | `[tray] extrapolate=1` |
 | A directly loaded layer (`ofxr_bridge.ini`) | `[ofxr] dlss_flow_hybrid=1` | `[ofxr] extrapolate=1` |
 | For tests, the game's environment | `XRFG_TEST_DLSS_FLOW_HYBRID=1` | `XRFG_TEST_EXTRAPOLATE=1` |
 
@@ -659,23 +661,26 @@ the bridge is armed or paused and which method is in use.
 | Entry | What it holds |
 |---|---|
 | **Disarm bridge** / **Pause frame generation** | Arming, and the pause, with its key shown beside it. |
-| **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then what OFXR does in games with DLSS: use **the game's motion vectors** (default), **motion vectors + FidelityFX flow** (best quality), or **extrapolate, SpaceWarp-style** (no added latency, less accurate). Then **2X** or **3X**. |
+| **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then how OFXR makes frames: **interpolate** (default; from the game's DLSS vectors where it has them, the chosen flow elsewhere), **interpolate with DLSS vectors + FidelityFX flow** (best quality), or **extrapolate, SpaceWarp-style** (no added latency, less accurate). The last two run FidelityFX flow in every game, whatever engine is chosen above. Then **2X** or **3X**. |
 | **Quality and performance** | Optical-flow resolution, NVIDIA's both-ways check, DLSS Frame Generation resolution, and Prefer FPS over latency. |
 | **Benchmark this PC...** | See below. |
 | **FPS overlay**, **Diagnostics**, **Advanced** | Overlay position; flight recorder and logs; Lower VRAM and the pause key. |
 
 Options that do not apply to the chosen method are greyed out. The settings
-are stored as before in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`; the DLSS-game
-choice adds `dlss_flow_hybrid=0|1` and `extrapolate=0|1`, which the tray
-also writes to the layer's `[ofxr]` section.
+are stored as before in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`; how OFXR makes
+frames adds `dlss_flow_hybrid=0|1` and `extrapolate=0|1`, which the tray also
+writes to the layer's `[ofxr]` section.
 
 ### Benchmark this PC
 
 **Benchmark this PC...** measures, on your own graphics card, the GPU time of
 every frame-generation method at your headset's per-eye resolution: each
-optical-flow engine at each resolution, the DLSS-vector modes, native DLSS
-Frame Generation at 100/67/50% in 2X and 3X, and the per-frame copy of a DLSS
-game's vectors and depth. It takes about half a minute; close VR games first.
+optical-flow engine at each resolution, the modes on the game's DLSS vectors,
+extrapolation from vectors and from flow, native DLSS Frame Generation at
+100/67/50% in 2X and 3X, and the per-frame copy of a DLSS game's vectors and
+depth. It takes about half a minute; close VR games first. At the end it
+measures its first method again, and warns if the two differ by more than a
+quarter, which means something else used the graphics card during the run.
 The headset's resolution and refresh rate are filled in from the last session
 the flight recorder recorded, or you pick a headset or type them. Methods the
 PC cannot run (NVIDIA optical flow without an NVIDIA card, DLSS Frame
