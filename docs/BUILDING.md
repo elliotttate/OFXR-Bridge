@@ -111,9 +111,18 @@ generation, so OFXR's own synthesis (`motion_vectors=dlss` with
 `frame_generation=ofxr`) uses the game's vectors without a guide provider.
 Like native generation, it pairs each view of a side-by-side texture with its
 own eye's guide. In Galactic Racer under UEVR on the Meta XR Simulator
-(1440x1584 per eye) a stereo pair then costs about 0.12 ms of GPU time,
-against 0.30 ms for FidelityFX flow, 1.1 ms for native DLSS FG and 2.3 ms for
-NVIDIA medium flow.
+(1440x1584 per eye, simulated head still), median GPU time per stereo pair:
+
+| Method | Racing at speed | 3D scene behind a menu |
+|---|---|---|
+| OFXR + DLSS vectors | 0.13 ms | 0.12 ms |
+| OFXR FidelityFX flow | 0.30 ms | 0.30 ms |
+| Native DLSS FG 2X | 1.05 ms | 1.08 ms |
+| OFXR NVIDIA medium flow | 2.26 ms | 2.3 ms |
+
+Scene motion leaves the medians unchanged; the heavier race widens the tails
+(native's 90th percentile rises from 1.08 to 1.5 ms) through contention with
+the game's own rendering.
 
 A DLSS feature the game created before the capture hook was installed is
 recovered from its evaluation parameters, which normally still hold its
@@ -160,7 +169,18 @@ NGX receives colour display-encoded, as its programming guide requires, and
 motion as a fraction of the feature with the feature's size as its motion
 scale. The same vectors in pixels with a unit scale measurably lose quality.
 The vectors are passed undilated and NGX dilates them at depth edges; dilating
-them in the pack measured the same and cost about 35 us more per pair. sRGB swapchains are encoded by the pack shader into 10-bit
+them in the pack measured the same and cost about 35 us more per pair.
+
+Of a 2X pair at 2064x2208 per eye, OFXR's own work is the pack of B (about
+72 us), the reseed's pack of the aligned A (about 71 us, turning head only) and
+the composition (about 26 us per output); NGX's evaluation is the rest. Other
+choices measured no faster or slower: 16x16 or 32x8 pack groups instead of
+8x8, 8-bit colour or 16-bit depth for NGX (32-bit motion is slower), leaving
+the reseed's motion unwritten, and NGX's undocumented `DLSSG.InternalWidth`,
+`DLSSG.DynamicResolution` and `DLSSG.EvalFlags` parameters. This feature
+version accepts only render preset 1.
+
+sRGB swapchains are encoded by the pack shader into 10-bit
 private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
 and decoded again when the generated image is written; unchanged pixels
 round-trip exactly. Resize retirement polls the previous completion
