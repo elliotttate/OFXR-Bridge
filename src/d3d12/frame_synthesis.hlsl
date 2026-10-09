@@ -625,38 +625,6 @@ float2 game_motion_texel(float2 pixel) {
     return GameMotionVectors.Load(int4(texel, 0, 0)) * GameMotionScale;
 }
 
-float nvidia_cost_for_pixel(float2 pixel, uint slice, uint view_index) {
-    float2 packed_coordinate = flow_input_coordinate(pixel);
-    int2 coordinate = int2(round(
-        (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5));
-    FlowGridBounds bounds = flow_grid_bounds(
-        PreviousMappings[view_index].TargetRect,
-        slice);
-    return float(FlowAuxiliary.Load(int3(clamp(
-        coordinate,
-        bounds.minimum,
-        bounds.maximum), 0)) & 0xffU);
-}
-
-float nvidia_forward_cost_for_pixel(
-    float2 pixel,
-    uint slice,
-    uint view_index,
-    bool warped_previous) {
-    float2 packed_coordinate = flow_input_coordinate(pixel);
-    int2 coordinate = int2(round(
-        (packed_coordinate + 0.5) / float(FlowBlockSize) - 0.5));
-    FlowGridBounds bounds = flow_grid_bounds(
-        warped_previous
-            ? PreviousMappings[view_index].TargetRect
-            : PreviousMappings[view_index].SourceRect,
-        slice);
-    return float(ForwardAuxiliary.Load(int3(clamp(
-        coordinate,
-        bounds.minimum,
-        bounds.maximum), 0)) & 0xffU);
-}
-
 bool coordinate_inside_rect(float2 coordinate, float4 rect) {
     float2 minimum = rect.xy - 0.5;
     float2 maximum = rect.xy + rect.zw - 0.5;
@@ -667,45 +635,6 @@ bool coordinate_inside_rect(float2 coordinate, float4 rect) {
 float rgb_error(float4 a, float4 b) {
     float3 difference = abs(a.rgb - b.rgb);
     return max(difference.r, max(difference.g, difference.b));
-}
-
-// Fast can report a plausible low-cost match on a different repeated edge.
-// Validate against the ORIGINAL endpoints, not just two already-warped samples:
-// those can both hit the same unrelated dark/bright patch and agree perfectly.
-float fast_endpoint_confidence(
-    float2 pixel, float2 backward, uint slice, bool warped_previous) {
-    static const float2 offsets[5] = {
-        float2(0, 0), float2(-2, 0), float2(2, 0),
-        float2(0, -2), float2(0, 2)
-    };
-    float error = 0.0;
-    bool valid = true;
-    [unroll] for (uint i = 0; i < 5; ++i) {
-        float2 current = pixel + offsets[i];
-        float2 previous = current + backward;
-        if (!coordinate_inside_rect(current, PreviousMappings[ViewIndex].TargetRect)) {
-            valid = false;
-        }
-        float4 previous_color;
-        if (warped_previous) {
-            // The previous endpoint is a target coordinate: read it through
-            // the mapping, as the pack did when it built the engine's input.
-            CameraSample sample = sample_previous_target(previous, slice, ViewIndex);
-            if (sample.valid < 0.5) {
-                valid = false;
-            }
-            previous_color = sample.color;
-        } else {
-            if (!coordinate_inside_rect(previous, PreviousMappings[ViewIndex].SourceRect)) {
-                valid = false;
-            }
-            previous_color = bilinear_previous_source(previous, slice);
-        }
-        error = max(error, rgb_error(
-            bilinear_current_source(current, slice),
-            previous_color));
-    }
-    return valid ? 1.0 - smoothstep(8.0 / 255.0, 48.0 / 255.0, error) : 0.0;
 }
 
 // Preserve a stationary neighbourhood after the existing XR camera mapping.
@@ -944,68 +873,48 @@ float4 synthesize_midpoint(
                             abs(previous_sample.color.g - current_sample.color.g),
                             abs(previous_sample.color.b - current_sample.color.b)));
                     // Game motion's disagreements are mostly resampling at sharp
-                    // detail, which a gentler slope keeps on the warp.
-                    float confidence = saturate(1.0 - disagreement *
-                        (use_game_motion_pipeline ? 3.0 : 6.0));
+                    // detail, which a gentle slope keeps on the warp.
+                    float confidence = saturate(1.0 - disagreement * 3.0);
+                    float4 stable_previous =
+                        sample_previous_target(pixel, Slice, ViewIndex).color;
                     float4 stable_midpoint = lerp(
-                        sample_previous_target(pixel, Slice, ViewIndex).color,
-                        current_fallback.color,
-                        synthesis_fraction());
-                    if (use_nvidia_cost) {
-                        float consistency_confidence = 1.0;
-                        float cost_confidence = 1.0;
-                        if (repeated_capture_flag() == 0) {
-                            if (validate_fast) {
-                                confidence *= fast_endpoint_confidence(
-                                    pixel, raw_backward, Slice, input_pose_compensated);
-                            }
-                            if (use_nvidia_bidirectional) {
-                                float2 previous_coordinate = pixel + raw_backward;
-                                if (coordinate_inside_rect(
-                                        previous_coordinate,
-                                        input_pose_compensated
-                                            ? PreviousMappings[ViewIndex].TargetRect
-                                            : PreviousMappings[ViewIndex].SourceRect)) {
-                                    float2 raw_forward = forward_flow_for_pixel(
-                                        previous_coordinate,
-                                        Slice,
-                                        ViewIndex,
-                                        flow_value_scale,
-                                        input_pose_compensated);
-                                    float cycle_error = length(
-                                        raw_backward + raw_forward);
-                                    consistency_confidence =
-                                        1.0 - smoothstep(2.0, 6.0, cycle_error);
-                                    float maximum_cost = max(
-                                        nvidia_cost_for_pixel(
-                                            pixel,
-                                            Slice,
-                                            ViewIndex),
-                                        nvidia_forward_cost_for_pixel(
-                                            previous_coordinate,
-                                            Slice,
-                                            ViewIndex,
-                                            input_pose_compensated));
-                                    cost_confidence = saturate(
-                                        1.0 - maximum_cost / 255.0);
-                                } else {
-                                    consistency_confidence = 0.0;
-                                    cost_confidence = 0.0;
-                                }
-                            } else {
-                                cost_confidence = saturate(
-                                    1.0 - nvidia_cost_for_pixel(
-                                        pixel,
-                                        Slice,
-                                        ViewIndex) / 255.0);
-                            }
+                        stable_previous, current_fallback.color, synthesis_fraction());
+                    if (!use_game_motion_pipeline) {
+                        // Optical flow is not trusted as the game's vectors
+                        // are. Whichever explains both frames better is taken:
+                        // the flow, or the camera alone - a still scene under a
+                        // turning head. The flow keeps a tie. On recorded game
+                        // frames this beat the flow's own confidence measures -
+                        // NVIDIA's cost, the fast preset's endpoint check and
+                        // the forward flow's consistency - which all leaned on
+                        // the camera-only blend where the game had moved.
+                        confidence = saturate(1.0 +
+                            (rgb_error(stable_previous, current_fallback.color) - disagreement) * 8.0);
+                    }
+                    if (use_nvidia_bidirectional && repeated_capture_flag() == 0) {
+                        // The bidirectional option still keeps the flow only
+                        // where the forward flow leads back.
+                        float2 previous_coordinate = pixel + raw_backward;
+                        float consistency = 0.0;
+                        if (coordinate_inside_rect(
+                                previous_coordinate,
+                                input_pose_compensated
+                                    ? PreviousMappings[ViewIndex].TargetRect
+                                    : PreviousMappings[ViewIndex].SourceRect)) {
+                            float2 raw_forward = forward_flow_for_pixel(
+                                previous_coordinate,
+                                Slice,
+                                ViewIndex,
+                                flow_value_scale,
+                                input_pose_compensated);
+                            consistency = 1.0 - smoothstep(
+                                2.0, 6.0, length(raw_backward + raw_forward));
                         }
-                        confidence *= consistency_confidence * cost_confidence;
-                        output_color = saturate(lerp(
-                            stable_midpoint,
-                            flow_midpoint,
-                            confidence));
-                    } else if (use_game_motion_pipeline) {
+                        confidence *= consistency;
+                    }
+                    if (!use_game_motion_pipeline) {
+                        output_color = saturate(lerp(stable_midpoint, flow_midpoint, confidence));
+                    } else {
                         // The game's vectors are trusted: away from a motion
                         // edge, warped samples that disagree are one surface
                         // whose shading changed - a fade, a flash - and their
@@ -1068,11 +977,6 @@ float4 synthesize_midpoint(
                                 }
                             }
                         }
-                    } else {
-                        output_color = saturate(lerp(
-                            stable_midpoint,
-                            flow_midpoint,
-                            confidence));
                     }
                     }
                 }
