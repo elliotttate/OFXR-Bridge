@@ -1109,12 +1109,12 @@ float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
         smooth_motion = smooth_motion && length(game_motion_texel(pixel + offset) +
                                   game_motion_texel(pixel - offset) - 2.0 * here_motion) < 1.0;
     }
-    uint candidates = smooth_motion ? 1 : 13;
+    uint candidates = smooth_motion ? 1 : 9;
     [loop] for (uint candidate = 0; candidate < candidates; ++candidate) {
         float2 start = pixel;
         if (candidate > 0) {
             uint ring = (candidate - 1) / 4;
-            float radius = ring == 0 ? 8.0 : ring == 1 ? 24.0 : 64.0;
+            float radius = ring == 0 ? 12.0 : 40.0;
             uint direction = (candidate - 1) % 4;
             float2 offset = direction == 0 ? float2(radius, 0) : direction == 1 ? float2(-radius, 0)
                           : direction == 2 ? float2(0, radius) : float2(0, -radius);
@@ -1124,7 +1124,7 @@ float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
         bool converged = false;
         float motion = 0.0;
         float2 settled = q;
-        [unroll] for (uint step = 0; step < 4; ++step) {
+        [unroll] for (uint step = 0; step < 3; ++step) {
             float2 d = game_displacement(q);
             motion = length(d);
             // The farthest point visited fills a hole.
