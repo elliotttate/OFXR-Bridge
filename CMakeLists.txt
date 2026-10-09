@@ -1154,6 +1154,25 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_rephase.cmake")
 
         add_test(
+            NAME xrfg_layer_cadence_fraction
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/cadence-fraction"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_cadence_fraction.cmake")
+        # Five seconds behind the call chains' shared lock would leave the
+        # others queued past its 30 s wait, so it runs on its own.
+        set_tests_properties(xrfg_layer_cadence_fraction PROPERTIES RUN_SERIAL TRUE)
+        # Ten seconds each: queued together behind that lock, the third
+        # waited past it.
+        set_tests_properties(
+            xrfg_layer_promise_shown_time
+            xrfg_layer_promise_shown_time_extrapolate
+            xrfg_layer_rephase
+            PROPERTIES RESOURCE_LOCK xrfg_layer_long_call_chain)
+
+        add_test(
             NAME xrfg_layer_process_exclusion
             COMMAND "${CMAKE_COMMAND}"
                 "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"

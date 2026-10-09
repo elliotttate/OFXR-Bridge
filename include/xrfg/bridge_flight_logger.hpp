@@ -239,6 +239,11 @@ enum class BridgeFlightOperation : std::uint32_t {
     // where its real frames go down: a the new correction in periods, b the
     // old, c how many of the window's frames agreed.
     promise_correction,
+    // Where a pair's synthetic is placed between the previous real frame and
+    // the current one: result the fraction in ten-thousandths, a the interval
+    // between the two frames' display times in microseconds, b the
+    // frames per application frame, c the current frame's display time.
+    synthesis_fraction,
 };
 
 struct BridgeFlightToken {

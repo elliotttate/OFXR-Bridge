@@ -717,6 +717,63 @@ UEVR's full resolution the Jakku race loaded the GPU enough that SteamVR
 halved the rate in some rounds (its lead from wait to display then reads 27 or
 50-58 ms instead of 35.3); those rounds are left out.
 
+#### Where each synthetic is placed
+
+A synthetic is shown one display period before its real frame
+(interpolating) or after it (extrapolating), and the layer placed it by the
+display times the game stamped its frames with: `1 - period / interval`, or
+`1 + period / interval`. Scored against where each synthetic was actually
+shown between its two real frames (`presenter_content`, kinds 2 and 1; the
+synthetic's share of the way from the previous real frame's shown time to
+the current one's), the stamps were a poor guide. Across seven recorded
+races, for every gap between the stamps the median of where the synthetic
+belonged was the midpoint:
+
+| Stamp gap (periods) | Pairs | Mean | At 1/3 | At 1/2 | At 2/3 |
+|---|---|---|---|---|---|
+| 0 | 670 | 0.487 | 13% | 83% | 4% |
+| 1 | 1,359 | 0.489 | 23% | 60% | 17% |
+| 2 | 42,432 | 0.500 | - | 98% | - |
+| 3 | 2,255 | 0.494 | 32% | 40% | 28% |
+| 4 | 797 | 0.503 | 15% | 68% | 17% |
+| 6 | 598 | 0.516 | 18% | 55% | 28% |
+
+A pair takes its two slots whatever the stamps say (Galactic Racer's swing a
+period either way; Unreal Engine 4's OpenXR plugin stamps one frame in ten of
+Hubris with the time of the frame before), and a frame that misses its slot
+repeats the frame before rather than widening the pair - which side of the
+synthetic the repeat falls on is not known when it is made. There the
+midpoint is also the smoother choice: the stall is the repeat, and the
+midpoint spreads what is left of the motion evenly over the frames after it.
+Mean fraction error on the recorded races:
+
+| Placement | GR A | GR B | GR C (halved) | GR D (halved) | Hubris |
+|---|---|---|---|---|---|
+| Stamps (before) | 0.0197 | 0.0195 | 0.0811 | 0.0618 | 0.0173 |
+| Stamps, with the period doubled while SteamVR halves the rate and a repeated stamp placed in its slot | 0.0200 | 0.0172 | 0.0303 | 0.0392 | 0.0027 |
+| The cadence's share | **0.0100** | **0.0100** | **0.0160** | **0.0219** | **0.0011** |
+
+Other rules on the stamps (a two-frame jump at the usual hand-over rhythm
+taken as a lead) and rules on the hand-over timing were tried as well; none
+came near. Live on the final build, in Galactic Racer on the Steam Frame at
+2316x2316 (stamps here with the doubled period):
+
+| Mode | Cadence (the layer) | Stamps | Off by more than 0.1 |
+|---|---|---|---|
+| Interpolate, deeper pipeline | 0.0080 | 0.0159 | 4.7% / 6.4% |
+| Interpolate, shallow pipeline | 0.0046 | 0.0089 | 2.7% / 4.4% |
+| Interpolate, 3X | 0.0211 | 0.0311 | 3.5% / 9.3% |
+| Extrapolate (against the last pair's motion continued) | 0.0126 | 0.0205 | 4.9% / 5.9% |
+
+In Hubris the cadence erred 0.0010 against 0.0124. Extrapolating, against the
+next frame's motion in hindsight (its hand-over interval spread over the
+display until it is shown), the cadence erred 0.0404 and the stamps 0.0451.
+`synthesis_fraction` records each pair's fraction and stamp gap in the flight
+log, and `xrfg_layer_cadence_fraction` checks on the fake runtime, with
+repeated stamps and the rate halved part way (`XRFG_TEST_REPEAT_STAMP_EVERY`,
+`XRFG_TEST_THROTTLE_AFTER_WAITS`), that every pair is placed at the
+midpoint.
+
 #### The deeper pipeline: its phase, and an automatic depth
 
 With the deeper pipeline the measured latency was not one number but two:
@@ -1042,11 +1099,10 @@ diagnostic is off by default and is not a frame-rate benchmark.
 
 NGX uses fixed interpolation fractions: one generated image at 1/2, or two at
 1/3 and 2/3 for OFXR's 3X setting, subject to the native feature's capabilities.
-The layer uses those fractions in native mode. OFXR's cadence-derived arbitrary
-fractions remain available with its original algorithm. Native mode is most
-appropriate when the application holds half or a third of the display rate:
-away from that cadence each generated image is shown at the wrong instant and
-motion judders, which the OFXR algorithm corrects for. 3X needs NGX
+The layer uses those fractions in native mode, and the same shares in OFXR's
+own algorithm, which measured closer to where the images are shown than
+fractions from the game's stamps (see "Where each synthetic is placed"). 3X
+needs NGX
 multi-frame generation; on adapters without it, native mode stays at 2X, and
 a 3X request that reaches the feature anyway reports
 `multi_frame_unsupported` (status 9).

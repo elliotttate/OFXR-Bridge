@@ -362,6 +362,18 @@ OpenXR session, and extrapolation wins if both are set.
   second: 1.0% of a race's full-rate pairs, no run longer than 9. While SteamVR runs at half the rate the
   promise stops measuring too, where it had swung between one period and
   three. Details in [BUILDING.md](docs/BUILDING.md).
+- **Each synthetic goes at its share of the frame period.** The layer placed
+  each synthetic by the display times the game stamped its frames with - a
+  game below half the display rate had its synthetic at the instant its
+  content was from. But frames do not go down at their stamps: a pair takes
+  its two slots whatever the stamps say, and a frame that misses its slot
+  repeats the one before. Against where every synthetic was actually shown
+  between its real frames, live in Galactic Racer on the Steam Frame, the
+  fixed share (the midpoint, thirds at 3X, 1.5 spans extrapolating) erred
+  0.0080 on average where the stamps erred 0.0159, 0.0046 against 0.0089
+  without the deeper pipeline, 0.0211 against 0.0311 at 3X and 0.0126
+  against 0.0205 extrapolating; in Hubris 0.0010 against 0.0124. Details in
+  [BUILDING.md](docs/BUILDING.md).
 - **The game is promised the time its frame is shown.** The display time a
   game is handed at xrWaitFrame assumed its frame would go down within a
   display period; a game rendering at half the display rate takes most of
@@ -825,10 +837,10 @@ Blank frames compress to almost nothing in GPU memory, and NGX then measures
   the search paths alone, and switching to native needs a game restart.
   Setting `XRFG_TEST_NATIVE_DLSSG_VERBOSE=1` makes the layer record NGX's
   answers in `%LOCALAPPDATA%\OFXR Bridge\NGX\ofxr-native-dlssg.log`.
-- **Fixed cadence.** Native mode uses NGX's fixed fractions, so it suits games
-  that hold half or a third of the display rate. Away from that cadence, each
-  generated image is shown at the wrong instant and motion judders. OFXR's own
-  algorithm corrects for this.
+- **Fixed cadence.** Native mode uses NGX's fixed fractions, as OFXR's own
+  algorithm now does too: measured against where each generated image was
+  actually shown, the fixed share beats any placement from the game's stamps
+  (see "Each synthetic goes at its share of the frame period" above).
 - **Camera translation.** Full reprojection of camera translation, and
   separate guides for baked-in HUD and UI, remain future work. The bridge's
   existing limitation for camera translation still applies.

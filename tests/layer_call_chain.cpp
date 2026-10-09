@@ -591,15 +591,26 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
         }
         return XR_ERROR_RUNTIME_FAILURE;
     }
+    // XRFG_TEST_THROTTLE_AFTER_WAITS=N (promise-shown-time): after N waits
+    // the runtime halves the rate, as SteamVR does when it judges the caller
+    // late - a doubled period, and display times twice as far apart.
+    static const long throttle_after_waits = [] {
+        const char* setting = std::getenv("XRFG_TEST_THROTTLE_AFTER_WAITS");
+        return setting ? std::atol(setting) : 0L;
+    }();
+    static std::atomic<long> waits_seen{0};
+    const bool throttled = g_promise_mode && throttle_after_waits > 0 &&
+        waits_seen.fetch_add(1, std::memory_order_relaxed) >= throttle_after_waits;
     frame_state->predictedDisplayTime = g_next_display_time;
-    frame_state->predictedDisplayPeriod = kFakeDisplayPeriod;
+    frame_state->predictedDisplayPeriod =
+        throttled ? kFakeDisplayPeriod * 2 : kFakeDisplayPeriod;
     frame_state->shouldRender =
         g_next_wait_should_not_render.exchange(false, std::memory_order_acq_rel)
             ? XR_FALSE
             : XR_TRUE;
     g_next_display_time += g_flight_simulator_mode
         ? kFakeDisplayPeriod * 3
-        : g_promise_mode ? kFakeDisplayPeriod
+        : g_promise_mode ? (throttled ? kFakeDisplayPeriod * 2 : kFakeDisplayPeriod)
         : 100;
     {
         std::scoped_lock lock(g_frame_loop_mutex);
@@ -3707,7 +3718,17 @@ int main(int argc, char** argv) {
         // log by layer_promise_shown_time.cmake.
         bool frame_sequence_succeeded = true;
         XrTime last_predicted = 0;
-        for (int index = 0; index < 320 && frame_sequence_succeeded; ++index) {
+        // XRFG_TEST_REPEAT_STAMP_EVERY=N: every Nth frame is stamped with the
+        // display time of the frame before it, as Unreal Engine 4's OpenXR
+        // plugin does now and then (layer_repeat_stamp.cmake).
+        const char* repeat_setting = std::getenv("XRFG_TEST_REPEAT_STAMP_EVERY");
+        const int repeat_every = repeat_setting ? std::atoi(repeat_setting) : 0;
+        XrTime previous_stamp = 0;
+        int repeated_stamps = 0;
+        // XRFG_TEST_PROMISE_FRAMES: how many frames to run (320).
+        const char* frames_setting = std::getenv("XRFG_TEST_PROMISE_FRAMES");
+        const int frame_count = frames_setting ? std::atoi(frames_setting) : 320;
+        for (int index = 0; index < frame_count && frame_sequence_succeeded; ++index) {
             XrFrameState frame{XR_TYPE_FRAME_STATE};
             frame_sequence_succeeded =
                 XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &frame)) &&
@@ -3718,9 +3739,17 @@ int main(int argc, char** argv) {
                 std::this_thread::sleep_for(std::chrono::microseconds(
                     kFakeDisplayPeriod * 3 / 2 / 1000));
             }
+            // Alternately a little after and a little before the stamp it
+            // repeats, as Hubris's are.
+            const XrTime stamp = repeat_every > 0 && index > 16 &&
+                    index % repeat_every == 0 && previous_stamp != 0
+                ? previous_stamp + ((index / repeat_every) % 2 != 0 ? 1500 : -2500)
+                : frame.predictedDisplayTime;
+            repeated_stamps += stamp != frame.predictedDisplayTime ? 1 : 0;
+            previous_stamp = stamp;
             frame_sequence_succeeded = frame_sequence_succeeded &&
                 capture_fresh_application_image() &&
-                submit_frame(frame.predictedDisplayTime);
+                submit_frame(stamp);
         }
         const bool teardown_succeeded =
             XR_SUCCEEDED(end_session(session)) &&
@@ -3734,7 +3763,8 @@ int main(int argc, char** argv) {
                       << teardown_succeeded << '\n';
             return EXIT_FAILURE;
         }
-        std::cout << "OpenXR promise-shown-time frame loop completed\n";
+        std::cout << "OpenXR promise-shown-time frame loop completed; repeated stamps "
+                  << repeated_stamps << "\n";
         return EXIT_SUCCESS;
     }
 

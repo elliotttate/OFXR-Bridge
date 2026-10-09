@@ -11230,85 +11230,38 @@ struct PreparedProjectionFrame {
 }
 
 
-// Where the synthetic belongs between the previous capture and the current
-// one, given that the presenter shows it one display period before the
-// current frame. The scene should therefore be as it was one period before
-// the current capture:
+// Where a synthetic belongs, as a share of the span from the previous capture
+// to the current one. Real frames go down `frames` display periods apart with
+// a synthetic in each period between. Interpolating, synthetic `index`,
+// counted from the first one shown, is (index + 1) / frames of the way - the
+// midpoint for a pair. Extrapolating, the real frame goes first, and a
+// synthetic `periods` display periods after it shows the scene 1 + periods /
+// frames spans on.
 //
-//     fraction = 1 - period / (current_time - previous_time)
-//
-// Two display periods between captures - an application running at exactly
-// half the display rate - gives 0.5, which is what the synthesis shader used
-// unconditionally. Anywhere else 0.5 puts the synthetic at the wrong instant,
-// and since the error follows the application's frame interval it moves every
-// frame instead of being a constant nobody would notice.
-//
-// Half is also the right answer when the inputs cannot support anything
-// better: no previous snapshot, no observed display period, or an interval
-// that is not a plausible cadence. Those are the cases where extrapolating
-// would be worse than the old fixed behaviour.
-//
-// With `frames` submissions per application frame there are frames - 1
-// synthetics, and synthetic `index`, counted from the first one shown, goes
-// out frames - 1 - index periods before the current frame. The fixed answer
-// is then (index + 1) / frames - thirds, for 3X - which is also what the
-// formula gives at the exact cadence.
+// These used to be measured from the frames' display times, as 1 - period /
+// interval and 1 + period * periods / interval, so that a game below half the
+// display rate had its synthetic at the instant its content was from. But the
+// frames do not go down at their stamps: a pair takes its slots whatever the
+// stamps say, and a frame that misses its slot repeats the frame before
+// rather than widening the pair. Against where each synthetic was actually
+// shown between its real frames, in Galactic Racer races on the Steam Frame,
+// the cadence erred 0.0080 on average where the stamps erred 0.0159 with the
+// deeper pipeline, 0.0046 against 0.0089 without it, 0.0211 against 0.0311 at
+// 3X and 0.0126 against 0.0205 extrapolating; in Hubris, whose engine stamps
+// one frame in ten with the time of the frame before, 0.0010 against 0.0124.
+// For every gap between the stamps, the median of where the synthetic
+// belonged was the cadence's share. Where a frame does miss its slot, the
+// cadence is also the smoother choice: the stall is the repeat, and the
+// cadence spreads what is left of the motion evenly over the frames after it.
 [[nodiscard]] float synthetic_interpolation_fraction(
-    const std::shared_ptr<SessionState>& state,
-    const std::optional<ProjectionSnapshot>& previous_snapshot,
-    const ProjectionSnapshot& current_snapshot,
-    std::uint32_t frames = 2,
-    std::uint32_t index = 0) noexcept {
-    const float kFixedMidpoint =
-        static_cast<float>(index + 1) / static_cast<float>(frames);
-    const XrDuration periods_before_current =
-        static_cast<XrDuration>(frames) - 1 - static_cast<XrDuration>(index);
-    if (!state || !previous_snapshot) {
-        return kFixedMidpoint;
-    }
-    XrDuration period = 0;
-    {
-        std::scoped_lock lock(state->mutex);
-        period = state->minimum_runtime_display_period;
-    }
-    const XrTime interval =
-        current_snapshot.display_time - previous_snapshot->display_time;
-    // An interval no longer than the synthetics need cannot hold them at all,
-    // and one wider than twice the cadence says the pairing has already lost
-    // it: one period and four, for a pair.
-    if (period <= 0 ||
-        interval <= period * (static_cast<XrDuration>(frames) - 1) ||
-        interval > period * static_cast<XrDuration>(frames) * 2) {
-        return kFixedMidpoint;
-    }
-    return 1.0F - static_cast<float>(period * periods_before_current) /
-                      static_cast<float>(interval);
+    std::uint32_t frames,
+    std::uint32_t index) noexcept {
+    return static_cast<float>(index + 1) / static_cast<float>(frames);
 }
-// Extrapolation shows the real frame first, so a synthetic `periods` display
-// periods after it shows the scene that much past the current capture, in
-// spans from the previous one: 1 + periods / frames at the exact cadence.
 [[nodiscard]] float synthetic_extrapolation_fraction(
-    const std::shared_ptr<SessionState>& state,
-    const std::optional<ProjectionSnapshot>& previous_snapshot,
-    const ProjectionSnapshot& current_snapshot,
     std::uint32_t frames,
     std::uint32_t periods) noexcept {
-    const float fixed = 1.0F + static_cast<float>(periods) / static_cast<float>(frames);
-    if (!state || !previous_snapshot) {
-        return fixed;
-    }
-    XrDuration period = 0;
-    {
-        std::scoped_lock lock(state->mutex);
-        period = state->minimum_runtime_display_period;
-    }
-    const XrTime interval = current_snapshot.display_time - previous_snapshot->display_time;
-    if (period <= 0 || interval <= period * (static_cast<XrDuration>(frames) - 1) ||
-        interval > period * static_cast<XrDuration>(frames) * 2) {
-        return fixed;
-    }
-    return 1.0F + static_cast<float>(period * static_cast<XrDuration>(periods)) /
-                      static_cast<float>(interval);
+    return 1.0F + static_cast<float>(periods) / static_cast<float>(frames);
 }
 
 [[nodiscard]] PreparedProjectionFrame prepare_projection_frame(
@@ -12722,43 +12675,32 @@ XrResult layer_end_frame_impl(
                 metadata_pairable ? state->frames_per_application_frame.load() : 1U);
         }
     }
-    // The synthetic is displayed one display period before the current frame,
-    // so it should show the scene as it was one period before the current
-    // capture - which is halfway between the two captures only when they are
-    // two display periods apart, that is when the application is running at
-    // exactly half the display rate. Away from that the fixed midpoint places
-    // the synthetic at the wrong instant, and because the error tracks the
-    // application's frame interval it changes every frame rather than being a
-    // constant offset nobody would see. Alternating early and late is what
-    // reads as judder.
     const std::uint32_t frames_per_frame = state->frames_per_application_frame;
     const bool native_dlss = state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss;
     // Extrapolating, the real frame goes first: the synthetic is shown last,
     // frames - 1 periods after it, and a 3X second synthetic one period
     // after it.
     const bool extrapolating = !native_dlss && state->nvidia_options.extrapolate;
-    const float interpolation_fraction = native_dlss ? 1.0F / static_cast<float>(frames_per_frame)
-        : extrapolating ? synthetic_extrapolation_fraction(
-              state, previous_snapshot, current_snapshot, frames_per_frame, frames_per_frame - 1)
-        : synthetic_interpolation_fraction(
-        state,
-        previous_snapshot,
-        current_snapshot,
-        frames_per_frame,
-        0);
+    const float interpolation_fraction = extrapolating
+        ? synthetic_extrapolation_fraction(frames_per_frame, frames_per_frame - 1)
+        : synthetic_interpolation_fraction(frames_per_frame, 0);
+    if (previous_snapshot && metadata_pairable && !native_dlss) {
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::synthesis_fraction,
+            static_cast<std::int64_t>(interpolation_fraction * 10000.0F + 0.5F),
+            static_cast<std::uint64_t>(std::max<XrTime>(
+                (current_snapshot.display_time - previous_snapshot->display_time) / 1000,
+                0)),
+            frames_per_frame,
+            static_cast<std::uint64_t>(current_snapshot.display_time));
+    }
     // 3X: the second synthetic, a period after the first and a period before
     // the real frame.
     const std::optional<float> extra_interpolation_fraction =
         frames_per_frame > 2
-            ? std::optional<float>(native_dlss ? 2.0F / static_cast<float>(frames_per_frame)
-                  : extrapolating ? synthetic_extrapolation_fraction(
-                        state, previous_snapshot, current_snapshot, frames_per_frame, 1)
-                  : synthetic_interpolation_fraction(
-                  state,
-                  previous_snapshot,
-                  current_snapshot,
-                  frames_per_frame,
-                  1))
+            ? std::optional<float>(extrapolating
+                  ? synthetic_extrapolation_fraction(frames_per_frame, 1)
+                  : synthetic_interpolation_fraction(frames_per_frame, 1))
             : std::nullopt;
     PreparedProjectionFrame prepared = prepare_projection_frame(
         current_snapshot,
