@@ -145,8 +145,8 @@ the optical-flow engine beside the game's rendering. Offline at that size
 (`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
 takes 2.4 ms, so about half of the live figure is the GPU shared with the
 game. With 310.9.1 a
-pair there costs 1.94 ms with a still head and 2.42 ms turning (3X: 2.98 and
-3.54 ms), and a feature per eye would cost 17% more still and 11% more
+pair there costs 1.89 ms with a still head and 2.36 ms turning (3X: 2.93 and
+3.50 ms), and a feature per eye would cost 17% more still and 11% more
 turning. Live in the game's lighter hub scene, where the GPU is not saturated,
 the still-head pair measured 1.93 ms. Skipping the reseed instead is worse: a quarter pixel of
 unaligned history already triples the error of a reseeded pair on detailed
@@ -188,9 +188,9 @@ pixel of rotation; `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` repeats that
 quality measurement for the reseeding path.
 This preserves OFXR's current B pose/FOV contract and its bit-exact real-frame
 copy. On an RTX 5090 at 2064x2208 per eye with SDK 310.9.1, a stereo pair
-takes about 1.33 ms of GPU time at 2X with a still head and 1.64 ms with a
-turning head, and 2.01/2.36 ms at 3X; through the synthesizer at 2004x2004 a
-2X pair takes 1.50 ms. Both benchmarks generate from patterned frames: blank
+takes about 1.32 ms of GPU time at 2X with a still head and 1.63 ms with a
+turning head, and 2.00/2.36 ms at 3X; through the synthesizer at 2004x2004 a
+2X pair takes 1.48 ms. Both benchmarks generate from patterned frames: blank
 ones compress to almost nothing in GPU memory, and NGX then measures 20-25%
 faster than it does on real content. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
 and run `xrfg_d3d12_history_tests` to repeat that measurement;
@@ -206,13 +206,19 @@ motion as a fraction of the feature with the feature's size as its motion
 scale. The same vectors in pixels with a unit scale measurably lose quality.
 The vectors are passed undilated and NGX dilates them at depth edges; dilating
 them in the pack measured the same and cost about 35 us more per pair.
+When the game renders both guides at two thirds of the output or less (DLSS
+Quality and below), they are packed to a grid two thirds the feature's size,
+which loses none of their detail, and NGX is told that render size. A pair at
+3004x3004 is then 1.8-2.2% faster at the median and the quality tests measure
+the same; a half-size grid measured worse depth edges, and NGX's motion scale
+must then be the grid's size, not the output's.
 
 Of a 2X pair at 3004x3004, OFXR's own work is the pack of B (about 180 us),
 the reseed's colour-only pack of the aligned A (about 105 us, turning head
 only) and the composition (about 75 us); NGX's evaluations are the rest (the
-reset's about 250 us). With SDK 310.9.1, NGX's evaluations alone take 1.22 ms of a 1.33 ms
-pair at 2064x2208 (1.49 of 1.64 ms turning), and at 3004x3004 1.68 of 1.94 ms
-(2.05 of 2.41 ms). The
+reset's about 250 us). With SDK 310.9.1, NGX's evaluations alone take 1.21 ms of a 1.32 ms
+pair at 2064x2208 (1.47 of 1.63 ms turning), and at 3004x3004 1.66 of 1.89 ms
+(2.02 of 2.36 ms). The
 remainder writes the full-resolution colour, motion and depth NGX takes in its
 own feature layout and composes its output, about 350 MB per pair at
 3004x3004: as long as the RTX 5090's memory bandwidth needs to move it. With
