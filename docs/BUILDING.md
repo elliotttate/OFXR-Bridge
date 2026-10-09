@@ -204,7 +204,17 @@ features and one shared feature. `XRFG_TEST_FG_BENCH=1` instead times every
 frame-generation method through the synthesizer (OFXR FidelityFX and NVIDIA
 flow, DLSS vectors, native 2X/3X) at 2004x2004 per eye, plus the game-side
 guide snapshot copies. Close VR games first: GPU contention makes the medians
-meaningless.
+meaningless. Its median GPU time per stereo pair on an RTX 5090, by eye size
+(`XRFG_TEST_BENCH_EYE`):
+
+| Method | 1440x1584 | 2004x2004 | 3004x3004 | 3600x3600 |
+|---|---|---|---|---|
+| OFXR + DLSS vectors | 0.12 ms | 0.21 ms | 0.45 ms | 0.63 ms |
+| OFXR FidelityFX, half-res flow | 0.20 ms | 0.31 ms | 0.58 ms | 0.78 ms |
+| OFXR FidelityFX, full-res flow | 0.38 ms | 0.64 ms | 1.30 ms | 1.80 ms |
+| Native DLSS FG 2X | 1.14 ms | 1.49 ms | 2.38 ms | 3.42 ms |
+| OFXR NVIDIA medium flow | 1.30 ms | 1.61 ms | 2.89 ms | 3.80 ms |
+| Native DLSS FG 3X | 1.66 ms | 2.13 ms | 3.73 ms | 5.02 ms |
 
 NGX receives colour display-encoded, as its programming guide requires, and
 motion as a fraction of the feature with the feature's size as its motion
