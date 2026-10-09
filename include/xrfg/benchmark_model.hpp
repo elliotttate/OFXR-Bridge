@@ -19,7 +19,7 @@ enum class CaseKind {
     flow_extrapolate, // SpaceWarp-style prediction from FidelityFX flow: no vectors
     vectors,          // OFXR interpolating from the game's DLSS motion vectors
     hybrid,           // the game's vectors and FidelityFX flow, per pixel
-    extrapolate,      // SpaceWarp-style prediction from the vectors and depth
+    extrapolate,      // SpaceWarp-style prediction from the vectors, depth and FidelityFX flow
     native,           // NVIDIA DLSS Frame Generation through NGX
     guide_snapshot,   // the copy of the game's vectors and depth, per game frame
 };
