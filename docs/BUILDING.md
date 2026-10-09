@@ -130,10 +130,11 @@ the game's own rendering.
 On a Steam Frame through SteamVR (3004x3004 per eye at 120 Hz, racing, with
 `power.pauseCompositorOnStandby` off so the session runs unworn), the same
 measurement gives OFXR + DLSS vectors 0.45 ms, FidelityFX flow 0.90 ms,
-native DLSS FG 4.3-5.3 ms and NVIDIA medium flow 8.1 ms. Offline at that size
-(`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
-takes 2.7 ms through the synthesizer with SDK 310.5.3, so about 2 ms of the
-live figure is the GPU shared with the game at that resolution. With 310.9.1 a
+native DLSS FG 5.4 ms and NVIDIA medium flow 8.1 ms, with the game at 119,
+106-113 and 111 frames a second for vectors, native and NVIDIA flow. Offline at
+that size (`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same
+native pair takes 2.5 ms, so about half of the live figure is the GPU shared
+with the game. With 310.9.1 a
 pair there costs 1.98 ms with a still head and 2.49 ms turning (3X: 3.06 and
 3.66 ms), and a feature per eye would cost 17% more still and 11% more
 turning. Live in the game's lighter hub scene, where the GPU is not saturated,
@@ -233,11 +234,13 @@ game's graphics where queues of the same type time-slice, and composing on the
 synthesis queue once a fence passes, was also tried. NGX accepts a compute list
 and the output was identical, but the split never helped. Live in Galactic
 Racer on the Steam Frame, interleaved with the current path, it added 0.2 to
-0.7 ms to the median pair at every load tried. With the scene heavy enough to
-hold the game at about 90 of 120 frames a second (UEVR resolution scale 1.19),
-the game's frame rate and the number of pairs delivered were unchanged, and
-the 90th percentile rose from about 5.4 to 8.2 ms. Generation therefore stays
-on the one high-priority direct queue.
+0.7 ms to the median pair at every load tried in the hub scene. With the scene
+heavy enough to hold the game at about 90 of 120 frames a second (UEVR
+resolution scale 1.19), the game's frame rate and the number of pairs delivered
+were unchanged, and the 90th percentile rose from about 5.4 to 8.2 ms. Racing
+the Arcade time trial at speed, the median pair went from 5.1-5.3 to 6.3 ms,
+the 90th percentile from 5.8 to 7.9 ms, and the game lost about two frames a
+second. Generation therefore stays on the one high-priority direct queue.
 
 sRGB swapchains are encoded by the pack shader into 10-bit
 private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
