@@ -993,7 +993,8 @@ struct SessionState {
     // with the ring by fall_back_to_shallow_pipeline.
     bool two_slot_synthetic_ring{};
     // `[ofxr] dlss_flow_hybrid` and `[ofxr] extrapolate`, read at
-    // xrCreateSession; see nvidia_options_for.
+    // xrCreateSession, the hybrid again at each control change; see
+    // nvidia_options_for.
     bool dlss_flow_hybrid{};
     // Extrapolation shows the real frame first and the synthetics after it,
     // each predicted from it, instead of interpolating before it. 2 also runs
@@ -11895,10 +11896,13 @@ void apply_embedded_control(
         static_cast<std::uint32_t>(control.desired.native_scale)};
     const bool dlss_motion_vectors =
         control.desired.motion_vectors == 1 || control.desired.frame_generation == 1;
-    // A control change also takes up the ini's choice of extrapolation warp,
-    // so the mesh and the gather can be compared within one session.
+    // A control change also takes up the ini's choice of extrapolation warp
+    // and of the hybrid, so they can be compared with the other methods
+    // within one session.
     state->extrapolate_mesh =
         xrfg::implicit_layer::read_extrapolate_mesh(current_layer_directory());
+    state->dlss_flow_hybrid =
+        xrfg::implicit_layer::read_dlss_flow_hybrid(current_layer_directory());
     synthesis_modes(*state, dlss_motion_vectors, options, backend);
     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||

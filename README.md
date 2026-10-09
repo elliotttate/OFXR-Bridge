@@ -543,6 +543,24 @@ the reference timed before and after agreed within 0.2% (drift 1.002).
 The extrapolation and hybrid rows were timed again on the mesh and the
 quarter-resolution flow (drift 1.000).
 
+**Every interpolating method live, on the final build.** Galactic Racer at
+2316x2316 per eye on a Steam Frame (120 Hz, the deeper pipeline on), the
+methods switched in turn through the layer's control in two races; only
+rounds SteamVR held at 120 Hz are counted. The order matches the offline
+table, and native's and NVIDIA's flow cost more beside a running game:
+
+| Method | GPU a pair, live | Frames shown a second | Real frame after the wait |
+|---|---|---|---|
+| OFXR + DLSS vectors | 0.37-0.38 ms | 119.6 | 62.5 ms |
+| FidelityFX 50% | 0.84-1.03 ms | 119.5-119.6 | 62.5 ms |
+| DLSS vectors + FidelityFX flow | 1.32-1.44 ms | 119.6 | 62.4-62.6 ms |
+| Native 67% | 1.38-1.69 ms | 113.9-119.7 | 62.5-62.6 ms |
+| Native 100% | 2.52 ms | 114.5 | 62.7 ms |
+| NVIDIA medium 50% | 4.71-5.62 ms | 88.6-108.7 | 62.7-70.9 ms |
+
+NVIDIA's flow was the one method that cost frames there, and the rounds
+after it were the ones SteamVR dropped to half the rate.
+
 **"Prefer FPS over latency", live.** The tray's option (the deeper pipeline,
 on by default) holds each synthetic a display period so synthesis has time
 to finish. Galactic Racer at 3004x3004 per eye on a Steam Frame, where the
