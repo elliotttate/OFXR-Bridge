@@ -28,7 +28,7 @@ constexpr std::array<CaseSpec, 37> kCases{{
     {"hybrid_50", "Motion vectors + FidelityFX flow, 50%", Kind::hybrid, kFfx, Preset::medium, 50},
     {"hybrid_75", "Motion vectors + FidelityFX flow, 75%", Kind::hybrid, kFfx, Preset::medium, 75},
     {"hybrid_100", "Motion vectors + FidelityFX flow, 100%", Kind::hybrid, kFfx, Preset::medium, 100},
-    {"extrapolate", "Extrapolation from motion vectors and FidelityFX flow", Kind::extrapolate, kFfx, Preset::medium, 50},
+    {"extrapolate", "Extrapolation from motion vectors", Kind::extrapolate, kFfx, Preset::medium, 50},
     {"extrapolate_ffx_50", "Extrapolation from FidelityFX optical flow, 50%", Kind::flow_extrapolate, kFfx, Preset::medium, 50},
     {"extrapolate_ffx_75", "Extrapolation from FidelityFX optical flow, 75%", Kind::flow_extrapolate, kFfx, Preset::medium, 75},
     {"extrapolate_ffx_100", "Extrapolation from FidelityFX optical flow, 100%", Kind::flow_extrapolate, kFfx, Preset::medium, 100},
