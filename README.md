@@ -330,7 +330,7 @@ Tried and rejected:
   much detail, so it is an option instead (see
   [Turning it on](#turning-it-on)). There, the bridge restores the real
   frame's detail along the game's motion. On a moving test scene, that takes
-  67%'s error from 10.1 to 5.8, against 4.25 at full resolution and 28.8 for
+  67%'s error from 8.7 to 5.4, against 4.25 at full resolution and 28.8 for
   a blend of the two frames.
 - **A half-size guide grid.** Depth edges measured worse.
 - **8-bit colour for the reseed too.** It is slightly faster, but the

@@ -322,38 +322,57 @@ fraction of a pixel on each scale's grid. A single scene with whole-pixel motion
 on one scale's grid, as an earlier version of this benchmark had, flattered that
 scale several times over. Against the true midpoint frame:
 
-| Feature resolution | Error | At the square's edges | Without the detail restore |
+| Method | Error | At the square's edges | Without the detail restore |
 |---|---|---|---|
-| 100% | 4.25 | 8.7 | |
-| 85% | 4.41 | 10.6 | 7.9 |
-| 75% | 7.3 | 19.4 | 11.2 |
-| 67% | 5.78 | 14.3 | 10.1 |
-| 50% | 10.9 | 25.0 | 16.6 |
+| Native DLSS FG, 100% | 4.25 | 8.7 | |
+| Native DLSS FG, 85% | 3.98 | 10.0 | 6.7 |
+| Native DLSS FG, 75% | 6.8 | 18.3 | 10.0 |
+| Native DLSS FG, 67% | 5.37 | 13.6 | 8.7 |
+| Native DLSS FG, 50% | 10.7 | 23.4 | 15.4 |
 | OFXR + DLSS vectors | 3.95 | 25.9 | |
+| OFXR FidelityFX flow, half / full resolution | 15.8 / 13.7 | 45.2 / 45.6 | |
+| OFXR NVIDIA medium flow | 14.1 | 51.3 | |
 | A blend of the two frames | 28.8 | | |
+
+The composition upsamples the reduced frame with Catmull-Rom rather than
+bilinear: 7% less error at 67% for no measurable cost. The packed B it compares
+with stays bilinear, since filtering both alike measured worse.
 
 With the game's vectors exact, as here, OFXR + DLSS vectors is as good as
 native generation away from moving edges. At the edges, the occlusions are
-where native generation earns its cost: 8.7 at full resolution and 14.3 at
-67%, against 25.9. At 50% that advantage is gone (25.0) and the rest is worse,
-for more GPU time than OFXR + DLSS vectors, so the tray offers no step below
-67%. Content the game's vectors do not describe - particles, transparency,
-shadows - favours native generation more than this test can show.
+where native generation earns its cost: 8.7 at full resolution and 13.6 at
+67%, against 25.9. At 50% little of that advantage is left (23.4) and the rest
+is far worse, for more GPU time than OFXR + DLSS vectors, so the tray offers no
+step below 67%. Native generation needs the same DLSS guides as OFXR + DLSS
+vectors, so that is always the cheaper alternative to it. The optical-flow
+methods, for games without DLSS, lose the fast striped square entirely. Content
+the game's vectors do not describe - particles, transparency, shadows - favours
+native generation more than this test can show.
 
 At 3X, against the true frames a third and two thirds of the way from A, 67%
-errs 5.4 and 5.0 where full resolution errs 3.4 and 3.0: each generated frame
+errs 4.9 and 4.6 where full resolution errs 3.4 and 3.0: each generated frame
 restores detail from its own point along the motion.
+
 67% beats 70% and 75% because it puts the feature on the game's two-thirds
 guide grid; 70%, 64% and 60% measured 7.4, 6.3 and 8.4 with a quarter
-tolerance, against 67%'s 6.1. 85% is no use: it is closer to full quality, but it loses the
+tolerance and bilinear upsampling, against 67%'s 6.1. 85% is no use: it beats
+full resolution overall, through the restored detail, but it loses the
 two-thirds guide grid and costs more than 100% (2.03 ms still and 2.43
 turning). Of tolerances from 1/32 to 1, a half measured the least error,
-overall and at the edges. Picking the nearest surface when the guide grid is
-coarser than the game's guides (at 50%) made no difference. Packing each axis
-foveated was also tried: a smooth cubic gives full resolution at the centre,
-falling towards the edges, within the same pixel count. It measured worse at
-every scale, at the centre too for 75% and 50%: the warp makes uniform motion
-non-uniform, which NGX and the restore handle worse.
+overall and at the edges.
+
+These also measured no better:
+- **Nearest-surface guides at 50%.** Picking the nearest surface when the
+  guide grid is coarser than the game's guides made no difference.
+- **Foveated packing.** A smooth cubic gives full resolution at the centre,
+  falling towards the edges, within the same pixel count. It measured worse
+  at every scale, at the centre too for 75% and 50%: the warp makes uniform
+  motion non-uniform, which NGX and the restore handle worse.
+- **A detail swap at full resolution.** Where a 3x3 tent of NGX's frame
+  agrees with one of B at the motion-compensated point, NGX's detail above the
+  tent is replaced with B's. It took the error from 4.25 to 4.13 but the edges
+  from 8.7 to 9.4, for 18 more reads a pixel.
+
 `XRFG_NATIVE_DLSSG_SCALE` and `XRFG_NATIVE_DLSSG_DETAIL` (the tolerance's
 reciprocal; 0 turns the restore off) override both for experiments.
 

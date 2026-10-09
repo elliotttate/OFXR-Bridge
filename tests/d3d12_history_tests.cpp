@@ -4037,12 +4037,33 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
     struct Setting { const char *scale, *detail; };
     // Without the detail restore, and with tolerances of 1/2 (the default) and 1/4.
     std::vector<Setting> settings{{"100", "0"}};
-    for (const char* scale : {"85", "75", "67", "50"}) {
-        for (const char* detail : {"0", "2", "4"}) settings.push_back({scale, detail});
+    // XRFG_TEST_SCALE_QUALITY_QUICK measures only the shipped 67% setting.
+    // XRFG_TEST_SCALE_QUALITY_QUICK measures only the shipped 67% setting.
+    if (std::getenv("XRFG_TEST_SCALE_QUALITY_QUICK")) {
+        settings.push_back({"67", "2"});
+    } else {
+        for (const char* scale : {"85", "75", "67", "50"}) {
+            for (const char* detail : {"0", "2", "4"}) settings.push_back({scale, detail});
+        }
     }
     // Per setting: overall, centre, outer and edge error, summed over eyes and slides.
     std::vector<std::array<double, 4>> totals(settings.size());
-    std::array<double, 4> ofxr_totals{};
+    struct OfxrMethod {
+        const char* name;
+        xrfg::D3D12OpticalFlowBackend backend;
+        xrfg::D3D12OpticalFlowInputScale scale;
+        bool guides;
+    };
+    const std::array<OfxrMethod, 4> ofxr_methods{{
+        {"OFXR+DLSS vectors", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+         xrfg::D3D12OpticalFlowInputScale::half, true},
+        {"OFXR FidelityFX half-res flow", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+         xrfg::D3D12OpticalFlowInputScale::half, false},
+        {"OFXR FidelityFX full-res flow", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+         xrfg::D3D12OpticalFlowInputScale::full, false},
+        {"OFXR NVIDIA medium flow", xrfg::D3D12OpticalFlowBackend::nvidia,
+         xrfg::D3D12OpticalFlowInputScale::half, false}}};
+    std::vector<std::array<double, 4>> ofxr_totals(ofxr_methods.size());
     double blend_total = 0;
     // 3X: each of the two generated frames restores detail from its own point
     // along the motion, a third and two thirds of the way from A.
@@ -4118,9 +4139,10 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                 }
             }
         }
-        // OFXR + DLSS vectors on the same pair, for comparison: OFXR's own
-        // synthesis from the game's motion, through the synthesizer.
-        {
+        // OFXR's own methods on the same pair, for comparison, through the
+        // synthesizer: from the game's motion, and from optical flow.
+        for (std::size_t method = 0; method < ofxr_methods.size(); ++method) {
+            const auto& m = ofxr_methods[method];
             std::array<ComPtr<ID3D12Resource>, 2> ofxr_sources{
                 create_source_texture(fixture, width, height),
                 create_source_texture(fixture, width, height)};
@@ -4138,12 +4160,14 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                         source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
                     "scale quality OFXR history initialization failed");
             xrfg::D3D12FrameSynthesizer synthesizer;
+            xrfg::D3D12NvidiaOpticalFlowOptions options;
+            options.input_scale = m.scale;
             require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
                         history, current_pointers, synthetic_pointers, kFormat,
-                        D3D12_RESOURCE_STATE_RENDER_TARGET,
-                        xrfg::D3D12OpticalFlowBackend::fidelity_fx)),
+                        D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options)),
                     "scale quality OFXR synthesizer initialization failed");
-            const auto ofxr_guides = [&](std::uint64_t serial) {
+            const auto ofxr_guides = [&](std::uint64_t serial) -> std::shared_ptr<xrfg::DlssMotionVectorSet> {
+                if (!m.guides) return {};
                 auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
                 set->eye_count = kEyeCount;
                 for (UINT eye = 0; eye < kEyeCount; ++eye) {
@@ -4184,7 +4208,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                 readback_pattern(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
             for (UINT eye = 0; eye < kEyeCount; ++eye) {
                 for (int region = 0; region < 4; ++region) {
-                    ofxr_totals[region] += error(actual, eye, region);
+                    ofxr_totals[method][region] += error(actual, eye, region);
                 }
             }
         }
@@ -4226,9 +4250,12 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
     SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_DETAIL", nullptr);
     const double runs = double(slides.size() * kEyeCount);
     std::cout << "scale quality blend mae=" << blend_total / runs << '\n';
-    std::cout << "scale quality OFXR+DLSS vectors mae=" << ofxr_totals[0] / runs
-              << " centre=" << ofxr_totals[1] / runs << " outer=" << ofxr_totals[2] / runs
-              << " edge=" << ofxr_totals[3] / runs << '\n';
+    for (std::size_t method = 0; method < ofxr_methods.size(); ++method) {
+        const auto& t = ofxr_totals[method];
+        std::cout << "scale quality " << ofxr_methods[method].name << " mae=" << t[0] / runs
+                  << " centre=" << t[1] / runs << " outer=" << t[2] / runs
+                  << " edge=" << t[3] / runs << '\n';
+    }
     for (std::size_t s = 0; s < settings.size(); ++s) {
         std::cout << "scale quality scale=" << settings[s].scale << " detail=" << settings[s].detail
                   << " mae=" << totals[s][0] / runs << " centre=" << totals[s][1] / runs
