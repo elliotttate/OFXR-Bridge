@@ -127,7 +127,7 @@ struct ConfiguredNvidiaOptions {
 // SpaceWarp's from optical flow; with extrapolate=2 the vectors' grid asks
 // the flow where it does not explain the frame before) rather than OFXR's
 // per-pixel gather. On unless set to 0, or with XRFG_TEST_EXTRAPOLATE_MESH=0. Read at
-// xrCreateSession.
+// xrCreateSession and again at each settings change from the tray.
 [[nodiscard]] bool read_extrapolate_mesh(
     const std::filesystem::path& module_directory) noexcept;
 

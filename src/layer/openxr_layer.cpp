@@ -1015,6 +1015,16 @@ struct SessionState {
     bool triple_switchable{};
     // The application's xrEndFrame thread only.
     std::chrono::steady_clock::time_point triple_poll_at{};
+    // The application's xrEndFrame thread only: the window of admission
+    // waits observe_admission_wait judges, how many windows long it is, and
+    // the presenter frame it adds to the next once-per-pair hold. Tests add
+    // XRFG_TEST_ADMISSION_WAIT_MS to every wait it measures.
+    std::uint32_t admission_window_pairs{};
+    std::uint32_t admission_window_late{};
+    std::uint32_t rephase_backoff{1};
+    bool rephase_check_due{};
+    std::uint32_t pair_hold_extra_frames{};
+    std::chrono::nanoseconds test_admission_wait{};
     // The flight log's vram_usage records. The adapter is found from the
     // first device the session has; what it reports is the process's use of
     // that adapter, whichever device made the allocation.
@@ -1317,6 +1327,7 @@ struct SessionState {
     std::array<std::int8_t, 64> promise_samples{};
     std::uint32_t promise_sample_count{};
     std::uint32_t promise_settle{};
+    bool promise_runtime_slowed{};
     XrResult presenter_failure{XR_SUCCESS};
     std::uint64_t next_presenter_sequence{1};
     std::size_t outstanding_presenter_submissions{};
@@ -2398,8 +2409,24 @@ void enter_generation_quarantine(
 void observe_promise_lateness(
     SessionState& state,
     XrDuration late,
-    XrDuration period) noexcept {
+    XrDuration period,
+    XrDuration runtime_period) noexcept {
     if (!state.promise_shown_time || period <= 0) {
+        return;
+    }
+    // Not while the runtime runs at a multiple of the display period, as
+    // SteamVR does for a while after it judges the caller late: frames then
+    // go down two periods apart, and in Galactic Racer the measurement moved
+    // the promise between one period and three every 2.4 s for as long as
+    // that lasted. The correction found at the true rate is kept, and the
+    // window starts again once the rate is back.
+    const bool slowed = runtime_period > period + period / 2;
+    if (slowed != state.promise_runtime_slowed) {
+        state.promise_runtime_slowed = slowed;
+        state.promise_sample_count = 0;
+        state.promise_settle = 8;
+    }
+    if (slowed) {
         return;
     }
     if (state.promise_settle > 0) {
@@ -4950,6 +4977,15 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_extrapolate(current_layer_directory());
     state->extrapolate_mesh =
         xrfg::implicit_layer::read_extrapolate_mesh(current_layer_directory());
+    {
+        wchar_t value[8]{};
+        const DWORD n =
+            GetEnvironmentVariableW(L"XRFG_TEST_ADMISSION_WAIT_MS", value, 8);
+        if (n != 0 && n < 8) {
+            state->test_admission_wait =
+                std::chrono::milliseconds(std::wcstol(value, nullptr, 10));
+        }
+    }
     if (state->extrapolate != 0) {
         // Extrapolation is there for latency, and its synthetics already
         // trail the real frame by a period: the deeper pipeline's held
@@ -9334,7 +9370,8 @@ void continuous_presenter_main(
             observe_promise_lateness(
                 *state,
                 frame_state.predictedDisplayTime - submitted_content_time,
-                static_cast<XrDuration>(state->presenter_display_period));
+                static_cast<XrDuration>(state->presenter_display_period),
+                frame_state.predictedDisplayPeriod);
         }
         if (pending_vsync_lock) {
             xrfg::bridge_flight_logger().event(
@@ -9690,6 +9727,76 @@ void stop_continuous_presenter(
     return state.deep_pipeline &&
         (state.graphics_binding == SessionGraphicsBinding::d3d11 ||
          state.graphics_binding == SessionGraphicsBinding::vulkan);
+}
+
+// A pair's frames reach the presenter at the same point whichever of two
+// waits in xrEndFrame takes the application's slack: the capacity wait at
+// admission, before synthesis, or the once-per-pair hold after the
+// hand-over. Both arrangements are stable, because the hold releases the
+// application at a presenter frame and the application's own work takes the
+// same time from there either way. But where admission takes the slack, the
+// frame was rendered a display period before it had to be and waits out that
+// period finished. Galactic Racer at 120 Hz came back that way from a few
+// seconds of SteamVR halving the rate and stayed for the rest of the race:
+// 6.5 ms at admission and none in the hold, against 0.2 and 6.5 before, and
+// each real frame shown 70 ms after the game's wait instead of 62 at the same
+// 119.7 frames a second. Over a whole race, 57% of its pairs were like that.
+//
+// So when nine in ten pairs of a window wait more than half a display period
+// at admission, the next hold runs one presenter frame longer, once. That
+// starts the application's next frame a period later, so the wait moves to
+// after its hand-over: with this, 1.7% of a race's pairs, each such stretch
+// over within a second. The promise is left to its own measurement; moving
+// it with the phase only had the measurement move it back. A move that
+// leaves the waits where they were is not repeated until a window twice as
+// long has said so again.
+void observe_admission_wait(
+    SessionState& state, std::chrono::nanoseconds waited) noexcept {
+    constexpr std::uint32_t kWindowPairs = 32;
+    constexpr std::uint32_t kLongestBackoff = 64;
+    const auto period = std::chrono::nanoseconds(
+        static_cast<std::int64_t>(state.presenter_display_period));
+    if (state.frames_per_application_frame != 2U ||
+        period <= std::chrono::nanoseconds::zero()) {
+        state.admission_window_pairs = 0;
+        state.admission_window_late = 0;
+        return;
+    }
+    ++state.admission_window_pairs;
+    if ((waited + state.test_admission_wait) * 2 > period) {
+        ++state.admission_window_late;
+    }
+    if (state.admission_window_pairs < kWindowPairs * state.rephase_backoff) {
+        return;
+    }
+    const std::uint32_t pairs = state.admission_window_pairs;
+    const std::uint32_t late_pairs = state.admission_window_late;
+    state.admission_window_pairs = 0;
+    state.admission_window_late = 0;
+    const bool late = late_pairs * 10 >= pairs * 9;
+    if (state.rephase_check_due) {
+        // The window after a move: did it take?
+        state.rephase_check_due = false;
+        if (late) {
+            state.rephase_backoff =
+                std::min(state.rephase_backoff * 2, kLongestBackoff);
+            return;
+        }
+        state.rephase_backoff = 1;
+    }
+    if (!late) {
+        return;
+    }
+    state.pair_hold_extra_frames = 1;
+    state.rephase_check_due = true;
+    // 720: a the pairs of the window that waited at admission, b the pairs
+    // in it, c how many windows long it was.
+    xrfg::bridge_flight_logger().event(
+        xrfg::BridgeFlightOperation::presenter_transition,
+        720,
+        late_pairs,
+        pairs,
+        state.rephase_backoff);
 }
 
 // Holds the application until the presenter has run `presenter_frames` frames
@@ -11788,6 +11895,10 @@ void apply_embedded_control(
         static_cast<std::uint32_t>(control.desired.native_scale)};
     const bool dlss_motion_vectors =
         control.desired.motion_vectors == 1 || control.desired.frame_generation == 1;
+    // A control change also takes up the ini's choice of extrapolation warp,
+    // so the mesh and the gather can be compared within one session.
+    state->extrapolate_mesh =
+        xrfg::implicit_layer::read_extrapolate_mesh(current_layer_directory());
     synthesis_modes(*state, dlss_motion_vectors, options, backend);
     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
@@ -11796,7 +11907,8 @@ void apply_embedded_control(
         options.frame_generation != state->nvidia_options.frame_generation ||
         options.native_scale != state->nvidia_options.native_scale ||
         options.hybrid != state->nvidia_options.hybrid ||
-        options.extrapolate != state->nvidia_options.extrapolate;
+        options.extrapolate != state->nvidia_options.extrapolate ||
+        options.extrapolate_mesh != state->nvidia_options.extrapolate_mesh;
     // Enumeration is excluded by frame_call_mutex, so newly created contexts
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;
@@ -12571,10 +12683,15 @@ XrResult layer_end_frame_impl(
     // the current one exists -- the previous pair's synthetic is no longer
     // retired by the time we release into it.
     if (use_continuous_presenter) {
+        const auto admission_entered = std::chrono::steady_clock::now();
         const XrResult capacity_result = wait_for_presenter_capacity(
             state, state->deep_pipeline ? 2 : 1);
         if (XR_FAILED(capacity_result)) {
             return capacity_result;
+        }
+        if (!presenter_hold_at_admission(*state) && metadata_pairable) {
+            observe_admission_wait(
+                *state, std::chrono::steady_clock::now() - admission_entered);
         }
         if (presenter_hold_at_admission(*state)) {
             // The once-per-pair hold, ahead of synthesis rather than after the
@@ -13171,11 +13288,16 @@ XrResult layer_end_frame_impl(
         // thread must not be shut out of xrWaitFrame while this waits.
         //
         // Unless this frame was already held at admission.
+        // Plus a frame, once, to move the application's phase: see
+        // observe_admission_wait.
+        const std::uint32_t extra_frames =
+            std::exchange(state->pair_hold_extra_frames, 0U);
         frame_call_lock.unlock();
         if (!presenter_hold_at_admission(*state)) {
             wait_for_presenter_pair(
                 state,
-                pair_ready ? state->frames_per_application_frame.load() : 1U);
+                (pair_ready ? state->frames_per_application_frame.load() : 1U) +
+                    extra_frames);
         }
         return result;
     }

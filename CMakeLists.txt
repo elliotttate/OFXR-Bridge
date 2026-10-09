@@ -1145,6 +1145,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_promise_shown_time.cmake")
 
         add_test(
+            NAME xrfg_layer_rephase
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/rephase"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_rephase.cmake")
+
+        add_test(
             NAME xrfg_layer_process_exclusion
             COMMAND "${CMAKE_COMMAND}"
                 "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"

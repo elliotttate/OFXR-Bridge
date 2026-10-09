@@ -46,6 +46,12 @@ if(NOT flight_log_count EQUAL 1)
 endif()
 list(GET flight_logs 0 flight_log)
 
+# A steady session never has its phase moved (observe_admission_wait).
+file(STRINGS "${flight_log}" rephases REGEX "op=presenter_transition result=720 ")
+if(rephases)
+    message(FATAL_ERROR "The application's phase was moved in a steady session:
+${rephases}")
+endif()
 file(STRINGS "${flight_log}" corrections REGEX "op=promise_correction ")
 set(corrected_to 0)
 foreach(line IN LISTS corrections)

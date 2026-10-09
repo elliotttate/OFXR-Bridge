@@ -717,6 +717,51 @@ UEVR's full resolution the Jakku race loaded the GPU enough that SteamVR
 halved the rate in some rounds (its lead from wait to display then reads 27 or
 50-58 ms instead of 35.3); those rounds are left out.
 
+#### The deeper pipeline: its phase, and an automatic depth
+
+With the deeper pipeline the measured latency was not one number but two:
+62 ms in some stretches and 70 ms in others, at the same 119.7 frames a
+second. A whole race's flight log (Galactic Racer at 2316x2316 per eye)
+showed why. A pair's frames reach the presenter at the same point either
+way, but the game's slack - about 6.5 ms a pair - can be taken by either of
+two waits in xrEndFrame: the capacity wait at admission, before synthesis,
+or the once-per-pair hold after the hand-over. Both arrangements are stable,
+since the hold releases the game at a presenter frame and the game's own work
+then takes the same time. Where admission takes the slack, the finished frame
+waits out a whole period before synthesis starts: the game rendered for a
+pose a period older. The game fell into that arrangement after a few seconds
+of SteamVR halving the rate and stayed in it, 57% of that race's pairs.
+
+`observe_admission_wait` watches the admission wait: when nine in ten pairs
+of a 32-pair window wait more than half a display period there, the next
+pair hold runs one presenter frame longer, once, which moves the game's next
+frame a period later and the slack to after the hand-over. A move that leaves
+the waits where they were is retried only after a window twice as long (up to
+64 windows). Live, the share of pairs in the slow arrangement fell to 1.7% in
+one race and 6.8% in another, each stretch corrected within about a second,
+and every round at the true rate measured 62 ms; no frame was lost to a move.
+Moving the promise with the phase was tried and removed: the measurement only
+moved it back. `xrfg_layer_rephase` checks the move and the back-off with
+`XRFG_TEST_ADMISSION_WAIT_MS`, which adds to every measured admission wait;
+`xrfg_layer_promise_shown_time` checks that a steady session is never moved.
+
+While SteamVR runs at half the rate the promise measurement also stops
+(`observe_promise_lateness` gets the runtime's period): frames then go down
+two periods apart, and the measurement had moved the promise between one
+period and three every 2.4 s for as long as that lasted.
+
+An automatic depth was built and measured and then removed. It started deep,
+tried the shallow pipeline every so often, kept it while it repeated no more
+than half a percent of periods more than the deep one, and went back deep at
+one percent more, counting the display periods SteamVR's wait stepped over
+as repeats (the shallow pipeline loses frames that way, 80-102 shown a second
+in Galactic Racer, with no repeat submitted). Over whole races, two each way,
+the deep pipeline showed 102.6 and 104.3 frames a second and the automatic
+depth 99.2 and 90.1, at 54 ms against 62 ms where it ran shallow: the shallow
+stretches dropped frames, and dropped frames are what make SteamVR halve the
+rate. That is the trade the tray's option already offers, so the option stays
+as it is, on by default.
+
 #### Meta's mesh warps, measured
 
 The warps were drawn in the synthesizer as Meta draws them: a grid over each
@@ -773,6 +818,19 @@ rule and a largest-motion dilation made no improvement to the flow mesh
 is streamed, so the frames OFXR sends must be made for their real display
 time, which `promise_shown_time` does.
 
+The open points of that account were settled from the same binaries
+(`build/steamframe-re/REPORT_ADDENDUM.md`). The per-frame flag that gates the
+headset's motion estimation means "this refresh shows a newly submitted
+frame", so estimation runs only on new frames and generation only on repeats.
+Its translation terms are the app's own locomotion, from
+`XrCompositionLayerSpaceWarpInfoFB`'s `appSpaceDeltaPose`, applied beyond
+about 0.8 m and faded out over the outer 5% of the view; for a stream with no
+vectors they are equal and do nothing. The vision hardware's 184-byte
+configuration is passed along but never read: it runs on fixed constants.
+And the plane its always-on reprojection uses sits at the far plane, which
+makes it rotation-only unless gaze-dependent reprojection is turned on. None
+of it changes what OFXR should send.
+
 #### Flow at a quarter resolution
 
 | Mode | Half: error / SSIM / GPU | Quarter: error / SSIM / GPU |
@@ -785,6 +843,26 @@ time, which `promise_shown_time` does.
 The quarter is kept where the flow only patches the vectors. Its packed input
 averages four bilinear taps, so each packed pixel stands for its 4x4 rather
 than a quarter of them.
+
+#### On frames no tuning used
+
+The 42 triplets chose these settings, so they were checked on 17 that played
+no part: 14 from later Galactic Racer sessions and 3 from Hubris's menu
+(`holdout.py`; error where the scene moved, SSIM, gradient error):
+
+| Galactic Racer, 14 triplets | Error | SSIM | Gradient error |
+|---|---|---|---|
+| Extrapolation, gather / **mesh**, vectors | 9.71 / **9.25** | 0.739 / 0.739 | 10.58 / **10.44** |
+| Extrapolation, gather / **mesh**, FidelityFX flow | 9.70 / **9.21** | 0.722 / **0.736** | 11.36 / **10.90** |
+| Extrapolation, both: gather half / **mesh quarter** | 9.57 / **9.21** | 0.740 / 0.738 | 10.40 / **10.36** |
+| Repeating the frame | 15.50 | 0.609 | 13.19 |
+| Interpolation, hybrid half / **quarter** | 5.25 / 5.26 | 0.830 / 0.830 | 7.15 / 7.14 |
+| Interpolation, vectors / FidelityFX / NVIDIA medium | 5.79 / 6.32 / 5.32 | 0.823 / 0.794 / 0.823 | 7.69 / 7.68 / 7.54 |
+
+The mesh and the quarter-resolution flow held on frames they were not chosen
+on. Hubris's menu moves only 0.1% of the image, so its three triplets say
+little; there the flow predicted the logo best (16.3 against 21.6 for the
+vectors, which do not describe it).
 
 The test harness starts NVIDIA's `nvngx_update.exe` (five per process) with
 every NGX initialisation, and they linger for minutes. Sweeps of a few

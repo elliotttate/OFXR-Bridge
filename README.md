@@ -285,6 +285,18 @@ does.
   game, the earlier gather ran through SteamVR at 0.29 ms a pair from the
   game's vectors and 1.12 ms from FidelityFX's flow, each real frame handed
   over before its prediction.
+- Live at 3004x3004 per eye, with the mesh and the gather interleaved in one
+  race (the warp is taken up from the INI at each tray control change), the
+  median per pair was:
+
+  | Extrapolation, live | Mesh | Gather |
+  |---|---|---|
+  | From the game's vectors | 170-172 us | 432-692 us |
+  | From FidelityFX's flow | 777-782 us | 1541-1714 us |
+
+  In the one set of rounds SteamVR held at 120 Hz, both meshes showed 118.5
+  frames a second and the gathers 113.4 and 103.5; real frames went down
+  45.7-46.2 ms after the wait in all four.
 - `extrapolate=2` also runs FidelityFX's flow, at a quarter per axis: the
   vectors' grid is drawn as above, and wherever a pixel's point does not
   explain the frame before, the flow's prediction is asked for that pixel and
@@ -334,6 +346,19 @@ OpenXR session, and extrapolation wins if both are set.
   half: FidelityFX interpolation lost 0.27 at a quarter and its extrapolation
   0.71.
 
+- **The game is released in the right phase.** With the deeper pipeline a
+  real frame went down 62 ms after the game's wait in some stretches and 70
+  ms in others, at the same 119.7 frames a second. The game's slack can be
+  taken by the capacity wait before synthesis or by the pair hold after it,
+  and both are stable; before synthesis, the finished frame waits out a
+  period, rendered for an older pose. Galactic Racer settled that way after
+  SteamVR's rate dipped, for 57% of a race's pairs. The layer now watches the
+  wait before synthesis and, when nine in ten pairs of a window spend more
+  than half a period there, holds the game one presenter frame longer once;
+  live that left 1.7-6.8% of pairs there, each stretch over within a second,
+  and every full-rate round at 62 ms. While SteamVR runs at half the rate the
+  promise stops measuring too, where it had swung between one period and
+  three. Details in [BUILDING.md](docs/BUILDING.md).
 - **The game is promised the time its frame is shown.** The display time a
   game is handed at xrWaitFrame assumed its frame would go down within a
   display period; a game rendering at half the display rate takes most of
@@ -530,6 +555,16 @@ trades about 7% more frames shown for 17-24 ms of latency where the game is
 at its limit, and only latency where it is not; it stays on by default, as
 upstream ships it. Extrapolation turns it off and shows each frame sooner
 still.
+
+An automatic depth was tried as well: deep, with the shallow pipeline tried
+every so often and kept while it repeated no more frames. Over whole races at
+2316x2316 per eye, two each way, the option on showed 102.6 and 104.3 frames
+a second and the automatic depth 99.2 and 90.1 (54 ms against 62 where it ran
+shallow), because the shallow stretches dropped frames and dropped frames are
+what make SteamVR halve the rate. It was removed; the tray's choice is the
+same trade. Those races also found the option costing a second period at
+times; see "The game is released in the right phase" under
+[Other changes](#other-changes-in-this-fork).
 
 **Live, Hubris.** Hubris is a native Unreal Engine 4 VR game with DLSS 310.2.1
 and no DLSS Frame Generation of its own. It ran through SteamVR at 2568x2568
