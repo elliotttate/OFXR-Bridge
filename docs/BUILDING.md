@@ -279,7 +279,7 @@ against 0.21). These feature versions accept only render preset 1.
 
 Generating below the eye's resolution is a trade rather than an optimisation,
 so it is an option: `[ofxr] dlssg_resolution`, 25 to 100 percent per axis and
-100 by default. The tray offers 100, 67 and 50 under **DLSS Frame Generation
+100 by default. The tray offers 100 and 67 under **DLSS Frame Generation
 resolution** (`[tray] dlssg_resolution`), and `OFXR_RequestNativeDlssgScaleV2`
 changes it in a running game. Below 100 the pack averages the real frame into
 the smaller feature and maps the guides onto its grid. The composition then
@@ -329,7 +329,16 @@ scale several times over. Against the true midpoint frame:
 | 75% | 7.3 | 19.4 | 11.2 |
 | 67% | 5.78 | 14.3 | 10.1 |
 | 50% | 10.9 | 25.0 | 16.6 |
+| OFXR + DLSS vectors | 3.95 | 25.9 | |
 | A blend of the two frames | 28.8 | | |
+
+With the game's vectors exact, as here, OFXR + DLSS vectors is as good as
+native generation away from moving edges. At the edges, the occlusions are
+where native generation earns its cost: 8.7 at full resolution and 14.3 at
+67%, against 25.9. At 50% that advantage is gone (25.0) and the rest is worse,
+for more GPU time than OFXR + DLSS vectors, so the tray offers no step below
+67%. Content the game's vectors do not describe - particles, transparency,
+shadows - favours native generation more than this test can show.
 
 At 3X, against the true frames a third and two thirds of the way from A, 67%
 errs 5.4 and 5.0 where full resolution errs 3.4 and 3.0: each generated frame

@@ -4042,6 +4042,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
     }
     // Per setting: overall, centre, outer and edge error, summed over eyes and slides.
     std::vector<std::array<double, 4>> totals(settings.size());
+    std::array<double, 4> ofxr_totals{};
     double blend_total = 0;
     // 3X: each of the two generated frames restores detail from its own point
     // along the motion, a third and two thirds of the way from A.
@@ -4117,6 +4118,76 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
                 }
             }
         }
+        // OFXR + DLSS vectors on the same pair, for comparison: OFXR's own
+        // synthesis from the game's motion, through the synthesizer.
+        {
+            std::array<ComPtr<ID3D12Resource>, 2> ofxr_sources{
+                create_source_texture(fixture, width, height),
+                create_source_texture(fixture, width, height)};
+            upload_pattern(fixture, ofxr_sources[0].Get(), a_pattern);
+            upload_pattern(fixture, ofxr_sources[1].Get(), b_pattern);
+            std::array<ComPtr<ID3D12Resource>, 2> currents{
+                create_source_texture(fixture, width, height),
+                create_source_texture(fixture, width, height)};
+            auto synthetic = create_source_texture(fixture, width, height);
+            std::array<ID3D12Resource*, 2> source_pointers{ofxr_sources[0].Get(), ofxr_sources[1].Get()};
+            std::array<ID3D12Resource*, 2> current_pointers{currents[0].Get(), currents[1].Get()};
+            std::array<ID3D12Resource*, 1> synthetic_pointers{synthetic.Get()};
+            auto history = std::make_shared<xrfg::D3D12SwapchainHistory>();
+            require(operation_succeeded(history->initialize(fixture.device(), fixture.queue(),
+                        source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
+                    "scale quality OFXR history initialization failed");
+            xrfg::D3D12FrameSynthesizer synthesizer;
+            require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
+                        history, current_pointers, synthetic_pointers, kFormat,
+                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                        xrfg::D3D12OpticalFlowBackend::fidelity_fx)),
+                    "scale quality OFXR synthesizer initialization failed");
+            const auto ofxr_guides = [&](std::uint64_t serial) {
+                auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
+                set->eye_count = kEyeCount;
+                for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                    auto f = std::make_shared<xrfg::DlssMotionVectorFrame>();
+                    f->stream = 195 + eye;
+                    f->epoch = 1;
+                    f->serial = serial;
+                    f->previous_serial = serial - 1;
+                    f->motion_vectors = motion;
+                    f->producer_queue = fixture.queue();
+                    f->output_width = width;
+                    f->output_height = height;
+                    f->motion_width = gw;
+                    f->motion_height = gh;
+                    f->motion_slice = f->output_slice = eye;
+                    f->resource_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                    set->eyes[eye] = f;
+                }
+                return set;
+            };
+            xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
+            require(operation_succeeded(history->capture(0, &capture_a)) &&
+                        operation_succeeded(history->commit(capture_a)),
+                    "scale quality OFXR capture A failed");
+            xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
+            require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime,
+                                                                 ofxr_guides(1))),
+                    "scale quality OFXR prime failed");
+            require_frame_start_gate(synthesizer, "scale quality OFXR frame-start gate");
+            require(operation_succeeded(history->capture(1, &capture_b)) &&
+                        operation_succeeded(history->commit(capture_b)),
+                    "scale quality OFXR capture B failed");
+            require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
+                                                                std::nullopt, ofxr_guides(2))),
+                    "scale quality OFXR pair failed");
+            fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+            const auto actual =
+                readback_pattern(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+            for (UINT eye = 0; eye < kEyeCount; ++eye) {
+                for (int region = 0; region < 4; ++region) {
+                    ofxr_totals[region] += error(actual, eye, region);
+                }
+            }
+        }
         if (!triple) continue;
         const std::array<StereoPattern, 2> thirds{scene(bg_motion / 3, fg_motion / 3),
                                                   scene(bg_motion * 2 / 3, fg_motion * 2 / 3)};
@@ -4155,6 +4226,9 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
     SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_DETAIL", nullptr);
     const double runs = double(slides.size() * kEyeCount);
     std::cout << "scale quality blend mae=" << blend_total / runs << '\n';
+    std::cout << "scale quality OFXR+DLSS vectors mae=" << ofxr_totals[0] / runs
+              << " centre=" << ofxr_totals[1] / runs << " outer=" << ofxr_totals[2] / runs
+              << " edge=" << ofxr_totals[3] / runs << '\n';
     for (std::size_t s = 0; s < settings.size(); ++s) {
         std::cout << "scale quality scale=" << settings[s].scale << " detail=" << settings[s].detail
                   << " mae=" << totals[s][0] / runs << " centre=" << totals[s][1] / runs
