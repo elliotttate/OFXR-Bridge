@@ -123,11 +123,16 @@ struct D3D12NvidiaOpticalFlowOptions {
     // as well and take, per pixel, whichever of the two explains both frames
     // better.
     bool hybrid{};
-    // With the game's DLSS vectors, extrapolate past the current capture
-    // instead of interpolating before it, as Application SpaceWarp does:
-    // submit_pair's interpolation_fraction is then 1 plus how far past it,
-    // in spans from the previous capture to the current one, up to 3.
+    // Extrapolate past the current capture instead of interpolating before
+    // it, as Application SpaceWarp does: submit_pair's interpolation_fraction
+    // is then 1 plus how far past it, in spans from the previous capture to
+    // the current one, up to 3. It follows the game's DLSS vectors and depth,
+    // or with the FidelityFX backend and no guides FidelityFX's flow.
     bool extrapolate{};
+    // With extrapolate, the FidelityFX backend and the game's vectors, run
+    // FidelityFX's flow as well and keep, per pixel, whichever prediction
+    // explains the previous capture better: less error, more GPU time.
+    bool extrapolate_hybrid{};
 };
 
 // A second synthetic produced from the same pair, for a session that hands

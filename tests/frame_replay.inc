@@ -469,6 +469,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         bool bidirectional{};
         bool hybrid{};
         bool extrapolate{};
+        bool extrapolate_hybrid{};
     };
     std::vector<Method> methods{
         {"OFXR+DLSS vectors", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
@@ -499,9 +500,12 @@ void replay_held_out(const std::filesystem::path& directory) {
                                                    : xrfg::D3D12OpticalFlowInputScale::half,
                      parts[0] == "vectors" || parts[0] == "hybrid"};
             m.hybrid = parts[0] == "hybrid";
-            // extrapolate_flow extrapolates from FidelityFX's flow, without guides.
-            m.extrapolate = parts[0] == "extrapolate" || parts[0] == "extrapolate_flow";
-            m.guides = m.guides || parts[0] == "extrapolate";
+            // extrapolate_flow extrapolates from FidelityFX's flow, without
+            // guides, and extrapolate_hybrid from both.
+            m.extrapolate = parts[0] == "extrapolate" || parts[0] == "extrapolate_flow" ||
+                            parts[0] == "extrapolate_hybrid";
+            m.extrapolate_hybrid = parts[0] == "extrapolate_hybrid";
+            m.guides = m.guides || parts[0] == "extrapolate" || parts[0] == "extrapolate_hybrid";
             m.preset = parts[1] == "slow"   ? xrfg::D3D12NvidiaPerformancePreset::slow
                        : parts[1] == "fast" ? xrfg::D3D12NvidiaPerformancePreset::fast
                                             : xrfg::D3D12NvidiaPerformancePreset::medium;
@@ -537,9 +541,10 @@ void replay_held_out(const std::filesystem::path& directory) {
         options.bidirectional = m.bidirectional;
         options.hybrid = m.hybrid;
         options.extrapolate = m.extrapolate;
+        options.extrapolate_hybrid = m.extrapolate_hybrid;
         require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                     current_pointers, synthetic_pointers, f0.view_format,
-                    D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options)), "replay synthesizer");
+                    D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options, true)), "replay synthesizer");
         xrfg::D3D12HistoryCaptureTicket capture_a{}, capture_b{};
         require(operation_succeeded(history->capture(0, &capture_a)) &&
                     operation_succeeded(history->commit(capture_a)), "replay capture A");
@@ -552,6 +557,17 @@ void replay_held_out(const std::filesystem::path& directory) {
         require(operation_succeeded(synthesizer.submit_pair(capture_b, views2, views1, 0, 1, &pair,
                     std::nullopt, m.guides ? guides_b : nullptr, false, fraction)), "replay pair");
         fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
+        // The pair's GPU span on real content: one cold pair, for comparing
+        // configurations rather than as a benchmark.
+        xrfg::D3D12NvidiaGpuTiming timing{};
+        if (synthesizer.consume_nvidia_gpu_timing(&timing) == S_OK) {
+            LARGE_INTEGER frequency{};
+            QueryPerformanceFrequency(&frequency);
+            const double microseconds = timing.gpu_end_qpc > timing.gpu_begin_qpc
+                ? double(timing.gpu_end_qpc - timing.gpu_begin_qpc) * 1e6 / double(frequency.QuadPart)
+                : double(timing.total_microseconds);
+            std::cout << "replay " << m.name << " gpu_us=" << microseconds << std::endl;
+        }
         score(m.name.c_str(), read_back_texture(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET));
         require(operation_succeeded(synthesizer.wait_for_idle()), "replay drain");
     }

@@ -3807,7 +3807,8 @@ struct D3D12FrameSynthesizer::Impl {
         // game's vectors as well.
         // Extrapolation with the game's vectors takes the same route: it
         // extrapolates from both and keeps whichever explains A better.
-        const bool hybrid = (nvidia_options.hybrid || nvidia_options.extrapolate) &&
+        const bool hybrid = (nvidia_options.extrapolate ? nvidia_options.extrapolate_hybrid
+                                                        : nvidia_options.hybrid) &&
             backend == D3D12OpticalFlowBackend::fidelity_fx &&
             valid_game_motion_pair(previous_source, current_source) &&
             current_source.motion_vectors &&

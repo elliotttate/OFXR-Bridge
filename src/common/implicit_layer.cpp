@@ -306,8 +306,22 @@ bool read_dlss_flow_hybrid(const std::filesystem::path& module_directory) noexce
     return read_switch(module_directory, L"dlss_flow_hybrid", L"XRFG_TEST_DLSS_FLOW_HYBRID");
 }
 
-bool read_extrapolate(const std::filesystem::path& module_directory) noexcept {
-    return read_switch(module_directory, L"extrapolate", L"XRFG_TEST_EXTRAPOLATE");
+int read_extrapolate(const std::filesystem::path& module_directory) noexcept {
+    try {
+        wchar_t value[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"XRFG_TEST_EXTRAPOLATE", value, 8);
+        if (n && n < 8) {
+            return std::clamp(static_cast<int>(std::wcstol(value, nullptr, 10)), 0, 2);
+        }
+        if (module_directory.empty()) {
+            return 0;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return std::clamp(
+            static_cast<int>(GetPrivateProfileIntW(L"ofxr", L"extrapolate", 0, ini_path.c_str())), 0, 2);
+    } catch (...) {
+        return 0;
+    }
 }
 
 bool read_triple_frame_gen(

@@ -994,8 +994,9 @@ struct SessionState {
     // xrCreateSession; see nvidia_options_for.
     bool dlss_flow_hybrid{};
     // Extrapolation shows the real frame first and the synthetics after it,
-    // each predicted from it, instead of interpolating before it.
-    bool extrapolate{};
+    // each predicted from it, instead of interpolating before it. 2 also runs
+    // FidelityFX's flow beside the game's vectors.
+    int extrapolate{};
     // One private swapchain per output with staging textures, where the
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
@@ -4796,7 +4797,8 @@ void synthesis_modes(const SessionState& state, bool dlss_motion_vectors,
                      xrfg::D3D12NvidiaOpticalFlowOptions& options,
                      xrfg::D3D12OpticalFlowBackend& backend) noexcept {
     const bool ofxr = options.frame_generation == xrfg::D3D12FrameGeneration::ofxr;
-    options.extrapolate = state.extrapolate && ofxr;
+    options.extrapolate = state.extrapolate != 0 && ofxr;
+    options.extrapolate_hybrid = state.extrapolate == 2 && ofxr;
     options.hybrid = state.dlss_flow_hybrid && ofxr && dlss_motion_vectors && !options.extrapolate;
     if (options.hybrid || options.extrapolate) {
         backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
@@ -4837,7 +4839,7 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_dlss_flow_hybrid(current_layer_directory());
     state->extrapolate =
         xrfg::implicit_layer::read_extrapolate(current_layer_directory());
-    if (state->extrapolate) {
+    if (state->extrapolate != 0) {
         // Extrapolation is there for latency, and its synthetics already
         // trail the real frame by a period: the deeper pipeline's held
         // period would only add latency back.
@@ -5092,7 +5094,7 @@ XrResult layer_create_session_impl(
     // still be queued when the next pair composes: it needs the second slot.
     state->two_slot_synthetic_ring =
         state->deep_pipeline || state->frames_per_application_frame > 2 || triple_limited ||
-        state->extrapolate;
+        state->extrapolate != 0;
     state->triple_switchable =
         triple_binding && state->two_slot_synthetic_ring;
     if (triple_binding && !state->triple_switchable) {

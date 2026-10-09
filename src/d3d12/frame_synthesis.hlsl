@@ -1126,8 +1126,10 @@ float4 extrapolate_pixel(float2 pixel, CameraSample here) {
     // In the hybrid the vectors order the surfaces by depth; the flow only
     // offers its own point.
     uint candidates = smooth_motion || (extrapolate_flow && hybrid_layout) ? 1 : 9;
-    [unroll] for (uint candidate = 0; candidate < 9; ++candidate) {
-        if (candidate >= candidates) break;
+    // The hybrid's flow pass always takes one candidate; FXC warns that such
+    // a loop runs once (3557) for that entry point alone.
+#pragma warning(disable : 3557)
+    [loop] for (uint candidate = 0; candidate < candidates; ++candidate) {
         float2 start = pixel;
         if (candidate > 0) {
             uint ring = (candidate - 1) / 4;

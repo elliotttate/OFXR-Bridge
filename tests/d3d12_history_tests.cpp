@@ -6008,7 +6008,7 @@ void bench_frame_generation_methods() {
         Backend backend;
         Preset preset;
         Scale scale;
-        bool game_motion, native, triple, hybrid = false, extrapolate = false;
+        bool game_motion, native, triple, hybrid = false, extrapolate = false, extrapolate_hybrid = false;
     };
     const std::vector<Method> methods{
         {"OFXR FidelityFX, half-res flow", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, false},
@@ -6020,6 +6020,7 @@ void bench_frame_generation_methods() {
         {"OFXR NVIDIA + DLSS vectors", Backend::nvidia, Preset::medium, Scale::half, true, false, false},
         {"OFXR DLSS vectors + FidelityFX flow", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false, true},
         {"OFXR DLSS vectors extrapolation", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false, false, true},
+        {"OFXR DLSS vectors + flow extrapolation", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false, false, true, true},
         {"OFXR FidelityFX 3X", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, true},
         {"OFXR NVIDIA OFA medium 3X", Backend::nvidia, Preset::medium, Scale::half, false, false, true},
 #ifdef XRFG_NATIVE_DLSSG
@@ -6062,6 +6063,7 @@ void bench_frame_generation_methods() {
         options.native_scale = 100; // XRFG_NATIVE_DLSSG_SCALE times the others
         options.hybrid = method.hybrid;
         options.extrapolate = method.extrapolate;
+        options.extrapolate_hybrid = method.extrapolate_hybrid;
         xrfg::D3D12FrameSynthesizer synthesizer;
         require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                                                current_out, synthetic_out, kFormat,
