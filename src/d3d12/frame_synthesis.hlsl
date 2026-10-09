@@ -749,11 +749,15 @@ bool game_motion_static_overlay(float2 pixel, float4 current) {
     int2 texel = int2(pixel);
     bool overlay = rgb_error(PreviousFrame.Load(int4(texel, int(Slice), 0)), current) <= 1.0 / 255.0;
     if (overlay) {
-        float2 backward = game_motion_for_pixel(pixel, Slice, ViewIndex);
-        MappedCoordinate moved = map_source_to_target(pixel + backward, PreviousMappings[ViewIndex]);
-        CameraSample predicted = sample_previous_target(moved.coordinate, Slice, ViewIndex);
-        overlay = moved.valid >= 0.5 && predicted.valid >= 0.5 &&
-            rgb_error(predicted.color, current) > 0.1;
+        // Content its vector holds still is explained without a sample, and in
+        // a still scene that is nearly every pixel.
+        MappedCoordinate moved = map_source_to_target(pixel + game_motion_texel(pixel),
+            PreviousMappings[ViewIndex]);
+        overlay = moved.valid >= 0.5 && length(moved.coordinate - pixel) >= 0.5;
+        if (overlay) {
+            CameraSample predicted = sample_previous_target(moved.coordinate, Slice, ViewIndex);
+            overlay = predicted.valid >= 0.5 && rgb_error(predicted.color, current) > 0.1;
+        }
     }
     if (overlay) {
         int2 limit = int2(int(Width) - 1, int(Height) - 1);

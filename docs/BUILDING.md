@@ -279,7 +279,7 @@ meaningless. Its median GPU time per stereo pair on an RTX 5090, by eye size
 
 | Method | 1440x1584 | 2004x2004 | 3004x3004 | 3600x3600 |
 |---|---|---|---|---|
-| OFXR + DLSS vectors | 0.13 ms | 0.23 ms | 0.51 ms | 0.72 ms |
+| OFXR + DLSS vectors | 0.13 ms | 0.23 ms | 0.52 ms | 0.72 ms |
 | OFXR FidelityFX, half-res flow | 0.20 ms | 0.31 ms | 0.58 ms | 0.78 ms |
 | OFXR FidelityFX, full-res flow | 0.38 ms | 0.64 ms | 1.30 ms | 1.80 ms |
 | Native DLSS FG 2X | 1.14 ms | 1.49 ms | 2.38 ms | 3.42 ms |
@@ -456,8 +456,14 @@ starts cost 6.8 ms per pair at 3004x3004 on `XRFG_TEST_FG_BENCH`, whose
 turning-head frames disagree with their vectors almost everywhere. Gated by
 the motion edge, with single-texel vector probes, that benchmark measures
 0.50 ms at the median against 0.45 before (p10 0.45 against 0.42), and its
-uniform vectors never start a search; the overlay check adds 0.01 ms. In
-Hubris, two rounds measured 0.325 and 0.326 ms, against 0.323 before.
+uniform vectors never start a search. The overlay check adds 0.01-0.02 ms
+there. In Hubris, whose menu scene is mostly still, two rounds measured 0.325
+and 0.326 ms with the search, against 0.323 before. The overlay check took
+that to 0.397 ms when it read a filtered vector and sampled A at every pixel
+unchanged on screen. It now asks the guide texel's vector first, and samples
+A only where that vector moves the pixel: 0.365 ms. Checking after the solve's
+first step instead, whose vector it could reuse, measured 0.58-0.63 ms on the
+moving benchmark.
 
 At 3X, against the true frames a third and two thirds of the way from A, 67%
 errs 4.9 and 4.6 where full resolution errs 3.4 and 3.0: each generated frame
