@@ -506,6 +506,163 @@ vectors (9.1). The same eight triplets checked three things:
   best by a little, but it costs more than 100% (it loses the two-thirds
   guide grid), so the tray offers 100%, 67% and 50%.
 
+#### The sweep on 42 recorded triplets
+
+Recorded later on a Steam Frame (3004x3004 per eye) and replayed with every
+setting: 22 triplets from Galactic Racer's Jakku time trial and 20 from its
+Tatooine podrace, including a crash with debris, a cave and the pod's shadow
+on fast ground. Besides the error where the scene moved, the replay now
+scores SSIM over 8x8 luma blocks, sharpness (the output's gradient against the
+truth's, below 1 blurrier) and gradient error, since the absolute error alone
+favours a blur. Paired differences are against the same triplets' baseline.
+
+Native generation, by resolution (detail restore 2, NGX's depth scale 1):
+
+| Resolution | Error | SSIM | Sharpness | Gradient error |
+|---|---|---|---|---|
+| 100% | 8.15 | 0.770 | 0.75 | 8.40 |
+| 85% | 7.96 | 0.785 | 0.83 | 8.03 |
+| 75% | 8.01 | 0.785 | 0.83 | 8.07 |
+| 67% | 8.04 | 0.784 | 0.83 | 8.13 |
+| 60% | 8.14 | 0.781 | 0.83 | 8.23 |
+| 50% | 8.04 | 0.787 | 0.86 | 8.18 |
+| 40% | 8.40 | 0.775 | 0.88 | 8.57 |
+
+Full resolution is the blurriest: the detail restore, which only runs below
+100%, also puts back sharpness NVIDIA's frame lacks. Restoring the real
+frame's detail above a small blur at 100% as well (offsets of 0.5-1.5 pixels,
+with or without a stricter agreement weight) erred 0.12-0.42 more, as the
+detail landed where the vectors were wrong. So the default is now 67%: less
+error than 100%, sharper, and about a quarter cheaper. 85% is best by a
+little but costs more than 100%.
+
+Native settings, paired against the above (negative is better):
+
+| Setting | 100% | 67% |
+|---|---|---|
+| NGX linearised depth scale 0.03 / 0.05 / 0.1 / 0.2 / 0.3 / 0.5 | -0.13 / -0.13 / -0.12 / -0.12 / -0.10 / -0.08 | -0.10 / -0.10 / -0.09 / -0.08 / -0.07 / -0.06 |
+| Depth scale 10 | +0.01 | -0.00 |
+| Near/far partition 150 / 4000 | +0.10 / +0.24 | +0.03 / +0.20 |
+| Object separation 10 / 160 | +0.37 / -0.09 | +0.36 / -0.04 |
+| Depth scale 0.1 with partition 150 / separation 10 | -0.10 / +0.08 | -0.07 / +0.12 |
+| Vectors marked as already dilated | +0.21 | +0.00 |
+| A feature per eye | -0.00 | +0.00 |
+| Seam 16 / 128 | +0.00 / -0.03 | +0.03 / +0.01 |
+| Vectors scaled by 0.8 / 1.2 | +0.44 / +0.79 | +1.19 / +0.98 |
+| Detail restore 0 / 1 / 4 / 8 (67%; 50% alike) | | +0.23 / +0.02 / -0.01 / -0.01 |
+
+The depth scale of 0.1, NVIDIA's suggestion for compressed depth, is now the
+default: better on 31 and 32 of the 42 triplets, with SSIM up 0.0016-0.0018.
+Detail restore 4 improved the gradient error by 0.08-0.12 but the error by
+only 0.01-0.03, on half the triplets, so 2 stays.
+
+OFXR's flow options, with the composition below:
+
+| Configuration | Error | SSIM | Gradient error |
+|---|---|---|---|
+| NVIDIA slow, half input | 7.59 | 0.792 | 7.93 |
+| NVIDIA medium, half / three-quarter / full | 7.67 / 7.69 / 7.67 | 0.791 / 0.791 / 0.791 | 7.94 / 7.93 / 7.92 |
+| NVIDIA fast, half / full | 7.94 / 7.99 | 0.777 / 0.776 | 8.29 / 8.33 |
+| NVIDIA medium bidirectional / slow full bidirectional | 8.40 / 8.32 | 0.779 / 0.780 | 8.16 / 8.15 |
+| FidelityFX half / three-quarter / full | 7.86 / 7.82 / 7.83 | 0.779 / 0.781 / 0.782 | 8.16 / 8.12 / 8.08 |
+| OFXR + DLSS vectors | 8.40 | 0.806 | 7.92 |
+
+With every OFXR method forced to native generation's fixed half, as when frame
+times are uneven, OFXR + DLSS vectors measured 9.10, FidelityFX 8.25 and NVIDIA
+medium 8.12, against native's 7.96 at 67%.
+
+**Optical flow's composition.** Where the flow's two samples disagreed, the
+flow methods faded to the same-pixel blend after the headset's turn. On real
+game frames that blend is a double image, so it was replaced, measured on all
+42 triplets (FidelityFX half / NVIDIA medium / NVIDIA fast):
+
+- Solving for the flow's endpoint, as OFXR + DLSS vectors does, sharpened but
+  erred more: 8.25 / 8.44 / 9.30 against 8.21 / 8.17 / 9.01. Flow fields are
+  too noisy for it.
+- Trusting the flow everywhere: FidelityFX 8.02, but a pure head turn erred
+  13.6 against 0.16, since the camera-only blend is exact there.
+- Whichever explains both frames better, the flow or the camera alone, with
+  the flow keeping a tie: FidelityFX 7.85 at a slope of 4, 7.86 at 8 and 7.91
+  at 16; without the tie's bias, 8.32. Slope 8 keeps a pure head turn at 0.08
+  (slope 4: 0.57, which `xrfg_vertical_fov_tests` rejects). NVIDIA medium
+  7.67, fast 7.94.
+- Keeping NVIDIA's cost and consistency weights on top of the selection:
+  medium 7.74, fast 8.70; the fast preset's endpoint check alone, fast 8.64;
+  the bidirectional consistency alone, 8.36. B's warped sample where the
+  forward flow does not lead back: 8.81 (8.66 with a looser threshold). All
+  lean on the blend or on one side where the game moved, so only the
+  bidirectional option keeps its consistency check.
+- B's warped sample where the flow is chosen but its samples disagree: 8.18 /
+  7.90, worse on 40 of the 42.
+
+**OFXR + DLSS vectors' motion edge.** B's sample stands in for disagreeing
+samples wherever a vector 16 pixels away differs. Thresholds of 1, 0.5, 0.25
+and 0.1 pixel measured 8.49, 8.44, 8.43 and 8.40; always, 8.34, but that
+steps a fade (22.5 on the synthetic fade, which a positive threshold keeps at
+0.08 as long as the motion is uniform). Second differences, which ignore
+smooth gradients, measured 8.64 on 20 triplets: the gradient's B sample helps.
+
+**The hybrid.** DLSS vectors + FidelityFX flow, choosing per pixel by which
+branch's samples agree better (lower is better):
+
+| Variant | Error | SSIM | Gradient error |
+|---|---|---|---|
+| Selection slope 8, flow loses ties | 7.19 | 0.814 | 7.59 |
+| Slope 4 / 16 | 7.21 / 7.17 | 0.818 / 0.810 | 7.49 / 7.70 |
+| Tie bias 0.5 / 1.5 | 7.18 / 7.29 | 0.807 / 0.815 | 7.69 / 7.59 |
+| Samples compared blurred over 2x2 (kept) | 7.17 | 0.815 | 7.54 |
+| Plus the vectors' covered-background choice trusted | 7.56 | 0.807 | 7.89 |
+| Plus no flow where the vectors' samples agree within 0.02 (kept) | 7.18 | 0.815 | 7.54 |
+
+Comparing unblurred samples, sharp stripes resampled at a fraction of a pixel
+made exact vectors look worse than a flow that was a stripe off: the
+synthetic striped square erred 3.14 against 1.74 for the vectors alone;
+blurred, 1.96. Its shadow scene's shadow erred 5.36, against 6.16 for the
+vectors. At the synthetic occlusion edges it erred 4.5 against 0.68; trusting
+the vectors' covered-background conclusion cut that to 2.8 but cost the real
+frames 0.4, since their vectors are not exact. 1.61 ms a pair offline at
+3004x3004, 1.58-1.71 ms live.
+
+#### Extrapolation
+
+Meta's runtimes were examined for how they predict. The PC runtime's ASW
+extrapolates from optical flow (video-encoder macroblock motion, median
+filtered) by splatting a mesh, the smallest displacement winning overlaps,
+with no hole filling and a prediction factor clamped to [-1, 1.5]. The PC
+runtime advertises no Application SpaceWarp; the Meta XR Simulator's AppSW
+draws a grid mesh with a vertex per motion-vector texel, displaced by the
+app's motion and depth in world space, depth-tested, each vertex taking the
+nearest-depth vector of four taps, sky taking camera motion only, and the
+mesh stretching over disocclusions. OFXR's extrapolation gathers instead of
+splatting, in the same composition pass as its interpolation, but orders
+surfaces by the game's depth as AppSW does and stretches the background the
+same way. Whether a mesh warp would measure better is open.
+
+On the 42 triplets, predicting frame 2 from frames 0 and 1 a whole frame
+ahead (1 + dt2/dt1 spans from A):
+
+| Variant | Error | SSIM |
+|---|---|---|
+| Showing frame 1 again | 20.62 | 0.489 |
+| 13 candidates, ordered by motion (faster nearer) | about 1.5 worse on Tatooine, where the cockpit moves with the camera | |
+| 13 candidates, ordered by the game's depth | 12.58 | 0.677 |
+| Plus a still-content hypothesis checked against A | 12.56 | 0.674 |
+| Search only near motion edges (second differences within 48 px) | 12.56 | 0.676 |
+| Nine candidates over three steps there (kept) | 12.68 | 0.679 |
+
+A shadow cast by the pod moves with the ground's vectors; the still-content
+hypothesis did not fix it, since the ground's texture moves under it. The
+layer shows the real frame at its own display time and the prediction a
+period later, with the deferred current copy and the deeper pipeline off and
+a two-slot synthetic ring; `xrfg_layer_extrapolate_*` check the order inline,
+on the presenter and pipelined. Live in Galactic Racer the flight log showed
+every real frame handed over before its prediction.
+
+The test harness starts NVIDIA's `nvngx_update.exe` (five per process) with
+every NGX initialisation, and they linger for minutes. Sweeps of a few
+hundred replays exhausted the commit limit with over a thousand of them; kill
+them between runs.
+
 Hubris's menu, where only a glowing logo moves (0.2% of
 the image) and its vectors do not describe it, ordered them FidelityFX flow
 8.7, native 10.5-11.5, NVIDIA flow 13.6 and OFXR + DLSS vectors 16.9, against

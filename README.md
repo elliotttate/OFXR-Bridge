@@ -35,6 +35,8 @@ frame-generation backend. It sits alongside the methods OFXR already had:
 | OFXR, FidelityFX optical flow | AMD FidelityFX optical flow, on any supported D3D12 GPU |
 | OFXR, NVIDIA optical flow | the Optical Flow hardware engine of Turing and newer NVIDIA GPUs |
 | OFXR + DLSS vectors | OFXR's own synthesis, driven by the game's DLSS motion vectors |
+| **OFXR, DLSS vectors + FidelityFX flow** (new) | both, each pixel from whichever explains the two frames better: the least error measured |
+| **OFXR extrapolation** (new, SpaceWarp-style) | the newest frame moved on along the game's vectors and depth, shown after it: no added latency |
 | **Native DLSS FG** (new) | NVIDIA's DLSS Frame Generation feature, fed the game's DLSS motion vectors and depth |
 
 In native-enabled builds, it also makes OFXR + DLSS vectors work without a
@@ -171,22 +173,23 @@ time it arms. The optical-flow backend, preset, scale and bidirectional
 controls only configure OFXR's own algorithm. They do not tune NVIDIA's
 feature.
 
-**Optional: faster native generation at a lower resolution.** The tray's
-**DLSS Frame Generation resolution** submenu offers 100% (the default), 67%
-and 50%, applied the next time the game starts. At 67%, NVIDIA generates at two
-thirds of each eye's resolution, and the bridge puts back the real frame's
-detail wherever it can follow the game's motion. Moving content in the
-generated frames is softer; occlusion edges soften most. In return, Galactic
-Racer on a Steam Frame (3004x3004 per eye, 120 Hz, racing) rendered 106.3
-game frames a second at 67%, against 99.5 at 100% (OFXR + DLSS vectors:
-112.5). Offline, a turning-head 2X pair costs 1.74 ms at 67%, against 2.35 ms.
-67% suits games whose DLSS renders at two thirds (Quality).
+**Native generation's resolution.** The tray's **DLSS Frame Generation
+resolution** submenu offers 100%, 67% (the default) and 50%, applied the next
+time the game starts. Below 100%, NVIDIA generates at that fraction of each
+eye's resolution, and the bridge puts back the real frames' detail wherever it
+can follow the game's motion. NVIDIA's full-resolution frame is the softest of
+the three: on 42 recorded Galactic Racer triplets, 67% erred less where the
+scene moved (7.96 against 8.04), with better SSIM (0.786 against 0.771) and
+more of the real frames' detail. It also costs about a quarter less: on a
+Steam Frame (3004x3004 per eye, 120 Hz, racing) Galactic Racer rendered 106.3
+game frames a second at 67%, against 99.5 at 100%; offline a turning-head 2X
+pair costs 1.74 ms at 67%, against 2.35 ms.
 
 50% is faster again (107.8 game frames a second there; offline 1.40 ms a
-pair). On a sharp synthetic scene it loses visible detail at moving edges,
-but on recorded Galactic Racer frames 67% and 50% both had less error than
-100% (7.9 against 8.05, where the scene moved). If you want a cheaper method
-still, use OFXR + DLSS vectors.
+pair) and measured like 67% on the recorded frames (7.95), but a sharp
+synthetic scene loses visible detail at its moving edges, and thin
+structures shimmered live. If you want a cheaper method still, use OFXR + DLSS
+vectors.
 
 | Where | Setting |
 |---|---|
@@ -204,7 +207,89 @@ launch the game:
 | `XRFG_TEST_NATIVE_DLSSG_DECISIONS=1` | Logs the GPU's choice for each pair, generated image or current frame, to `ofxr-native-decisions-pid*-instance*.log` beside the layer DLL. It is not a frame-rate benchmark. |
 | `XRFG_TEST_NATIVE_DLSSG_RESEED_EVERY_PAIR` | Makes every pair take the turning-head reseed, so its cost can be measured with the headset still. |
 
+## Two new OFXR modes: a hybrid, and extrapolation
+
+**DLSS vectors + FidelityFX flow.** In a game with DLSS, OFXR + DLSS vectors
+follows the game's motion vectors exactly, but some content does not move the
+way its vectors say: a shadow cast by something moving with the camera onto
+ground rushing past, a reflection, an object that writes no velocity. Optical
+flow follows the image instead, and loses elsewhere. With
+`[ofxr] dlss_flow_hybrid=1`, OFXR runs FidelityFX's flow as well and composes
+each pixel from whichever explains both frames better, comparing their samples
+blurred a little; where the vectors already explain both frames, the flow is
+not asked. On 42 recorded Galactic Racer triplets it had the least error of
+every method where the scene moved, with the best SSIM:
+
+| Method (2X, recorded Galactic Racer frames) | Error where the scene moved | SSIM |
+|---|---|---|
+| **OFXR DLSS vectors + FidelityFX flow** | **7.18** | **0.815** |
+| OFXR NVIDIA slow / medium flow | 7.59 / 7.67 | 0.792 / 0.791 |
+| OFXR FidelityFX full / half-res flow | 7.83 / 7.86 | 0.782 / 0.779 |
+| Native DLSS FG 85% / 67% / 50% / 100% | 7.86 / 7.96 / 7.95 / 8.04 | 0.786 / 0.786 / 0.788 / 0.771 |
+| OFXR + DLSS vectors | 8.40 | 0.806 |
+| A blend of the two frames | 12.99 | 0.607 |
+
+OFXR's methods generate at the instant the frame times say; native generation
+is fixed at a half, which costs it where frames come unevenly. It costs about
+as much as native generation at 67%: 1.6 ms a stereo pair offline at 3004x3004
+per eye, and 1.58-1.71 ms live in Galactic Racer on a Steam Frame, against
+1.64-1.73 ms for native at 67%. It takes the FidelityFX backend. With exact
+synthetic vectors it errs more than the vectors alone at occlusions, where
+their two samples must disagree and the flow can look the better explanation.
+
+**Extrapolation, SpaceWarp-style.** Every interpolating method, NVIDIA's
+included, holds each real frame back a display period, to show a frame
+between it and the one before first. With `[ofxr] extrapolate=1`, in a game
+with DLSS vectors and depth, OFXR shows each real frame as soon as it is
+ready, at its own display time, and then predicts the next display period
+from it, as Meta's Application SpaceWarp does: a display period less latency,
+for the quality of a prediction.
+
+- Each pixel of the prediction is the point of the real frame whose motion -
+  the game's vectors less the head's turn, which the runtime's own
+  reprojection supplies - carries it there by the time it is shown. Near a
+  motion edge, candidate motions from the neighbourhood are solved as well,
+  and the nearest surface by the game's depth wins; where none reaches the
+  pixel, background the moving content uncovers, the background beside it is
+  stretched over it, as Meta's mesh warp stretches.
+- Predicting a whole frame ahead from recorded frames, a harder test than the
+  half frame a headset needs, it erred 12.7 where the scene moved, against
+  20.6 for showing the last frame again, with SSIM 0.679 against 0.489.
+- It costs 0.43 ms a pair offline, and a median 1.1-1.25 ms live in Galactic
+  Racer, less than native generation at 67%.
+- Content its vectors do not describe, such as a shadow on ground rushing
+  past, moves with the vectors; there is no second frame to correct it.
+  The deeper pipeline is turned off, since its held period would add the
+  latency back.
+
+| Where | Hybrid | Extrapolation |
+|---|---|---|
+| A directly loaded layer (`ofxr_bridge.ini`) | `[ofxr] dlss_flow_hybrid=1` | `[ofxr] extrapolate=1` |
+| For tests, the game's environment | `XRFG_TEST_DLSS_FLOW_HYBRID=1` | `XRFG_TEST_EXTRAPOLATE=1` |
+
+Both apply to OFXR's own algorithm with the game's DLSS vectors, and are read
+when the game starts its OpenXR session. Extrapolation wins if both are set.
+
 ## Other changes in this fork
+
+- **Optical flow keeps pixels the camera alone does not explain.** Where the
+  flow's two samples disagreed, the optical-flow methods fell back to a blend
+  that follows only the headset's turn, which in a game that moves is a double
+  image. Each pixel now takes whichever explains both frames better, the flow
+  or the camera alone, and the flow keeps a tie. NVIDIA's cost and the fast
+  preset's endpoint check, which both leaned on the blend, no longer weight
+  it. On the recorded triplets FidelityFX flow's error fell from 8.21 to 7.86,
+  NVIDIA medium's from 8.17 to 7.67 and NVIDIA fast's from 9.01 to 7.94; a pure
+  head turn now errs 0.08 against 0.16.
+- **OFXR + DLSS vectors treats any non-uniform motion as two surfaces.** Where
+  its two samples disagree, B's warped sample stands in wherever a vector 16
+  pixels away differs by a tenth of a pixel, not a whole one: ground rushing
+  past gains from it too (error 8.49 to 8.40). A fade over uniform motion
+  still blends.
+- **NGX's linearised depth is scaled by a tenth**, as NVIDIA suggests for
+  compressed depth: native generation's error fell by 0.12 at 100% and 0.09 at
+  67%. NGX's other depth heuristics, pre-dilated vectors, per-eye features and
+  the seam width measured no better than they are.
 
 - **DLSS guides matched to the right eye.** When each eye has its own DLSS
   feature, as under UEVR, the guides were matched to eyes in the order their
@@ -272,6 +357,9 @@ of the eye size, frames are patterned, and no VR game is running.
 | OFXR NVIDIA medium flow | 1.30 ms | 1.61 ms | 2.89 ms | 3.80 ms |
 | Native DLSS FG 3X | 1.66 ms | 2.13 ms | 3.73 ms | 5.02 ms |
 
+At 3004x3004, OFXR's DLSS vectors + FidelityFX flow costs 1.61 ms a pair and
+extrapolation 0.43 ms (0.53 ms for interpolating from the vectors).
+
 **Live, Galactic Racer on a Steam Frame.** The game ran under UEVR through
 SteamVR, at 3004x3004 per eye and 120 Hz, racing the Arcade time trial at
 speed. Each method had four interleaved rounds of ten seconds.
@@ -296,6 +384,12 @@ speed. Each method had four interleaved rounds of ten seconds.
   ranged by up to 11 frames a second.
 - On the Meta XR Simulator (1440x1584 per eye), every method held the
   simulator's 90 frames a second.
+- The two new modes, live on the same track with this release's composition,
+  interleaved with native generation at 67% (1.64-1.82 ms): DLSS vectors +
+  FidelityFX flow 1.58-1.71 ms, and extrapolation a median 1.07-1.25 ms,
+  whose tenth with the most motion edges took over 5 ms before its edge
+  search was halved. The flight log showed each real frame handed over
+  before its prediction.
 
 **Live, Hubris.** Hubris is a native Unreal Engine 4 VR game with DLSS 310.2.1
 and no DLSS Frame Generation of its own. It ran through SteamVR at 2568x2568
@@ -452,7 +546,7 @@ meaningless.
 
 | Variable | Measures |
 |---|---|
-| `XRFG_TEST_FG_BENCH=1` | Every frame-generation method through the synthesizer, at 2004x2004 per eye by default: OFXR FidelityFX and NVIDIA flow, DLSS vectors, and native 2X/3X. It also times the game-side guide snapshot copies. The native rows need a native build. |
+| `XRFG_TEST_FG_BENCH=1` | Every frame-generation method through the synthesizer, at 2004x2004 per eye by default: OFXR FidelityFX and NVIDIA flow, DLSS vectors, the hybrid, extrapolation, and native 2X/3X. It also times the game-side guide snapshot copies. The native rows need a native build. |
 | `XRFG_TEST_NATIVE_DLSSG_BENCH=1` | One native stereo pair, still and turning head, at 2X and 3X, at 2064x2208 per eye by default. |
 | `XRFG_TEST_BENCH_EYE=WxH` | The per-eye size for the two benchmarks above, for example `3004x3004`. Guides stay at two thirds of it. |
 | `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` | Native quality on a detailed static scene after head rotations of about 0.25 to 16 pixels. |
@@ -466,32 +560,33 @@ Remove-Item Env:XRFG_TEST_FG_BENCH, Env:XRFG_TEST_BENCH_EYE
 ```
 
 **Real game frames.** `XRFG_TEST_CAPTURE_FRAMES=<folder>`, set in the game's
-environment, makes the layer record runs of consecutive frames: colour, views
-and DLSS guides. `XRFG_TEST_CAPTURE_WAIT=1` starts them when a file named
-`go` appears in the folder. `XRFG_TEST_REPLAY=<folder>/seq<N>` then generates
-the middle frame of three from the other two with every method, the game's
-vectors scaled by the recorded frame times, and compares each with the real
-middle frame. Twelve triplets from Galactic Racer's Jakku time trial on a
-Steam Frame (3004x3004 per eye, about 50 frames a second while recording),
-error where the scene moved, averaged over the six recorded after the eye
-fix:
+environment, makes the layer record runs of consecutive frames: colour, views,
+DLSS guides and the frame the headset was sent. `XRFG_TEST_CAPTURE_WAIT=1`
+starts them when a file named `go` appears in the folder.
+`XRFG_TEST_REPLAY=<folder>/seq<N>` then generates the middle frame of three
+from the other two with every method, the game's vectors scaled by the
+recorded frame times, and compares each with the real middle frame: the
+absolute error overall and where the scene moved, and there SSIM over 8x8
+blocks, sharpness (the output's gradient against the truth's) and gradient
+error. The absolute error alone favours a blur.
 
-| Method | Error |
+| Variable | Effect |
 |---|---|
-| Native DLSS FG, 67% | 8.4 |
-| Native DLSS FG, 100% | 8.5 |
-| OFXR FidelityFX full-res flow / NVIDIA medium flow | 8.8 / 8.9 |
-| OFXR FidelityFX half-res flow | 9.2 |
-| OFXR + DLSS vectors | 10.7 |
-| A blend of the two frames | 14.6 |
+| `XRFG_TEST_REPLAY_FIRST` | The first frame of the three. |
+| `XRFG_TEST_REPLAY_FLOWS` | OFXR configurations to run instead, `backend/preset/scale[/bi]` separated by commas: `vectors`, `hybrid`, `extrapolate`, `ffx` or `nvidia`; `slow`, `medium` or `fast`; `full`, `three_quarter` or `half`. |
+| `XRFG_TEST_REPLAY_NATIVE_SCALES` | Native resolutions to run, for example `100,67`. `XRFG_TEST_REPLAY_NATIVE_ONLY=1` skips OFXR. |
+| `XRFG_TEST_REPLAY_EXTRAPOLATE=1` | Predict frame 2 from frames 0 and 1 instead. |
+| `XRFG_TEST_REPLAY_FRACTION` | Moves OFXR's frame, for example to native generation's half. |
+| `XRFG_TEST_REPLAY_SAVE`, `_SAVE_FULL` | Write crops, or whole images, as PPM. |
+| `XRFG_TEST_REPLAY_VECTOR_GAIN`, `_GUIDE_SHIFT`, `_SWAP_EYES` | Test the guides. |
 
-Section by section the order changes: OFXR + DLSS vectors had the least
-error on some, but along one fast wall the game's vectors did not describe
-the motion at any scale and it erred as much as a blend, where NVIDIA's own
-flow kept native generation near the optical-flow methods. Eight more
-triplets, recorded later in the same race, measured OFXR + DLSS vectors 7.8,
-native generation 7.9 at 67% and 8.05 at 100%, optical flow 8.1 to 8.3 and a
-blend 13.0. Over both sets native generation at 67% had the least error.
+The method table above comes from 42 triplets: 22 from Galactic Racer's Jakku
+time trial and 20 from its Tatooine podrace, on a Steam Frame at 3004x3004 per
+eye. Section by section the order changes: along a fast wall the game's
+vectors did not describe the motion at any scale, and around the Tatooine
+pod's shadow they moved it with the ground, while in a crash with debris they
+beat every flow. The hybrid takes the better of the two per pixel. The full
+sweep, every native setting and every flow option, is in docs/BUILDING.md.
 
 The native pair and all-methods benchmarks generate from patterned frames.
 Blank frames compress to almost nothing in GPU memory, and NGX then measures
