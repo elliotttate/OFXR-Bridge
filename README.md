@@ -160,6 +160,21 @@ time it arms. The optical-flow backend, preset, scale and bidirectional
 controls only configure OFXR's own algorithm. They do not tune NVIDIA's
 feature.
 
+**Optional: faster native generation at a lower resolution.** The tray's
+**DLSS Frame Generation resolution** submenu offers 100% (the default), 67%
+and 50%, applied the next time the game starts. Below 100%, NVIDIA generates
+at that fraction of each eye's resolution, and the bridge puts back the real
+frame's detail wherever it can follow the game's motion. Moving content in the
+generated frames is softer; occlusion edges soften most. In return, a 2X pair
+at 3004x3004 costs 1.71 ms at 67% and 1.36 ms at 50%, against 2.35 ms (turning
+head, offline). 67% suits games whose DLSS renders at two thirds (Quality).
+
+| Where | Setting |
+|---|---|
+| Tray settings | `[tray] dlssg_resolution=67` |
+| A directly loaded layer | `[ofxr] dlssg_resolution=67` (25 to 100) |
+| A running game | `OFXR_RequestNativeDlssgScaleV2(67)` |
+
 Environment variables for experiments and diagnostics. Set them before you
 launch the game:
 
@@ -192,6 +207,12 @@ launch the game:
   the presenter first. As a second guard, the copy and queue-synchronisation
   paths skip fence values that were never issued. The new test
   `xrfg_layer_steamvr_live_switch` covers this.
+- **A GPU fault fixed on resolution changes.** Changing UEVR's resolution
+  mid-race with native generation faulted the GPU while the swapchains were
+  recreated. The new swapchain's feature initialised NGX a second time while
+  the game recreated its own DLSS features. NGX now stays initialised for the
+  device. Swapchain teardown also no longer frees the hand-over copier's work
+  that has not finished.
 - **Cheaper guide snapshots.** Snapshots copy only the rectangle each DLSS
   evaluation reads, and only the depth plane of a depth-stencil target. In
   Galactic Racer, the game-side cost per frame went from 165 us to 65 us on
@@ -298,9 +319,11 @@ Tried and rejected:
   identical, but live on the Steam Frame, in the game's hub scene, the median
   pair was 0.2-0.7 ms slower at every load tried. While racing, the median
   went from 5.1-5.3 ms to 6.3 ms and the game lost about two frames a second.
-- **Generating below eye resolution and upscaling.** At 75% per axis it is
-  cheaper, but the resample alone adds about four times a native pair's error
-  to every generated frame. It is recorded as a trade-off and was not taken.
+- **Generating below eye resolution by default.** Upscaling alone lost too
+  much detail, so it is an option instead (see
+  [Turning it on](#turning-it-on)). There, the bridge restores the real
+  frame's detail along the game's motion. On a moving test scene, that takes
+  67%'s error from 8.4 to 1.85, against 0.68 at full resolution.
 - **A half-size guide grid.** Depth edges measured worse.
 - **8-bit colour for the reseed too.** It is slightly faster, but the
   rotation sweep's error rises from 0.31 to 0.40.

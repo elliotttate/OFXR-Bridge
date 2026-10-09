@@ -168,6 +168,18 @@ OFXR never shuts NGX down. The driver keeps one NGX instance per adapter for
 the whole process, and `NVSDK_NGX_D3D12_Shutdown1` shuts down every loaded
 feature module for that device, including the game's own DLSS upscaler.
 
+Nor does it initialise NGX twice for a device. A UEVR resolution change
+mid-race once faulted the GPU, with 3D HEIGHT and WIDTH CT violations, in the
+half second the swapchains were recreated. That was with native generation on
+the Meta XR Simulator, going from 1440x1584 to 2154x2369 per eye. The old
+swapchain's feature had released the device's NGX entry, so the new one
+initialised NGX again while the game was recreating its own DLSS features. The
+same resize with the layer unloaded ran cleanly. With the device kept
+initialised, resizes from 1.0 to 1.5, back to 1.0 and on to 2.0 ran without a
+fault, one run each. Swapchain teardown likewise keeps the hand-over copier's
+command lists and staging alive when its copies are not seen to finish within
+two seconds, rather than freeing them under the GPU.
+
 Both eyes of a stereo pair share one native feature, side by side, with a
 64-pixel seam between them that repeats each eye's edge. Most of an NGX
 evaluation's cost is fixed, so one double-width evaluation costs far less than
@@ -265,12 +277,41 @@ either evaluation, which would also cost about 220 MB more video memory.
 32-bit motion is 2% slower, and NGX's depth edges measure worse with it (0.33
 against 0.21). These feature versions accept only render preset 1.
 
-Generating below the eye's resolution and upscaling the result is cheaper -
-at 3004x3004 on blank frames, 75% per axis took a still/turning pair from
-1.66/2.04 ms to 1.28/1.61 ms and 67% to 1.11/1.36 ms - but it is a trade, not an
-optimisation: on the rotation sweep's detailed scene, the down-and-up resample
-alone adds an error of 1.2 (75%) to 1.4 (67%), four times what a native pair
-otherwise shows (0.3), on every generated frame between sharp real ones.
+Generating below the eye's resolution is a trade rather than an optimisation,
+so it is an option: `[ofxr] dlssg_resolution`, 25 to 100 percent per axis and
+100 by default. The tray offers 100, 67 and 50 under **DLSS Frame Generation
+resolution** (`[tray] dlssg_resolution`), and `OFXR_RequestNativeDlssgScaleV2`
+changes it in a running game. Below 100 the pack averages the real frame into
+the smaller feature and maps the guides onto its grid. The composition then
+upsamples NGX's frame and restores the real frame's detail: following B's
+engine motion to where each generated pixel's content lies in B, it adds B's
+texel there less B as packed, wherever the generated frame agrees with the
+packed B to within a quarter of the display range. Where they disagree - an
+occlusion, or content the vectors do not describe - the pixel stays as
+generated, and softer. At 3004x3004 a turning-head 2X pair costs 1.71 ms at
+67% and 1.36 ms at 50%, against 2.35 ms (still head: 1.45 and 1.21 against
+1.90; 3X turning: 2.49 and 2.03 against 3.50). Live in Galactic Racer on the
+Meta XR Simulator at 2160x2376 per eye, racing, two interleaved rounds
+measured 1.60 ms per pair at full resolution, 1.19 at 67% and 0.97 at 50%
+(OFXR + DLSS vectors: 0.26).
+
+`XRFG_TEST_NATIVE_DLSSG_SCALE_QUALITY=1` measures what that costs on a 1024x768
+scene whose detailed background slides 6 pixels while a striped square
+crosses it at 16, with two-thirds guides. Against the true midpoint frame:
+
+| Feature resolution | Error | At the square's edges |
+|---|---|---|
+| 100% | 0.68 | 4.9 |
+| 75% | 3.1 | 11.7 |
+| 67% | 1.85 | 12.4 |
+| 50% | 3.5 | 12.1 |
+| A blend of the two frames | 33 | |
+
+Without the detail restore, 67% measured 8.4 and 50% 12.1. 67% beats 75%
+because it matches the guides' grid, and of tolerances from 1/32 to 1 a quarter
+measured the least error at the edges.
+`XRFG_NATIVE_DLSSG_SCALE` and `XRFG_NATIVE_DLSSG_DETAIL` (the tolerance's
+reciprocal; 0 turns the restore off) override both for experiments.
 
 Running the pack and NGX on a compute queue, which NVIDIA can overlap with the
 game's graphics where queues of the same type time-slice, and composing on the
@@ -313,7 +354,8 @@ multi-frame generation; on adapters without it, native mode stays at 2X, and
 a 3X request that reaches the feature anyway reports
 `multi_frame_unsupported` (status 9).
 The optical-flow preset, scale and bidirectional controls configure the
-original OFXR algorithm; they do not tune NVIDIA's neural feature.
+original OFXR algorithm; they do not tune NVIDIA's neural feature, whose own
+resolution is `dlssg_resolution`.
 
 Native mode skips the original optical-flow contexts, scratch textures and
 extra command lists. Fully covered outputs also skip the preliminary current
