@@ -18,7 +18,12 @@
 #include "native_dlssg_pixel_shader.hpp"
 #include "native_dlssg_vertex_shader.hpp"
 #include <DirectXMath.h>
+// SDK 310.6 and later split the D3D helpers out and deprecate the old name.
+#if __has_include(<nvsdk_ngx_helpers_dlssg_d3d.h>)
+#include <nvsdk_ngx_helpers_dlssg_d3d.h>
+#else
 #include <nvsdk_ngx_helpers_dlssg.h>
+#endif
 #endif
 
 namespace xrfg {

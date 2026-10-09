@@ -69,9 +69,12 @@ ctest --test-dir build -C Release -R '^xrfg_native_dlssg_tests$' --output-on-fai
 ```
 
 The native GPU test needs an adapter and driver for which NGX reports frame
-generation available. The implementation was tested with SDK 310.5.3 at commit
-`982b0d19f9e35fef8e1b3109efa6b95470563866` of NVIDIA/DLSS and
-driver 616.56 on an RTX 5090. SDK directories must contain
+generation available. The implementation was tested with SDK 310.9.1 at commit
+`374959484e79a640feaba44c93ac8cfb0a03f5b5` of NVIDIA/DLSS and
+driver 616.56 on an RTX 5090. Use 310.6 or later: its `nvngx_dlssg.dll`
+generates the same pixels about 5% faster than 310.5.3 (13% for a turning
+head at 3004x3004), and 310.6, 310.7 and 310.9.1 measure alike. Older SDKs
+still build. SDK directories must contain
 `include/nvsdk_ngx_helpers_dlssg.h`, `lib/Windows_x86_64/x64/nvsdk_ngx_d.lib`,
 `lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib`,
 and `lib/Windows_x86_64/rel/nvngx_dlssg.dll`.
@@ -129,10 +132,11 @@ On a Steam Frame through SteamVR (3004x3004 per eye at 120 Hz, racing, with
 measurement gives OFXR + DLSS vectors 0.45 ms, FidelityFX flow 0.90 ms,
 native DLSS FG 4.3-5.3 ms and NVIDIA medium flow 8.1 ms. Offline at that size
 (`XRFG_TEST_BENCH_EYE=3004x3004` with either benchmark) the same native pair
-takes 2.7 ms through the synthesizer, so about 2 ms of the live figure is the
-GPU shared with the game at that resolution. There a turning head's reseed
-adds 0.59 ms to 1.76 ms, and a feature per eye would cost 26% more still and
-15% more turning. Skipping the reseed instead is worse: a quarter pixel of
+takes 2.7 ms through the synthesizer with SDK 310.5.3, so about 2 ms of the
+live figure is the GPU shared with the game at that resolution. With 310.9.1 a
+pair there costs 1.66 ms with a still head and 2.04 ms turning (3X: 2.56 and
+2.94 ms), and a feature per eye would cost 26% more still and 15% more
+turning. Skipping the reseed instead is worse: a quarter pixel of
 unaligned history already triples the error of a reseeded pair on detailed
 content, so the 0.1 pixel threshold stays.
 
@@ -166,9 +170,10 @@ measured two to five times the error on detailed content even at a quarter
 pixel of rotation; `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` repeats that
 quality measurement for the reseeding path.
 This preserves OFXR's current B pose/FOV contract and its bit-exact real-frame
-copy. On an RTX 5090 at 2064x2208 per eye, a stereo pair takes about 1.24 ms
-of GPU time at 2X with a still head and 1.53 ms with a turning head (2.0 ms
-with a feature per eye), and 1.85/2.18 ms at 3X. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
+copy. On an RTX 5090 at 2064x2208 per eye with SDK 310.9.1, a stereo pair
+takes about 1.18 ms of GPU time at 2X with a still head and 1.46 ms with a
+turning head (2.0 ms with a feature per eye and SDK 310.5.3), and 1.75/2.07 ms
+at 3X; through the synthesizer at 2004x2004 a 2X pair takes 1.58 ms. Set `XRFG_TEST_NATIVE_DLSSG_BENCH=1`
 and run `xrfg_d3d12_history_tests` to repeat that measurement;
 `XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH=1` times NGX alone for one eye, two
 features and one shared feature. `XRFG_TEST_FG_BENCH=1` instead times every

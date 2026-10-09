@@ -110,8 +110,8 @@ development inputs and are not bridge release artifacts.
 
 ## NVIDIA DLSS Frame Generation (optional)
 
-The `XRFG_NATIVE_DLSSG` build uses NVIDIA/DLSS SDK 310.5.3 at commit
-`982b0d19f9e35fef8e1b3109efa6b95470563866`. The SDK checkout is a build input
+The `XRFG_NATIVE_DLSSG` build uses NVIDIA/DLSS SDK 310.9.1 at commit
+`374959484e79a640feaba44c93ac8cfb0a03f5b5`. The SDK checkout is a build input
 outside the repository. This option statically links the NGX D3D12 interface
 and distributes the unmodified production `nvngx_dlssg.dll` feature runtime
 beside the layer. It does not distribute the SDK source, tools or development
