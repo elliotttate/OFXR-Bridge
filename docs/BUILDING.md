@@ -648,10 +648,20 @@ ahead (1 + dt2/dt1 spans from A):
 | 13 candidates, ordered by the game's depth | 12.58 | 0.677 |
 | Plus a still-content hypothesis checked against A | 12.56 | 0.674 |
 | Search only near motion edges (second differences within 48 px) | 12.56 | 0.676 |
-| Nine candidates over three steps there (kept) | 12.68 | 0.679 |
+| Nine candidates over three steps there (kept for `extrapolate=1`) | 12.68 | 0.679 |
+| From FidelityFX's flow alone, half / full resolution | 12.44 / 12.12 | 0.651 / 0.658 |
+| Vectors and flow, the better prediction per pixel (`extrapolate=2`) | 11.87 | 0.684 |
 
 A shadow cast by the pod moves with the ground's vectors; the still-content
-hypothesis did not fix it, since the ground's texture moves under it. The
+hypothesis did not fix it, since the ground's texture moves under it, but the
+flow follows it. The per-pixel choice between the two compares each one's
+point against the frame before, blurred a little, and matches the better of
+the two per triplet (11.78). Live in Galactic Racer it cost a median 2.1-4.6
+ms a pair, against 1.1-1.25 ms from the vectors alone: real frames' vectors
+rarely explain the frame before closely enough to skip the flow. Its flow
+pass offers only its own point; letting it search too cost twice as much on
+the benchmark for 0.05 less error. The replay's single cold pair per
+configuration was too noisy to time it. The
 layer shows the real frame at its own display time and the prediction a
 period later, with the deferred current copy and the deeper pipeline off and
 a two-slot synthetic ring; `xrfg_layer_extrapolate_*` check the order inline,

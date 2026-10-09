@@ -264,8 +264,15 @@ does.
   FidelityFX's flow instead it erred 12.4 (12.1 at full resolution), with
   SSIM 0.651: the flow follows a shadow the vectors move with the ground, but
   leaves more structure out of place.
-- It costs 0.43 ms a pair offline, and a median 1.1-1.25 ms live in Galactic
-  Racer, less than native generation at 67%.
+- It costs 0.43-0.49 ms a pair offline, and a median 1.1-1.25 ms live in
+  Galactic Racer, less than native generation at 67%. In Hubris, a native
+  OpenXR Unreal Engine 4 game, it ran through SteamVR at 0.29 ms a pair from
+  the game's vectors and 1.12 ms from FidelityFX's flow, each real frame
+  handed over before its prediction.
+- `extrapolate=2` also runs FidelityFX's flow beside the game's vectors and
+  keeps, per pixel, whichever prediction explains the frame before better.
+  It erred least of all (11.87, SSIM 0.684), but cost a median 2.1-4.6 ms
+  live in Galactic Racer, so it is an INI option rather than a tray one.
 - Content its vectors do not describe, such as a shadow on ground rushing
   past, moves with the vectors; there is no second frame to correct it.
   The deeper pipeline is turned off, since its held period would add the
@@ -276,7 +283,7 @@ does.
 | The tray menu, **Frame generation method** | **Interpolate, DLSS vectors + FidelityFX flow** | **Extrapolate, SpaceWarp-style** |
 | Tray settings (`tray.ini`) | `[tray] dlss_flow_hybrid=1` | `[tray] extrapolate=1` |
 | A directly loaded layer (`ofxr_bridge.ini`) | `[ofxr] dlss_flow_hybrid=1` | `[ofxr] extrapolate=1` |
-| For tests, the game's environment | `XRFG_TEST_DLSS_FLOW_HYBRID=1` | `XRFG_TEST_EXTRAPOLATE=1` |
+| For tests, the game's environment | `XRFG_TEST_DLSS_FLOW_HYBRID=1` | `XRFG_TEST_EXTRAPOLATE=1` (or `2`) |
 
 Both apply to OFXR's own algorithm and take the FidelityFX backend; the
 hybrid needs the game's DLSS vectors. Both are read when the game starts its
