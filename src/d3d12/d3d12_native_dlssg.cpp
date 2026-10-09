@@ -298,6 +298,11 @@ UINT environment(const wchar_t *name, UINT fallback) {
     const DWORD n = GetEnvironmentVariableW(name, value, 16);
     return n && n < 16 ? UINT(std::wcstoul(value, nullptr, 10)) : fallback;
 }
+float environment(const wchar_t *name, float fallback) {
+    wchar_t value[32]{};
+    const DWORD n = GetEnvironmentVariableW(name, value, 32);
+    return n && n < 32 ? float(std::wcstod(value, nullptr)) : fallback;
+}
 // Initializes NGX for the device while an OFXR feature uses it. NGX is never
 // shut down here: the driver keeps one NGX instance per adapter for the whole
 // process, and NVSDK_NGX_D3D12_Shutdown1 tears it down for every client - it
@@ -464,6 +469,9 @@ struct D3D12NativeDlssG::Impl {
     // composed frame restores detail when that is below 100.
     UINT scale{100};
     float detail_falloff{kDetailFalloff};
+    // NGX's depth heuristics, at NVIDIA's defaults unless a test sets them.
+    float depth_scale{1.0F}, near_far_partition{600.0F}, object_separation{40.0F};
+    bool vectors_dilated{};
     D3D12_RESOURCE_DESC source{};
     DXGI_FORMAT view_format{}, color_format{kTenBitColorFormat}, seed_format{kTenBitColorFormat};
     UINT increment{}, rtv_increment{}, max_outputs{1};
@@ -874,7 +882,7 @@ struct D3D12NativeDlssG::Impl {
         o.cameraAspectRatio = float(p.extent[0]) / p.extent[1];
         o.depthInverted = gb.depth_inverted;
         o.cameraMotionIncluded = true;
-        o.motionVectorsDilated = false; // NGX dilates them at depth edges
+        o.motionVectorsDilated = vectors_dilated; // false: NGX dilates them at depth edges
         o.motionVectorsInvalidValue = std::numeric_limits<float>::max();
         // The pack writes motion as a fraction of the feature. NGX scales it
         // to pixels of the motion grid itself: handing it pixels with a unit
@@ -900,6 +908,10 @@ struct D3D12NativeDlssG::Impl {
             o.mvecsSubrectSize = o.depthSubrectSize = {std::min(e.guide_width, kResetGuideSize),
                                                        std::min(e.guide_height, kResetGuideSize)};
         }
+        o.minRelativeLinearDepthObjectSeparation = object_separation;
+        NVSDK_NGX_Parameter_SetF(e.params, NVSDK_NGX_DLSSG_Parameter_LinearizedDepth_Scale, depth_scale);
+        NVSDK_NGX_Parameter_SetF(e.params, NVSDK_NGX_DLSSG_Parameter_LinearizedDepth_NearFarPartition,
+                                 near_far_partition);
         const auto result = NGX_D3D12_EVALUATE_DLSSG(list, e.handle, e.params, &in, &o);
         if (NVSDK_NGX_FAILED(result)) {
             report("evaluate failed", unsigned(result));
@@ -942,6 +954,10 @@ HRESULT D3D12NativeDlssG::initialize(ID3D12Device *device, ID3D12CommandQueue *q
         p->seam = environment(L"XRFG_NATIVE_DLSSG_SEAM", kSeam);
         p->scale = std::clamp(environment(L"XRFG_NATIVE_DLSSG_SCALE", scale), kMinScale, 100U);
         p->detail_falloff = float(environment(L"XRFG_NATIVE_DLSSG_DETAIL", UINT(kDetailFalloff)));
+        p->depth_scale = environment(L"XRFG_TEST_NATIVE_DLSSG_DEPTH_SCALE", p->depth_scale);
+        p->near_far_partition = environment(L"XRFG_TEST_NATIVE_DLSSG_NEAR_FAR", p->near_far_partition);
+        p->object_separation = environment(L"XRFG_TEST_NATIVE_DLSSG_SEPARATION", p->object_separation);
+        p->vectors_dilated = environment(L"XRFG_TEST_NATIVE_DLSSG_DILATED");
         HRESULT hr = acquire_ngx(device);
         if (FAILED(hr)) {
             return hr;

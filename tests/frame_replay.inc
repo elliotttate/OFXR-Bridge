@@ -240,7 +240,11 @@ void replay_held_out(const std::filesystem::path& directory) {
     const float gain = std::getenv("XRFG_TEST_REPLAY_VECTOR_GAIN")
         ? float(std::atof(std::getenv("XRFG_TEST_REPLAY_VECTOR_GAIN"))) : 1.0F;
     const float vector_scale = gain * (dt2 > 0 ? (dt1 + dt2) / dt2 : 2.0F);
-    const float fraction = dt1 + dt2 > 0 ? dt1 / (dt1 + dt2) : 0.5F;
+    // XRFG_TEST_REPLAY_FRACTION puts OFXR's frame elsewhere, such as at a
+    // half like native generation's.
+    const float fraction = std::getenv("XRFG_TEST_REPLAY_FRACTION")
+        ? float(std::atof(std::getenv("XRFG_TEST_REPLAY_FRACTION")))
+        : dt1 + dt2 > 0 ? dt1 / (dt1 + dt2) : 0.5F;
     std::cout << "replay frame times " << dt1 << " and " << dt2 << " ms: fraction " << fraction
               << ", vectors x" << vector_scale << '\n';
     // Guides as the layer hands them on: A's, and B's scaled to reach A.
@@ -286,16 +290,35 @@ void replay_held_out(const std::filesystem::path& directory) {
     };
     const auto guides_a = make_guides(f0, 1, 1.0F, nullptr);
     const auto guides_b = make_guides(f2_guides, 2, vector_scale, &f0);
+    // Runs body(first, end, thread) over [0, count) on every core.
+    const auto parallel = [](UINT count, const auto& body) {
+        const UINT threads = std::max(1U, std::min(count, std::thread::hardware_concurrency()));
+        std::vector<std::thread> pool;
+        for (UINT i = 0; i < threads; ++i)
+            pool.emplace_back([&, i] { body(count * i / threads, count * (i + 1) / threads, i); });
+        for (auto& thread : pool) thread.join();
+        return threads;
+    };
+    // An image as RGB floats, one row of the array after another.
+    const auto rgb = [&](const xrfg::DumpedTexture& image) {
+        std::vector<float> out(std::size_t(width) * height * slices * 3);
+        parallel(height * slices, [&](UINT first, UINT end, UINT) {
+            for (UINT row = first; row < end; ++row)
+                for (UINT x = 0; x < width; ++x) {
+                    const auto c = replay_texel(image, row / height, x, row % height);
+                    for (UINT k = 0; k < 3; ++k) out[(std::size_t(row) * width + x) * 3 + k] = c[k];
+                }
+        });
+        return out;
+    };
+    const std::vector<float> rgb0 = rgb(f0.colour), rgb2 = rgb(f2.colour);
     // Where the scene moved between frames 0 and 2.
-    std::vector<bool> moving(std::size_t(width) * height * slices, false);
-    for (UINT s = 0; s < slices; ++s)
-        for (UINT y = 0; y < height; ++y)
-            for (UINT x = 0; x < width; ++x) {
-                const auto a = replay_texel(f0.colour, s, x, y), b = replay_texel(f2.colour, s, x, y);
-                float d = 0;
-                for (UINT c = 0; c < 3; ++c) d = std::max(d, std::abs(a[c] - b[c]));
-                moving[(std::size_t(s) * height + y) * width + x] = d > 6;
-            }
+    std::vector<std::uint8_t> moving(std::size_t(width) * height * slices, 0);
+    for (std::size_t i = 0; i < moving.size(); ++i) {
+        float d = 0;
+        for (UINT c = 0; c < 3; ++c) d = std::max(d, std::abs(rgb0[i * 3 + c] - rgb2[i * 3 + c]));
+        moving[i] = d > 6;
+    }
     // XRFG_TEST_REPLAY_SAVE=<dir> writes each image's crop around the motion.
     const char* save_dir = std::getenv("XRFG_TEST_REPLAY_SAVE");
     UINT box_left = width, box_top = height, box_right = 0, box_bottom = 0, box_slice = 0;
@@ -327,26 +350,90 @@ void replay_held_out(const std::filesystem::path& directory) {
     save("0 frame0", f0.colour);
     save("1 truth frame1", f1.colour);
     save("2 frame2", f2.colour);
+    // Luma, for the structural scores below.
+    const auto luma = [&](const std::vector<float>& image) {
+        std::vector<float> out(image.size() / 3);
+        for (std::size_t i = 0; i < out.size(); ++i)
+            out[i] = 0.299F * image[i * 3] + 0.587F * image[i * 3 + 1] + 0.114F * image[i * 3 + 2];
+        return out;
+    };
+    const std::vector<float> truth_rgb = rgb(f1.colour);
+    const std::vector<float> truth_luma = luma(truth_rgb);
     const auto score = [&](const char* name, const xrfg::DumpedTexture& actual) {
         save(std::string("m ") + name, actual);
-        double all = 0, moved = 0;
-        std::size_t all_count = 0, moved_count = 0;
-        for (UINT s = 0; s < slices; ++s)
-            for (UINT y = 8; y + 8 < height; ++y)
+        const std::vector<float> out_rgb = rgb(actual);
+        const std::vector<float> out_luma = luma(out_rgb);
+        // Per thread: absolute error everywhere and where the scene moved,
+        // their counts, and the structural sums described below.
+        struct Sums {
+            double all = 0, moved = 0, ssim = 0, gradient_out = 0, gradient_truth = 0, gradient_error = 0;
+            std::size_t all_count = 0, moved_count = 0, blocks = 0, gradients = 0;
+        };
+        std::vector<Sums> sums(std::thread::hardware_concurrency() + 1);
+        const UINT rows = height * slices;
+        parallel(rows, [&](UINT first, UINT end, UINT thread) {
+            Sums& sum = sums[thread];
+            for (UINT row = first; row < end; ++row) {
+                const UINT y = row % height;
+                if (y < 8 || y + 8 >= height) continue;
                 for (UINT x = 8; x + 8 < width; ++x) {
-                    const auto a = replay_texel(actual, s, x, y), t = replay_texel(f1.colour, s, x, y);
+                    const std::size_t i = std::size_t(row) * width + x;
                     double e = 0;
-                    for (UINT c = 0; c < 3; ++c) e += std::abs(a[c] - t[c]);
-                    all += e;
-                    all_count += 3;
-                    if (moving[(std::size_t(s) * height + y) * width + x]) {
-                        moved += e;
-                        moved_count += 3;
-                    }
+                    for (UINT c = 0; c < 3; ++c) e += std::abs(out_rgb[i * 3 + c] - truth_rgb[i * 3 + c]);
+                    sum.all += e;
+                    sum.all_count += 3;
+                    if (!moving[i]) continue;
+                    sum.moved += e;
+                    sum.moved_count += 3;
+                    // The output's gradient against the truth's (below 1 is
+                    // blurrier) and their mean difference, which a blur and a
+                    // misplaced edge both raise.
+                    const float* a = out_luma.data();
+                    const float* tr = truth_luma.data();
+                    const double gax = a[i + 1] - a[i - 1], gay = a[i + width] - a[i - width];
+                    const double gtx = tr[i + 1] - tr[i - 1], gty = tr[i + width] - tr[i - width];
+                    sum.gradient_out += std::sqrt(gax * gax + gay * gay);
+                    sum.gradient_truth += std::sqrt(gtx * gtx + gty * gty);
+                    sum.gradient_error += std::sqrt((gax - gtx) * (gax - gtx) + (gay - gty) * (gay - gty));
+                    ++sum.gradients;
                 }
-        std::cout << "replay " << name << " mae=" << all / double(all_count)
-                  << " moving=" << (moved_count ? moved / double(moved_count) : 0.0)
-                  << " moving_fraction=" << double(moved_count) / double(all_count) << '\n';
+                // SSIM over the 8x8 luma blocks starting on this row, where
+                // most of the block moved.
+                if (y % 8 != 0 || y + 16 > height) continue;
+                constexpr double c1 = 6.5025, c2 = 58.5225;
+                for (UINT bx = 8; bx + 16 <= width; bx += 8) {
+                    double ma = 0, mt = 0, aa = 0, tt = 0, at = 0;
+                    int count = 0;
+                    for (UINT by = 0; by < 8; ++by)
+                        for (UINT x = bx; x < bx + 8; ++x) {
+                            const std::size_t i = (std::size_t(row) + by) * width + x;
+                            const double va = out_luma[i], vt = truth_luma[i];
+                            ma += va; mt += vt; aa += va * va; tt += vt * vt; at += va * vt;
+                            count += moving[i];
+                        }
+                    if (count < 32) continue;
+                    ma /= 64; mt /= 64;
+                    const double va = aa / 64 - ma * ma, vt = tt / 64 - mt * mt, cov = at / 64 - ma * mt;
+                    sum.ssim += ((2 * ma * mt + c1) * (2 * cov + c2)) / ((ma * ma + mt * mt + c1) * (va + vt + c2));
+                    ++sum.blocks;
+                }
+            }
+        });
+        Sums total;
+        for (const auto& s : sums) {
+            total.all += s.all; total.moved += s.moved; total.ssim += s.ssim;
+            total.gradient_out += s.gradient_out; total.gradient_truth += s.gradient_truth;
+            total.gradient_error += s.gradient_error;
+            total.all_count += s.all_count; total.moved_count += s.moved_count;
+            total.blocks += s.blocks; total.gradients += s.gradients;
+        }
+        std::cout << "replay " << name << " mae=" << total.all / double(total.all_count)
+                  << " moving=" << (total.moved_count ? total.moved / double(total.moved_count) : 0.0)
+                  << " moving_fraction=" << double(total.moved_count) / double(total.all_count)
+                  << " ssim=" << (total.blocks ? total.ssim / double(total.blocks) : 1.0)
+                  << " sharpness=" << (total.gradient_truth > 0 ? total.gradient_out / total.gradient_truth : 1.0)
+                  << " gradient_error=" << (total.gradients ? total.gradient_error / double(total.gradients) : 0.0)
+                  << '\n';
     };
     score("repeat frame2", f2.colour);
     {
@@ -362,12 +449,14 @@ void replay_held_out(const std::filesystem::path& directory) {
     }
     const std::span<const xrfg::D3D12ReprojectionView> views0(f0.views), views1(f1.views), views2(f2.views);
     struct Method {
-        const char* name;
+        std::string name;
         xrfg::D3D12OpticalFlowBackend backend;
         xrfg::D3D12OpticalFlowInputScale scale;
         bool guides;
+        xrfg::D3D12NvidiaPerformancePreset preset{xrfg::D3D12NvidiaPerformancePreset::medium};
+        bool bidirectional{};
     };
-    const std::array<Method, 4> methods{{
+    std::vector<Method> methods{
         {"OFXR+DLSS vectors", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
          xrfg::D3D12OpticalFlowInputScale::half, true},
         {"OFXR FidelityFX half-res flow", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
@@ -375,7 +464,31 @@ void replay_held_out(const std::filesystem::path& directory) {
         {"OFXR FidelityFX full-res flow", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
          xrfg::D3D12OpticalFlowInputScale::full, false},
         {"OFXR NVIDIA medium flow", xrfg::D3D12OpticalFlowBackend::nvidia,
-         xrfg::D3D12OpticalFlowInputScale::half, false}}};
+         xrfg::D3D12OpticalFlowInputScale::half, false}};
+    // XRFG_TEST_REPLAY_FLOWS lists OFXR configurations to run instead, each
+    // backend/preset/scale[/bi]: vectors, ffx or nvidia; slow, medium or
+    // fast; full, three_quarter or half. For example nvidia/fast/full/bi.
+    if (const char* list = std::getenv("XRFG_TEST_REPLAY_FLOWS")) {
+        methods.clear();
+        std::stringstream stream(list);
+        for (std::string item; std::getline(stream, item, ',');) {
+            std::vector<std::string> parts;
+            std::stringstream fields(item);
+            for (std::string part; std::getline(fields, part, '/');) parts.push_back(part);
+            require(parts.size() >= 3, "replay: flow " + item);
+            Method m{item, parts[0] == "nvidia" ? xrfg::D3D12OpticalFlowBackend::nvidia
+                                                : xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                     parts[2] == "full"            ? xrfg::D3D12OpticalFlowInputScale::full
+                     : parts[2] == "three_quarter" ? xrfg::D3D12OpticalFlowInputScale::three_quarter
+                                                   : xrfg::D3D12OpticalFlowInputScale::half,
+                     parts[0] == "vectors"};
+            m.preset = parts[1] == "slow"   ? xrfg::D3D12NvidiaPerformancePreset::slow
+                       : parts[1] == "fast" ? xrfg::D3D12NvidiaPerformancePreset::fast
+                                            : xrfg::D3D12NvidiaPerformancePreset::medium;
+            m.bidirectional = parts.size() > 3 && parts[3] == "bi";
+            methods.push_back(m);
+        }
+    }
     // XRFG_TEST_REPLAY_NATIVE_ONLY=1 skips OFXR's methods;
     // XRFG_TEST_REPLAY_NATIVE_SCALES lists native resolutions (100,67).
     const bool native_only = std::getenv("XRFG_TEST_REPLAY_NATIVE_ONLY") != nullptr;
@@ -400,6 +513,8 @@ void replay_held_out(const std::filesystem::path& directory) {
         xrfg::D3D12FrameSynthesizer synthesizer;
         xrfg::D3D12NvidiaOpticalFlowOptions options;
         options.input_scale = m.scale;
+        options.preset = m.preset;
+        options.bidirectional = m.bidirectional;
         require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                     current_pointers, synthetic_pointers, f0.view_format,
                     D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options)), "replay synthesizer");
@@ -415,7 +530,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         require(operation_succeeded(synthesizer.submit_pair(capture_b, views2, views1, 0, 1, &pair,
                     std::nullopt, m.guides ? guides_b : nullptr, false, fraction)), "replay pair");
         fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
-        score(m.name, read_back_texture(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET));
+        score(m.name.c_str(), read_back_texture(fixture, synthetic.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET));
         require(operation_succeeded(synthesizer.wait_for_idle()), "replay drain");
     }
 #ifdef XRFG_NATIVE_DLSSG
@@ -425,7 +540,9 @@ void replay_held_out(const std::filesystem::path& directory) {
         std::stringstream stream(list);
         for (std::string item; std::getline(stream, item, ',');) native_scales.push_back(item);
     }
-    if (std::getenv("XRFG_TEST_REPLAY_VECTORS_ONLY")) native_scales.clear();
+    if (std::getenv("XRFG_TEST_REPLAY_VECTORS_ONLY") ||
+        (std::getenv("XRFG_TEST_REPLAY_FLOWS") && !std::getenv("XRFG_TEST_REPLAY_NATIVE_SCALES")))
+        native_scales.clear();
     for (const auto& scale_text : native_scales) {
         const char* scale = scale_text.c_str();
         SetEnvironmentVariableA("XRFG_NATIVE_DLSSG_SCALE", scale);
