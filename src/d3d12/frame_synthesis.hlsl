@@ -611,6 +611,20 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
 }
 
+// The game's vector at the guide texel under pixel, unfiltered: enough to tell
+// surfaces apart.
+float2 game_motion_texel(float2 pixel) {
+    float4 output_rect = float4(
+        float(FlowWidth), float(FlowHeight),
+        float(FlowBlockSize), float(GameMotionPadding));
+    float2 uv = (pixel - output_rect.xy + 0.5) /
+        max(output_rect.zw, float2(1.0, 1.0));
+    float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
+    int2 texel = int2(clamp(GameMotionRect.xy + uv * GameMotionRect.zw,
+        GameMotionRect.xy, maximum));
+    return GameMotionVectors.Load(int4(texel, 0, 0)) * GameMotionScale;
+}
+
 float nvidia_cost_for_pixel(float2 pixel, uint slice, uint view_index) {
     float2 packed_coordinate = flow_input_coordinate(pixel);
     int2 coordinate = int2(round(
@@ -726,6 +740,37 @@ FullscreenVertex FullscreenTriangleVS(uint vertex_id : SV_VertexID) {
     return output;
 }
 
+// The game-motion solve below, from start rather than the pixel, for a second
+// surface: true, with its A and B samples, if two steps reach its fixed point.
+bool game_motion_surface(float2 pixel, float2 start, out float4 previous_color,
+    out float4 current_color) {
+    previous_color = float4(0.0, 0.0, 0.0, 1.0);
+    current_color = previous_color;
+    float2 endpoint = start;
+    float2 previous_coordinate = start;
+    bool found = true;
+    [unroll] for (uint step = 0; step < 3; ++step) {
+        float2 backward = game_motion_for_pixel(endpoint, Slice, ViewIndex);
+        MappedCoordinate mapped = map_source_to_target(endpoint + backward, PreviousMappings[ViewIndex]);
+        found = found && mapped.valid >= 0.5;
+        previous_coordinate = mapped.coordinate;
+        float2 next = pixel - (1.0 - synthesis_fraction()) * (mapped.coordinate - endpoint);
+        if (step == 2) {
+            found = found && length(next - endpoint) < 0.5;
+        } else {
+            endpoint = next;
+        }
+    }
+    if (found) {
+        CameraSample a = sample_previous_target(previous_coordinate, Slice, ViewIndex);
+        CameraSample b = sample_current_target(endpoint, Slice, ViewIndex);
+        previous_color = a.color;
+        current_color = b.color;
+        found = a.valid >= 0.5 && b.valid >= 0.5;
+    }
+    return found;
+}
+
 float4 synthesize_midpoint(
     FullscreenVertex input,
     float flow_value_scale,
@@ -769,6 +814,10 @@ float4 synthesize_midpoint(
                 CameraSample previous_sample = (CameraSample)0;
                 CameraSample current_sample = (CameraSample)0;
                 bool endpoints_valid = true;
+                // How far the solve below still was from a fixed point, and
+                // its final B-to-A displacement.
+                float solve_residual = 0.0;
+                float2 last_displacement = float2(0.0, 0.0);
                 if (use_game_motion_pipeline) {
                     // A B-to-A vector is attached to its B endpoint. Sampling
                     // it once at the desired midpoint is exact only for a
@@ -777,6 +826,8 @@ float4 synthesize_midpoint(
                     // cA through the previous OpenXR camera exactly.
                     float2 current_endpoint = pixel;
                     MappedCoordinate previous_endpoint;
+                    // Keep the step count odd: see the covered-background
+                    // case below.
                     [unroll] for (uint iteration = 0; iteration < 3; ++iteration) {
                         raw_backward = repeated_capture_flag() != 0
                             ? float2(0.0, 0.0)
@@ -803,6 +854,9 @@ float4 synthesize_midpoint(
                             current_endpoint + raw_backward,
                             PreviousMappings[ViewIndex]);
                         endpoints_valid = previous_endpoint.valid >= 0.5;
+                        last_displacement = previous_endpoint.coordinate - current_endpoint;
+                        solve_residual = length(pixel -
+                            (1.0 - synthesis_fraction()) * last_displacement - current_endpoint);
                     }
                     if (endpoints_valid) {
                         previous_sample = sample_previous_target(
@@ -838,7 +892,10 @@ float4 synthesize_midpoint(
                         max(
                             abs(previous_sample.color.g - current_sample.color.g),
                             abs(previous_sample.color.b - current_sample.color.b)));
-                    float confidence = saturate(1.0 - disagreement * 6.0);
+                    // Game motion's disagreements are mostly resampling at sharp
+                    // detail, which a gentler slope keeps on the warp.
+                    float confidence = saturate(1.0 - disagreement *
+                        (use_game_motion_pipeline ? 3.0 : 6.0));
                     float4 stable_midpoint = lerp(
                         sample_previous_target(pixel, Slice, ViewIndex).color,
                         current_fallback.color,
@@ -898,10 +955,68 @@ float4 synthesize_midpoint(
                             flow_midpoint,
                             confidence));
                     } else {
+                        // Where the game's warped samples disagree, A's is
+                        // usually hidden behind what B shows - background a
+                        // trailing edge uncovers - so B's warped sample stands
+                        // in. The same-pixel blend there showed both frames'
+                        // edges at once.
                         output_color = saturate(lerp(
-                            stable_midpoint,
+                            use_game_motion_pipeline ? current_sample.color : stable_midpoint,
                             flow_midpoint,
                             confidence));
+                        // Background a leading edge is covering shows only in
+                        // A. There the solve has no fixed point: B shows the
+                        // occluder at the pixel, so it starts inside it and
+                        // alternates outside and in. After its odd number of
+                        // steps it ends outside, on the covered surface's
+                        // displacement, which places A's sample.
+                        if (use_game_motion_pipeline && solve_residual >= 0.5) {
+                            CameraSample covered = sample_previous_target(
+                                pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
+                            if (covered.valid >= 0.5) output_color = saturate(covered.color);
+                        } else if (use_game_motion_pipeline && disagreement > 0.1 &&
+                                   repeated_capture_flag() == 0) {
+                            // B's sample may be background that B has already
+                            // uncovered but a faster surface in front still
+                            // covers at the generated instant. That surface is
+                            // another solution of the solve, and the one whose
+                            // own A and B samples agree is visible in both
+                            // frames, so in front. It is looked for only near
+                            // a motion edge - a vector 16 pixels away differs
+                            // by more than a pixel - and from at most two
+                            // starts on another surface, nearest first, so
+                            // shading changes the vectors do not describe stay
+                            // cheap.
+                            float2 here = game_motion_texel(
+                                pixel - (1.0 - synthesis_fraction()) * last_displacement);
+                            bool motion_edge = false;
+                            [unroll] for (uint probe = 0; probe < 4; ++probe) {
+                                float2 offset = probe == 0 ? float2(16, 0) : probe == 1 ? float2(-16, 0)
+                                              : probe == 2 ? float2(0, 16) : float2(0, -16);
+                                motion_edge = motion_edge ||
+                                    length(game_motion_texel(pixel + offset) - here) > 1.0;
+                            }
+                            uint solves = 0;
+                            bool done = !motion_edge;
+                            [loop] for (uint radius_index = 0; radius_index < 4 && !done; ++radius_index) {
+                                float radius = 4.0 * float(1u << radius_index);
+                                [loop] for (uint direction = 0; direction < 8 && !done; ++direction) {
+                                    float angle = float(direction) * 0.78539816;
+                                    float2 start = pixel + radius * float2(cos(angle), sin(angle));
+                                    // A start on the same surface finds B's again.
+                                    if (length(game_motion_texel(start) - here) > 1.0) {
+                                        float4 a, b;
+                                        ++solves;
+                                        if (game_motion_surface(pixel, start, a, b) &&
+                                            rgb_error(a, b) < 0.05) {
+                                            output_color = saturate(lerp(a, b, synthesis_fraction()));
+                                            done = true;
+                                        }
+                                        done = done || solves >= 2;
+                                    }
+                                }
+                            }
+                        }
                     }
                     }
                 }

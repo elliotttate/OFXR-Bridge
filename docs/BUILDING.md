@@ -279,7 +279,7 @@ meaningless. Its median GPU time per stereo pair on an RTX 5090, by eye size
 
 | Method | 1440x1584 | 2004x2004 | 3004x3004 | 3600x3600 |
 |---|---|---|---|---|
-| OFXR + DLSS vectors | 0.12 ms | 0.21 ms | 0.45 ms | 0.63 ms |
+| OFXR + DLSS vectors | 0.13 ms | 0.22 ms | 0.50 ms | 0.71 ms |
 | OFXR FidelityFX, half-res flow | 0.20 ms | 0.31 ms | 0.58 ms | 0.78 ms |
 | OFXR FidelityFX, full-res flow | 0.38 ms | 0.64 ms | 1.30 ms | 1.80 ms |
 | Native DLSS FG 2X | 1.14 ms | 1.49 ms | 2.38 ms | 3.42 ms |
@@ -380,7 +380,7 @@ scale several times over. Against the true midpoint frame:
 | Native DLSS FG, 75% | 6.8 | 18.3 | 10.0 |
 | Native DLSS FG, 67% | 5.37 | 13.6 | 8.7 |
 | Native DLSS FG, 50% | 10.7 | 23.4 | 15.4 |
-| OFXR + DLSS vectors | 3.95 | 25.9 | |
+| OFXR + DLSS vectors | 1.81 | 7.35 | |
 | OFXR FidelityFX flow, half / full resolution | 15.8 / 13.7 | 45.2 / 45.6 | |
 | OFXR NVIDIA medium flow | 14.1 | 51.3 | |
 | A blend of the two frames | 28.8 | | |
@@ -389,16 +389,65 @@ The composition upsamples the reduced frame with Catmull-Rom rather than
 bilinear: 7% less error at 67% for no measurable cost. The packed B it compares
 with stays bilinear, since filtering both alike measured worse.
 
-With the game's vectors exact, as here, OFXR + DLSS vectors is as good as
-native generation away from moving edges. At the edges, the occlusions are
-where native generation earns its cost: 8.7 at full resolution and 13.6 at
-67%, against 25.9. At 50% little of that advantage is left (23.4) and the rest
-is far worse, for more GPU time than OFXR + DLSS vectors, so the tray offers no
+With the game's vectors exact, as here, OFXR + DLSS vectors now has less error
+than native generation everywhere, at the moving edges too (7.35 against 8.7),
+for about a sixth of the GPU time. Native generation at 67% errs more than
+both (13.6 at the edges), and at 50% far more (23.4), so the tray offers no
 step below 67%. Native generation needs the same DLSS guides as OFXR + DLSS
-vectors, so that is always the cheaper alternative to it. The optical-flow
-methods, for games without DLSS, lose the fast striped square entirely. Content
-the game's vectors do not describe - particles, transparency, shadows - favours
-native generation more than this test can show.
+vectors, so that is always the cheaper alternative to it. What this test
+cannot show is content the game's vectors do not describe - particles,
+transparency, shadows, reflections - where OFXR + DLSS vectors can only fall
+back on its samples' agreement and native generation's own flow and network
+still help. The optical-flow methods, for games without DLSS, lose the fast
+striped square entirely.
+
+OFXR + DLSS vectors measured 3.95 overall and 25.9 at the edges until its
+occlusion handling changed. It solves, per output pixel, for the point of B
+whose vector passes through the pixel at the generated instant, and blends
+A's and B's samples along it. Where they disagree it used to fade to a blend
+of A and B at the same pixel, which showed both frames' edges at once. Now:
+
+- Where the samples disagree, B's warped sample stands in: background a
+  trailing edge uncovers is visible only in B. This alone took the error to
+  2.02 and the edges to 13.3. A's warped sample instead measured 1.91 but 23.7
+  at the edges, and dropping the fallback altogether 1.95 and 18.1.
+- The confidence slope for game motion is 3 rather than 6, because its
+  disagreements are mostly resampling at sharp detail: 1.92 and 12.9. Slopes
+  of 2, 1.5 and 12 measured 1.91/13.2, 1.91/13.8 and 2.12/13.7.
+- Background a leading edge is covering shows only in A. There the solve has
+  no fixed point: B shows the occluder at the pixel, so the solve starts
+  inside it and alternates outside and in. After an odd number of steps it
+  ends outside, on the covered background's displacement, and A is sampled
+  one-sidedly along it wherever the solve is still half a pixel or more from
+  converging: 1.90 and 11.7. The step count stays at three; four ended inside
+  and measured 12.7 at the edges, five measured as three.
+- That left the trailing edge's other half. There B shows background the
+  square has uncovered, but at the generated instant the faster square still
+  covers it. The solve finds the background - also a fixed point - and the
+  square is the other solution. So, where the samples disagree by more than
+  0.1 and a vector 16 pixels away (up, down, left or right) differs by more
+  than a pixel, the solve is rerun from starts on another surface. The
+  starts are 8 directions at 4, 8, 16 and 32 pixels, nearest first, with at
+  most two solves. A solution whose own A and B samples agree within 0.05 is
+  visible in both frames, so in front, and it wins: 1.81 and 7.35. The new
+  `test_dlss_motion_vector_occlusion_edges` checks this on exact integer
+  motion: 0.16 at the edges, against 24.6 for the old same-pixel blend and
+  16.5 before the search. Before the gate, triggers of 0.05 and 0.2 measured
+  7.28 and 7.69 at the edges, and agreement thresholds of 0.025 and 0.1
+  measured 7.47 and 7.35. With the gate, capping the solves at one, three or
+  six all measured 7.35.
+
+Rejected: keeping the same-pixel blend wherever the pixel, or a 5-point patch
+around it, is unchanged between the frames (for a head-locked HUD the vectors
+do not describe). Flat stripes pass that test, and it measured 2.6, or 4.5 as
+a check ahead of the warp. Nearest-tap vectors across motion discontinuities,
+instead of bilinear, measured 13.4 at the edges. An ungated search over 32
+starts cost 6.8 ms per pair at 3004x3004 on `XRFG_TEST_FG_BENCH`, whose
+turning-head frames disagree with their vectors almost everywhere. Gated by
+the motion edge, with single-texel vector probes, that benchmark measures
+0.50 ms at the median against 0.45 before (p10 0.45 against 0.42), and its
+uniform vectors never start a search. In Hubris, two rounds measured 0.325
+and 0.326 ms, against 0.323 before.
 
 At 3X, against the true frames a third and two thirds of the way from A, 67%
 errs 4.9 and 4.6 where full resolution errs 3.4 and 3.0: each generated frame

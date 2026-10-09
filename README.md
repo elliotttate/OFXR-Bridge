@@ -255,7 +255,7 @@ of the eye size, frames are patterned, and no VR game is running.
 
 | Method | 1440x1584 | 2004x2004 | 3004x3004 | 3600x3600 |
 |---|---|---|---|---|
-| OFXR + DLSS vectors | 0.12 ms | 0.21 ms | 0.45 ms | 0.63 ms |
+| OFXR + DLSS vectors | 0.13 ms | 0.22 ms | 0.50 ms | 0.71 ms |
 | OFXR FidelityFX, half-res flow | 0.20 ms | 0.31 ms | 0.58 ms | 0.78 ms |
 | OFXR FidelityFX, full-res flow | 0.38 ms | 0.64 ms | 1.30 ms | 1.80 ms |
 | Native DLSS FG 2X | 1.14 ms | 1.49 ms | 2.38 ms | 3.42 ms |
@@ -341,6 +341,19 @@ Changes kept, with their measured effect:
   textures and extra command lists. Fully covered outputs skip the
   preliminary current-frame copy, and the real-frame copy can be deferred
   until after the generated image is submitted.
+- **Occlusion handling for OFXR + DLSS vectors.** It used to show a blend
+  of both frames at the same pixel wherever the two warped frames disagreed,
+  so both frames' edges at once. Now background a moving edge uncovers comes
+  from the new frame, background it is covering comes from the previous one,
+  and near a motion edge a short search finds the surface in front. On the
+  benchmark scene of a striped square sliding over a detailed background, the
+  error fell from 3.95 to 1.81, and at the square's edges from 25.9 to 7.35.
+  Native generation measures 4.25 and 8.7 there. With the game's vectors
+  exact, OFXR + DLSS vectors is now the more accurate method at about a sixth
+  of the GPU time. Native generation still handles content the vectors do not
+  describe better. In Hubris the pair cost was unchanged at 0.33 ms. On the
+  offline benchmark, whose frames disagree almost everywhere, it rose about
+  10%.
 
 Tried and rejected:
 
