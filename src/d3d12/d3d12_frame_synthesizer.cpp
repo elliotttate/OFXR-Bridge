@@ -12,6 +12,7 @@
 
 #include "fullscreen_vertex_shader.hpp"
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
+#include "hybrid_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -771,6 +772,7 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> pack_pipeline;
     ComPtr<ID3D12PipelineState> graphics_pipeline;
     ComPtr<ID3D12PipelineState> game_motion_graphics_pipeline;
+    ComPtr<ID3D12PipelineState> hybrid_graphics_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
@@ -1106,6 +1108,17 @@ struct D3D12FrameSynthesizer::Impl {
         result = device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(game_motion_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result)) {
+            return result;
+        }
+
+        graphics_description.PS = {
+            g_xrfg_hybrid_synthesize_midpoint_pixel_shader,
+            sizeof(g_xrfg_hybrid_synthesize_midpoint_pixel_shader),
+        };
+        result = device->CreateGraphicsPipelineState(
+            &graphics_description,
+            IID_PPV_ARGS(hybrid_graphics_pipeline.GetAddressOf()));
         if (FAILED(result)) {
             return result;
         }
@@ -3680,7 +3693,15 @@ struct D3D12FrameSynthesizer::Impl {
             *used_game_motion = true; // execute the direct list, bypass OFA
             return S_OK;
         }
-        if (valid_game_motion_pair(previous_source, current_source)) {
+        // The hybrid runs FidelityFX's flow below and composes with the
+        // game's vectors as well.
+        const bool hybrid = nvidia_options.hybrid &&
+            backend == D3D12OpticalFlowBackend::fidelity_fx &&
+            valid_game_motion_pair(previous_source, current_source) &&
+            current_source.motion_vectors &&
+            game_motion_eyes_match(current_source.motion_vectors->eye_count,
+                static_cast<UINT>(target_views.size()));
+        if (!hybrid && valid_game_motion_pair(previous_source, current_source)) {
             const HRESULT result = record_game_motion_pair(slot, previous_source,
                 current_source, target_views, synthetic_destination_index,
                 current_destination_index, debug_marker);
@@ -3713,7 +3734,34 @@ struct D3D12FrameSynthesizer::Impl {
         ID3D12Resource* const current_resource = current_source.resource.Get();
         ID3D12Resource* const current_destination =
             current_destinations[current_destination_index].resource.Get();
-        create_source_views(slot, previous_resource, current_resource);
+        const DlssMotionVectorSet* const guides = hybrid ? current_source.motion_vectors.get() : nullptr;
+        create_source_views(slot, previous_resource, current_resource, guides ? guides->eye_count : 0);
+        if (guides) {
+            const HRESULT views = create_game_motion_views(slot, *guides,
+                static_cast<UINT>(target_views.size()));
+            if (FAILED(views)) return views;
+            // FidelityFX's flow views exist in the first block only; each
+            // eye's block needs them for the hybrid composition.
+            D3D12_SHADER_RESOURCE_VIEW_DESC flow_view{};
+            flow_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            flow_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            flow_view.Texture2D.MipLevels = 1;
+            const D3D12_CPU_DESCRIPTOR_HANDLE cpu_start =
+                slot.descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+            for (UINT block = 1; block < guides->eye_count; ++block) {
+                const UINT base = block * kDescriptorBlockSize;
+                flow_view.Format = DXGI_FORMAT_R16G16_SINT;
+                for (const UINT offset : {2U, 4U}) {
+                    device->CreateShaderResourceView(optical_flow_vector.Get(), &flow_view,
+                        offset_cpu_handle(cpu_start, base + offset, descriptor_increment));
+                }
+                flow_view.Format = DXGI_FORMAT_R32_UINT;
+                for (const UINT offset : {3U, 5U}) {
+                    device->CreateShaderResourceView(optical_flow_scene_change.Get(), &flow_view,
+                        offset_cpu_handle(cpu_start, base + offset, descriptor_increment));
+                }
+            }
+        }
         dred_marker(slot.command_list.Get(), "OFXR FidelityFX pair begin");
 
         const std::array<D3D12_RESOURCE_BARRIER, 2> before_synthesis{
@@ -3825,8 +3873,24 @@ struct D3D12FrameSynthesizer::Impl {
                 gpu_start,
                 kSrvDescriptorCount,
                 descriptor_increment));
-        slot.command_list->SetPipelineState(graphics_pipeline.Get());
+        slot.command_list->SetPipelineState(guides ? hybrid_graphics_pipeline.Get() : graphics_pipeline.Get());
         dred_marker(slot.command_list.Get(), "OFXR FidelityFX composition draw");
+        // The guides' motion is read by the hybrid composition.
+        const auto motion_barriers = [&](bool to_read) {
+            if (!guides) return;
+            for (UINT eye = 0; eye < guides->eye_count; ++eye) {
+                const auto& guide = guides->eyes[eye];
+                if (guide->resource_state == kShaderReadState ||
+                    (eye != 0 && guide->motion_vectors.Get() == guides->eyes[0]->motion_vectors.Get())) {
+                    continue;
+                }
+                const auto barrier = to_read
+                    ? transition_barrier(guide->motion_vectors.Get(), guide->resource_state, kShaderReadState)
+                    : transition_barrier(guide->motion_vectors.Get(), kShaderReadState, guide->resource_state);
+                slot.command_list->ResourceBarrier(1, &barrier);
+            }
+        };
+        motion_barriers(true);
         slot.command_list->IASetPrimitiveTopology(
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
@@ -3848,6 +3912,31 @@ struct D3D12FrameSynthesizer::Impl {
                     image_description.DepthOrArraySize);
                 parameters.slice = slice;
                 parameters.view_index = view_index;
+                if (guides) {
+                    // As record_game_motion_pair, but with the output
+                    // rectangle packed 16 bits a value: the flow keeps its
+                    // own constants.
+                    const UINT eye = game_motion_guide(target_views, view_index, guides->eye_count);
+                    if (eye >= guides->eye_count) return E_INVALIDARG;
+                    const auto& guide = guides->eyes[eye];
+                    const UINT descriptor_base = eye * kDescriptorBlockSize;
+                    slot.command_list->SetGraphicsRootDescriptorTable(0,
+                        offset_gpu_handle(gpu_start, descriptor_base, descriptor_increment));
+                    parameters.use_game_motion = guide->output_x | (guide->output_y << 16U);
+                    parameters.game_motion_padding = guide->output_width | (guide->output_height << 16U);
+                    parameters.game_motion_rect = {
+                        static_cast<float>(guide->motion_x), static_cast<float>(guide->motion_y),
+                        static_cast<float>(guide->motion_width), static_cast<float>(guide->motion_height)};
+                    parameters.game_motion_scale = {
+                        guide->scale_x * static_cast<float>(guide->output_width) /
+                            static_cast<float>(guide->motion_width),
+                        guide->scale_y * static_cast<float>(guide->output_height) /
+                            static_cast<float>(guide->motion_height)};
+                    parameters.game_motion_jitter_delta = guide->jittered
+                        ? std::array<float, 2>{guide->jitter_x - guide->previous_jitter_x,
+                                               guide->jitter_y - guide->previous_jitter_y}
+                        : std::array<float, 2>{};
+                }
                 slot.command_list->SetGraphicsRoot32BitConstants(
                     2,
                     kSynthesisConstantCount,
@@ -3869,6 +3958,8 @@ struct D3D12FrameSynthesizer::Impl {
             }
         }
 
+        motion_barriers(false);
+        if (guides) *used_game_motion = true;
         const std::array<D3D12_RESOURCE_BARRIER, 1> before_current_copy{
             transition_barrier(
                 previous_resource,

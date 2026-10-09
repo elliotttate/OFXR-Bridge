@@ -579,12 +579,28 @@ float2 forward_flow_for_pixel(
     return magnitude > 512.0 ? result * (512.0 / magnitude) : result;
 }
 
+// The hybrid composition runs both the game-motion and the optical-flow
+// branches, so the flow keeps its constants and the DLSS output rectangle
+// travels 16 bits a value in UseGameMotion (x, y) and GameMotionPadding
+// (width, height).
+static bool hybrid_layout = false;
+// How far the last synthesize_midpoint's two samples disagreed: what the
+// hybrid composition chooses by.
+static float last_disagreement = 1.0;
+
+// The DLSS output rectangle associated with this eye stream. In the
+// game-motion branch the otherwise-unused optical-flow constants carry it.
+float4 game_motion_output_rect() {
+    if (hybrid_layout) {
+        return float4(float(UseGameMotion & 0xffffU), float(UseGameMotion >> 16),
+                      float(GameMotionPadding & 0xffffU), float(GameMotionPadding >> 16));
+    }
+    return float4(float(FlowWidth), float(FlowHeight), float(FlowBlockSize),
+                  float(GameMotionPadding));
+}
+
 float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
-    // In the game-motion branch these otherwise-unused optical-flow constants
-    // carry the DLSS output rectangle associated with this eye stream.
-    float4 output_rect = float4(
-        float(FlowWidth), float(FlowHeight),
-        float(FlowBlockSize), float(GameMotionPadding));
+    float4 output_rect = game_motion_output_rect();
     float2 uv = (pixel - output_rect.xy + 0.5) /
         max(output_rect.zw, float2(1.0, 1.0));
     float2 coordinate = GameMotionRect.xy + uv * GameMotionRect.zw - 0.5;
@@ -614,9 +630,7 @@ float2 game_motion_for_pixel(float2 pixel, uint slice, uint view_index) {
 // The game's vector at the guide texel under pixel, unfiltered: enough to tell
 // surfaces apart.
 float2 game_motion_texel(float2 pixel) {
-    float4 output_rect = float4(
-        float(FlowWidth), float(FlowHeight),
-        float(FlowBlockSize), float(GameMotionPadding));
+    float4 output_rect = game_motion_output_rect();
     float2 uv = (pixel - output_rect.xy + 0.5) /
         max(output_rect.zw, float2(1.0, 1.0));
     float2 maximum = GameMotionRect.xy + GameMotionRect.zw - 1.0;
@@ -759,6 +773,7 @@ float4 synthesize_midpoint(
     // flow still carries the pose term and it is subtracted here.
     bool input_pose_compensated) {
     float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
+    last_disagreement = 1.0;
     uint2 integer_pixel = uint2(input.position.xy);
     bool in_bounds = integer_pixel.x < Width && integer_pixel.y < Height &&
         Slice < ArraySize;
@@ -789,6 +804,7 @@ float4 synthesize_midpoint(
                     synthesis_fraction()));
             } else if (static_overlay) {
                 output_color = saturate(current_fallback.color);
+                last_disagreement = 0.0;
             } else {
                 float2 raw_backward = float2(0.0, 0.0);
                 CameraSample previous_sample = (CameraSample)0;
@@ -798,6 +814,8 @@ float4 synthesize_midpoint(
                 // its final B-to-A displacement.
                 float solve_residual = 0.0;
                 float2 last_displacement = float2(0.0, 0.0);
+                // Where the A and B samples were taken.
+                float2 a_coordinate = pixel, b_coordinate = pixel;
                 if (use_game_motion_pipeline) {
                     // A B-to-A vector is attached to its B endpoint. Sampling
                     // it once at the desired midpoint is exact only for a
@@ -839,6 +857,8 @@ float4 synthesize_midpoint(
                             (1.0 - synthesis_fraction()) * last_displacement - current_endpoint);
                     }
                     if (endpoints_valid) {
+                        a_coordinate = previous_endpoint.coordinate;
+                        b_coordinate = current_endpoint;
                         previous_sample = sample_previous_target(
                             previous_endpoint.coordinate, Slice, ViewIndex);
                         current_sample = sample_current_target(
@@ -856,6 +876,8 @@ float4 synthesize_midpoint(
                     float2 residual_backward = input_pose_compensated
                         ? raw_backward
                         : raw_backward - (previous_coverage.coordinate - pixel);
+                    a_coordinate = pixel + residual_backward * synthesis_fraction();
+                    b_coordinate = pixel - residual_backward * (1.0 - synthesis_fraction());
                     previous_sample = sample_previous_target(
                         pixel + residual_backward * synthesis_fraction(), Slice, ViewIndex);
                     current_sample = sample_current_target(
@@ -879,6 +901,20 @@ float4 synthesize_midpoint(
                         sample_previous_target(pixel, Slice, ViewIndex).color;
                     float4 stable_midpoint = lerp(
                         stable_previous, current_fallback.color, synthesis_fraction());
+                    // The hybrid compares its two branches' samples blurred a
+                    // little: sharp detail resampled at a fraction of a pixel
+                    // disagrees even where the motion is exact.
+                    float compared = disagreement;
+                    if (hybrid_layout) {
+                        float4 a_low = 0.0, b_low = 0.0;
+                        [unroll] for (uint k = 0; k < 4; ++k) {
+                            float2 o = float2((k & 1) != 0 ? 0.5 : -0.5, (k & 2) != 0 ? 0.5 : -0.5);
+                            a_low += sample_previous_target(a_coordinate + o, Slice, ViewIndex).color;
+                            b_low += sample_current_target(b_coordinate + o, Slice, ViewIndex).color;
+                        }
+                        compared = rgb_error(a_low, b_low) * 0.25;
+                    }
+                    last_disagreement = compared;
                     if (!use_game_motion_pipeline) {
                         // Optical flow is not trusted as the game's vectors
                         // are. Whichever explains both frames better is taken:
@@ -914,6 +950,9 @@ float4 synthesize_midpoint(
                     }
                     if (!use_game_motion_pipeline) {
                         output_color = saturate(lerp(stable_midpoint, flow_midpoint, confidence));
+                        last_disagreement = lerp(
+                            rgb_error(stable_previous, current_fallback.color),
+                            compared, confidence);
                     } else {
                         // The game's vectors are trusted: away from a motion
                         // edge, warped samples that disagree are one surface
@@ -995,6 +1034,20 @@ float4 SynthesizeMidpointPS(FullscreenVertex input) : SV_Target {
 
 float4 SynthesizeGameMotionMidpointPS(FullscreenVertex input) : SV_Target {
     return synthesize_midpoint(input, 1.0, false, false, false, true, false);
+}
+
+// The game's vectors and FidelityFX's optical flow both: per pixel, whichever
+// explains both frames better. Content the vectors do not describe - a
+// shadow, a reflection - moves as the image does, which the flow follows.
+// The vectors keep a tie.
+float4 SynthesizeHybridMidpointPS(FullscreenVertex input) : SV_Target {
+    hybrid_layout = true;
+    float4 vectors = synthesize_midpoint(input, 1.0, false, false, false, true, false);
+    float vectors_disagreement = last_disagreement;
+    // Where the vectors explain both frames, the flow need not be asked.
+    [branch] if (vectors_disagreement < 0.02) return vectors;
+    float4 flow = synthesize_midpoint(input, 1.0, false, false, false, false, false);
+    return lerp(flow, vectors, saturate(1.0 + (last_disagreement - vectors_disagreement) * 8.0));
 }
 
 // The NVIDIA variants read flow in signed S10.5 fixed point, and from a

@@ -119,6 +119,10 @@ struct D3D12NvidiaOpticalFlowOptions {
     // Below 100 NVIDIA generates a smaller frame and the bridge restores the
     // real frames' detail; on recorded game frames 67 beat 100 for less time.
     std::uint32_t native_scale{67};
+    // With the FidelityFX backend and the game's DLSS vectors, run the flow
+    // as well and take, per pixel, whichever of the two explains both frames
+    // better.
+    bool hybrid{};
 };
 
 // A second synthetic produced from the same pair, for a session that hands

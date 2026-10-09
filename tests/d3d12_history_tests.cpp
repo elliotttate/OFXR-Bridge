@@ -4132,10 +4132,13 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
         xrfg::D3D12OpticalFlowBackend backend;
         xrfg::D3D12OpticalFlowInputScale scale;
         bool guides;
+        bool hybrid = false;
     };
-    const std::array<OfxrMethod, 4> ofxr_methods{{
+    const std::array<OfxrMethod, 5> ofxr_methods{{
         {"OFXR+DLSS vectors", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
          xrfg::D3D12OpticalFlowInputScale::half, true},
+        {"OFXR DLSS vectors + FidelityFX flow", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+         xrfg::D3D12OpticalFlowInputScale::half, true, true},
         {"OFXR FidelityFX half-res flow", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
          xrfg::D3D12OpticalFlowInputScale::half, false},
         {"OFXR FidelityFX full-res flow", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
@@ -4261,6 +4264,7 @@ void bench_native_dlss_scale_quality(D3D12WarpFixture& fixture) {
             xrfg::D3D12FrameSynthesizer synthesizer;
             xrfg::D3D12NvidiaOpticalFlowOptions options;
             options.input_scale = m.scale;
+            options.hybrid = m.hybrid;
             require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
                         history, current_pointers, synthetic_pointers, kFormat,
                         D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options)),
@@ -4934,7 +4938,9 @@ void test_dlss_motion_vector_strafe_rejects_double_edges(
 // fade, everything moves together while B darkens, and the generated frame
 // must be the motion-compensated blend - a fade is no occlusion.
 enum class VectorScene { occlusion, overlay, fade };
-void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorScene kind) {
+// hybrid composes with FidelityFX's flow as well as the game's vectors.
+void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorScene kind,
+                                             bool hybrid = false) {
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     constexpr int background_motion = 6;
@@ -4999,9 +5005,12 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorSc
                 source_pointers, D3D12_RESOURCE_STATE_RENDER_TARGET)),
         "occlusion history initialization failed");
     xrfg::D3D12FrameSynthesizer synthesizer;
+    xrfg::D3D12NvidiaOpticalFlowOptions options;
+    options.hybrid = hybrid;
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(),
                 history, current_pointers, synthetic_pointers, kFormat,
-                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx)),
+                D3D12_RESOURCE_STATE_RENDER_TARGET, xrfg::D3D12OpticalFlowBackend::fidelity_fx,
+                options)),
         "occlusion synthesizer initialization failed");
     const auto guides = [&](std::uint64_t serial) {
         auto set = std::make_shared<xrfg::DlssMotionVectorSet>();
@@ -5060,11 +5069,17 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorSc
             }
         }
         const double edge_error = total / static_cast<double>(count);
-        std::cout << "DLSS " << (fade ? "fade" : overlay ? "overlay" : "occlusion") << " eye=" << eye
+        std::cout << (hybrid ? "hybrid " : "") << "DLSS "
+                  << (fade ? "fade" : overlay ? "overlay" : "occlusion") << " eye=" << eye
                   << " edge_mae=" << edge_error << '\n';
         // 0.68, 6.9 and 0.08 here. The same-pixel blend this replaced
-        // measured 24.6, 31.6 and 45.7 (it does not follow the motion).
-        require(edge_error <= (fade ? 1.0 : overlay ? 12.0 : 2.0),
+        // measured 24.6, 31.6 and 45.7 (it does not follow the motion). The
+        // hybrid measures 4.5 at these occlusions: where exact vectors' two
+        // samples disagree, as they must where an edge covers or uncovers,
+        // the flow can look the better explanation. Trusting the vectors'
+        // occlusions instead cut that to 2.8 but cost more on recorded game
+        // frames, whose vectors are not exact (7.56 against 7.17).
+        require(edge_error <= (fade ? 1.0 : overlay ? 12.0 : hybrid ? 5.0 : 2.0),
             "DLSS vectors showed the wrong frame around a moving edge for eye " +
                 std::to_string(eye) + ": " + std::to_string(edge_error));
     }
@@ -5849,7 +5864,7 @@ void bench_frame_generation_methods() {
         Backend backend;
         Preset preset;
         Scale scale;
-        bool game_motion, native, triple;
+        bool game_motion, native, triple, hybrid = false;
     };
     const std::vector<Method> methods{
         {"OFXR FidelityFX, half-res flow", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, false},
@@ -5859,6 +5874,7 @@ void bench_frame_generation_methods() {
         {"OFXR NVIDIA OFA slow", Backend::nvidia, Preset::slow, Scale::half, false, false, false},
         {"OFXR FidelityFX + DLSS vectors", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false},
         {"OFXR NVIDIA + DLSS vectors", Backend::nvidia, Preset::medium, Scale::half, true, false, false},
+        {"OFXR DLSS vectors + FidelityFX flow", Backend::fidelity_fx, Preset::medium, Scale::half, true, false, false, true},
         {"OFXR FidelityFX 3X", Backend::fidelity_fx, Preset::medium, Scale::half, false, false, true},
         {"OFXR NVIDIA OFA medium 3X", Backend::nvidia, Preset::medium, Scale::half, false, false, true},
 #ifdef XRFG_NATIVE_DLSSG
@@ -5899,6 +5915,7 @@ void bench_frame_generation_methods() {
         options.input_scale = method.scale;
         if (method.native) options.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
         options.native_scale = 100; // XRFG_NATIVE_DLSSG_SCALE times the others
+        options.hybrid = method.hybrid;
         xrfg::D3D12FrameSynthesizer synthesizer;
         require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                                                current_out, synthetic_out, kFormat,
@@ -6148,6 +6165,9 @@ int main() {
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::occlusion);
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::overlay);
         test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::fade);
+        test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::occlusion, true);
+        test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::overlay, true);
+        test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::fade, true);
         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);
         test_submission_backpressure_and_recovery(
             fixture,

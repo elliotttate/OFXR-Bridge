@@ -328,7 +328,10 @@ void replay_held_out(const std::filesystem::path& directory) {
                 box_left = std::min(box_left, x); box_right = std::max(box_right, x);
                 box_top = std::min(box_top, y); box_bottom = std::max(box_bottom, y);
             }
-    if (box_left < box_right) {
+    // XRFG_TEST_REPLAY_SAVE_FULL=1 saves whole images instead.
+    if (std::getenv("XRFG_TEST_REPLAY_SAVE_FULL")) {
+        box_left = 0; box_top = 0; box_right = width - 1; box_bottom = height - 1;
+    } else if (box_left < box_right) {
         box_left = box_left > 32 ? box_left - 32 : 0;
         box_top = box_top > 32 ? box_top - 32 : 0;
         box_right = std::min(std::min(box_right + 32, width - 1), box_left + 1023);
@@ -455,6 +458,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         bool guides;
         xrfg::D3D12NvidiaPerformancePreset preset{xrfg::D3D12NvidiaPerformancePreset::medium};
         bool bidirectional{};
+        bool hybrid{};
     };
     std::vector<Method> methods{
         {"OFXR+DLSS vectors", xrfg::D3D12OpticalFlowBackend::fidelity_fx,
@@ -466,8 +470,9 @@ void replay_held_out(const std::filesystem::path& directory) {
         {"OFXR NVIDIA medium flow", xrfg::D3D12OpticalFlowBackend::nvidia,
          xrfg::D3D12OpticalFlowInputScale::half, false}};
     // XRFG_TEST_REPLAY_FLOWS lists OFXR configurations to run instead, each
-    // backend/preset/scale[/bi]: vectors, ffx or nvidia; slow, medium or
-    // fast; full, three_quarter or half. For example nvidia/fast/full/bi.
+    // backend/preset/scale[/bi]: vectors, hybrid (vectors and FidelityFX
+    // flow), ffx or nvidia; slow, medium or fast; full, three_quarter or
+    // half. For example nvidia/fast/full/bi.
     if (const char* list = std::getenv("XRFG_TEST_REPLAY_FLOWS")) {
         methods.clear();
         std::stringstream stream(list);
@@ -481,7 +486,8 @@ void replay_held_out(const std::filesystem::path& directory) {
                      parts[2] == "full"            ? xrfg::D3D12OpticalFlowInputScale::full
                      : parts[2] == "three_quarter" ? xrfg::D3D12OpticalFlowInputScale::three_quarter
                                                    : xrfg::D3D12OpticalFlowInputScale::half,
-                     parts[0] == "vectors"};
+                     parts[0] == "vectors" || parts[0] == "hybrid"};
+            m.hybrid = parts[0] == "hybrid";
             m.preset = parts[1] == "slow"   ? xrfg::D3D12NvidiaPerformancePreset::slow
                        : parts[1] == "fast" ? xrfg::D3D12NvidiaPerformancePreset::fast
                                             : xrfg::D3D12NvidiaPerformancePreset::medium;
@@ -515,6 +521,7 @@ void replay_held_out(const std::filesystem::path& directory) {
         options.input_scale = m.scale;
         options.preset = m.preset;
         options.bidirectional = m.bidirectional;
+        options.hybrid = m.hybrid;
         require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
                     current_pointers, synthetic_pointers, f0.view_format,
                     D3D12_RESOURCE_STATE_RENDER_TARGET, m.backend, options)), "replay synthesizer");
