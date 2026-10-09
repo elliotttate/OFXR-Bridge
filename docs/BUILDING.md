@@ -190,12 +190,19 @@ them in the pack measured the same and cost about 35 us more per pair.
 
 Of a 2X pair at 2064x2208 per eye, OFXR's own work is the pack of B (about
 72 us), the reseed's pack of the aligned A (about 71 us, turning head only) and
-the composition (about 26 us per output); NGX's evaluation is the rest. Other
+the composition (about 26 us per output); NGX's evaluation is the rest. With
+SDK 310.9.1, NGX's evaluations alone take 1.08 ms of a 1.18 ms pair (1.29 of
+1.46 ms turning), and at 3004x3004 1.48 of 1.67 ms (1.73 of 2.04 ms). The
+remainder writes the full-resolution colour, motion and depth NGX takes in its
+own feature layout and composes its output, about 350 MB per pair at
+3004x3004: as long as the RTX 5090's memory bandwidth needs to move it. Other
 choices measured no faster or slower: 16x16 or 32x8 pack groups instead of
-8x8, 8-bit colour or 16-bit depth for NGX (32-bit motion is slower), leaving
-the reseed's motion unwritten, and NGX's undocumented `DLSSG.InternalWidth`,
-`DLSSG.DynamicResolution` and `DLSSG.EvalFlags` parameters. This feature
-version accepts only render preset 1.
+8x8 (8x8 overlaps NGX best), 8-bit colour or 16-bit depth for NGX (32-bit
+motion is slower), a 16 rather than 64 pixel seam, leaving the reseed's motion
+unwritten, a reset evaluated over smaller motion and depth rectangles (NGX
+requires the full colour extent), and NGX's undocumented
+`DLSSG.InternalWidth`, `DLSSG.DynamicResolution` and `DLSSG.EvalFlags`
+parameters. These feature versions accept only render preset 1.
 
 sRGB swapchains are encoded by the pack shader into 10-bit
 private textures (8-bit where the adapter lacks typed UAV stores for 10-bit),
