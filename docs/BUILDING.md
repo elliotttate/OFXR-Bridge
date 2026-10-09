@@ -747,7 +747,13 @@ length was chosen on the natural runs of a race with no moves at all (24
 slips; runs that ended by themselves up to 14 long), counting a move made on
 a run that would have ended as costing that run again to move back: over
 three races 6, 8, 10 and 12 came to about 354, 392, 456 and 503 slow pairs,
-with 13, 8, 5 and 2 needless moves. Every round at the true rate measured 62 ms,
+with 13, 8, 5 and 2 needless moves. What is left is below what can be measured: across 37
+clean full-rate rounds in four races, a real frame went down 62.47 ms after
+the game's wait with a standard deviation of 0.17 ms, while the 1.0% left
+slow adds 0.083 ms to that average, about half of it single late pairs that
+are scheduling noise rather than a slip. Six instead of eight would take
+off a further 0.013 ms, a thirteenth of the noise, for five more needless
+moves, each of which shifts when the game samples its pose by a period. Every round at the true rate measured 62 ms,
 and no frame was lost to a move.
 Moving the promise with the phase was tried and removed: the measurement only
 moved it back. `xrfg_layer_rephase` checks the move and the back-off with
