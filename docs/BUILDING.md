@@ -711,8 +711,15 @@ generation interpolating in the same session, and 62.5 ms interpolating with
 the deeper pipeline. Those runs also showed every promise early: by a period
 extrapolating and two with the deeper pipeline, because the game took more
 than one display period to hand its frame over. `promise_shown_time` now
-follows the measured lateness in whole periods (90% of a 64-frame window);
-afterwards real frames went down at their promised time in every mode. At
+follows the measured lateness in whole periods - the median of a 64-frame
+window, once two windows in a row name it and it saves a quarter of a period
+a frame; afterwards real frames went down at their promised time in every
+mode. It first required nine in ten of a window to agree, which Kayak VR
+(Unreal Engine 4, OpenXR) never did: its frames go down in two groups a frame
+apart, 72% and 27%, and with FidelityFX flow and NVIDIA's slow preset the
+larger group went down a period after its promise. With the median 73% go
+down at it in every method (`xrfg_layer_promise_two_groups`, every fourth
+frame handed over late, fails with the old rule). At
 UEVR's full resolution the Jakku race loaded the GPU enough that SteamVR
 halved the rate in some rounds (its lead from wait to display then reads 27 or
 50-58 ms instead of 35.3); those rounds are left out.

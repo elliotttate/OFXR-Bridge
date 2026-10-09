@@ -1327,6 +1327,9 @@ struct SessionState {
     std::array<std::int8_t, 64> promise_samples{};
     std::uint32_t promise_sample_count{};
     std::uint32_t promise_settle{};
+    // The correction the last window named, waiting for the next to agree;
+    // -1 for none.
+    std::int32_t promise_candidate{-1};
     bool promise_runtime_slowed{};
     // Whether the runtime's last frame was at a multiple of the display
     // period, written by the presenter for the application's thread.
@@ -2410,10 +2413,18 @@ void enter_generation_quarantine(
 // frames go down; this only makes the promise say so.
 //
 // Each real frame of a pair is measured, in whole periods, against the
-// promise it was given less the correction already in it. Once a window of
-// them nearly all agree the correction follows, so one late frame, or a scene
-// that alternates, changes nothing. Frames promised before a change are not
-// counted against it.
+// promise it was given less the correction already in it, and the correction
+// is the one that leaves a window of them least late or early on average -
+// its median, in whole periods. It follows once two windows in a row name the
+// same one and it saves at least a quarter of a period a frame, so one late
+// frame, or a scene that alternates, changes nothing. Frames promised before
+// a change are not counted against it.
+//
+// It used to follow only when nine in ten of a window agreed. Kayak VR's
+// frames go down in two groups a frame apart - about 72% at one lateness and
+// 27% a whole frame later, as Unreal Engine 4 ends a frame now before and now
+// after its next wait - so no window ever agreed, and with FidelityFX flow 71%
+// of its frames went down a period after the time they were promised.
 void observe_promise_lateness(
     SessionState& state,
     XrDuration late,
@@ -2433,6 +2444,7 @@ void observe_promise_lateness(
         state.promise_runtime_slowed = slowed;
         state.promise_sample_count = 0;
         state.promise_settle = 8;
+        state.promise_candidate = -1;
     }
     if (slowed) {
         return;
@@ -2458,17 +2470,38 @@ void observe_promise_lateness(
     for (const std::int8_t sample : state.promise_samples) {
         ++counts[static_cast<std::size_t>(sample + 8)];
     }
-    const auto best = std::max_element(counts.begin(), counts.end());
-    const std::uint32_t agreeing = *best;
-    // Nine in ten of a window: about a second of frames at 60 a second.
-    if (agreeing * 10 < state.promise_samples.size() * 9) {
+    // The summed distance, in periods, of the window's frames from a
+    // correction.
+    const auto cost = [&](std::int32_t correction) {
+        std::uint64_t total = 0;
+        for (std::int32_t value = -8; value <= 8; ++value) {
+            total += static_cast<std::uint64_t>(counts[static_cast<std::size_t>(value + 8)]) *
+                static_cast<std::uint64_t>(std::abs(value - correction));
+        }
+        return total;
+    };
+    std::int32_t target = current;
+    std::uint64_t target_cost = cost(current);
+    for (std::int32_t correction = 0; correction <= kMaximumCorrection; ++correction) {
+        const std::uint64_t candidate = cost(correction);
+        if (candidate < target_cost) {
+            target = correction;
+            target_cost = candidate;
+        }
+    }
+    // At least a quarter of a period a frame over the window (about a second
+    // of frames at 60 a second), and the same answer from the window before.
+    const std::uint64_t saving = cost(current) - target_cost;
+    if (target == current || saving * 4 < state.promise_samples.size()) {
+        state.promise_candidate = -1;
         return;
     }
-    const std::int32_t target = std::clamp<std::int32_t>(
-        static_cast<std::int32_t>(best - counts.begin()) - 8, 0, kMaximumCorrection);
-    if (target == current) {
+    if (state.promise_candidate != target) {
+        state.promise_candidate = target;
         return;
     }
+    state.promise_candidate = -1;
+    const auto agreeing = counts[static_cast<std::size_t>(target + 8)];
     state.promise_correction_periods.store(target, std::memory_order_relaxed);
     // The frames already promised under the old correction.
     state.promise_settle = 8;

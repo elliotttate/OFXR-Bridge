@@ -25,6 +25,16 @@ endif()
 file(WRITE "${WORK_DIR}/ofxr_bridge.ini" "${ini}")
 
 get_filename_component(layer_name "${LAYER_DLL}" NAME)
+# SLOW_FRAME_EVERY: every Nth frame is handed over an application frame late,
+# so the real frames go down in two groups a frame apart, as Kayak VR's do; the
+# promise has to follow the larger group, which no window agrees on by nine in
+# ten.
+if(DEFINED SLOW_FRAME_EVERY)
+    set(ENV{XRFG_TEST_SLOW_FRAME_EVERY} ${SLOW_FRAME_EVERY})
+endif()
+# The correction follows two windows that agree: a run long enough that one
+# made late on a loaded machine still leaves frames to judge it by.
+set(ENV{XRFG_TEST_PROMISE_FRAMES} 400)
 execute_process(
     COMMAND "${CALL_CHAIN}"
         "${WORK_DIR}/${layer_name}"
@@ -104,7 +114,12 @@ if(counted LESS 24)
         "Only ${counted} real frames went down after the correction to "
         "${corrected_to} periods")
 endif()
-math(EXPR required "${counted} * 9 / 10")
+if(DEFINED SLOW_FRAME_EVERY)
+    # Each slow frame goes down a frame late, and the frame after it with it.
+    math(EXPR required "${counted} * 6 / 10")
+else()
+    math(EXPR required "${counted} * 9 / 10")
+endif()
 if(on_time LESS required)
     message(FATAL_ERROR
         "After the correction to ${corrected_to} periods only ${on_time} of "

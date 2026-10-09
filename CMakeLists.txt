@@ -1144,6 +1144,16 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_promise_shown_time.cmake")
 
         add_test(
+            NAME xrfg_layer_promise_two_groups
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
+                "-DSLOW_FRAME_EVERY=4"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/promise-two-groups"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_promise_shown_time.cmake")
+
+        add_test(
             NAME xrfg_layer_promise_shown_time_extrapolate
             COMMAND "${CMAKE_COMMAND}"
                 "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
@@ -1178,6 +1188,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         set_tests_properties(
             xrfg_layer_promise_shown_time
             xrfg_layer_promise_shown_time_extrapolate
+            xrfg_layer_promise_two_groups
             xrfg_layer_rephase
             PROPERTIES RESOURCE_LOCK xrfg_layer_long_call_chain)
 

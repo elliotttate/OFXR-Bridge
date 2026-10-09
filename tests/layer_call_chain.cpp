@@ -3744,6 +3744,11 @@ int main(int argc, char** argv) {
         // XRFG_TEST_PROMISE_FRAMES: how many frames to run (320).
         const char* frames_setting = std::getenv("XRFG_TEST_PROMISE_FRAMES");
         const int frame_count = frames_setting ? std::atoi(frames_setting) : 320;
+        // XRFG_TEST_SLOW_FRAME_EVERY=N: every Nth frame takes an application
+        // frame longer to hand over, so its real frame goes down a frame later
+        // than the rest, as a quarter of Kayak VR's do.
+        const char* slow_setting = std::getenv("XRFG_TEST_SLOW_FRAME_EVERY");
+        const int slow_every = slow_setting ? std::atoi(slow_setting) : 0;
         for (int index = 0; index < frame_count && frame_sequence_succeeded; ++index) {
             XrFrameState frame{XR_TYPE_FRAME_STATE};
             frame_sequence_succeeded =
@@ -3754,6 +3759,10 @@ int main(int argc, char** argv) {
             if (index >= 4) {
                 std::this_thread::sleep_for(std::chrono::microseconds(
                     kFakeDisplayPeriod * 3 / 2 / 1000));
+            }
+            if (slow_every > 0 && index > 16 && index % slow_every == 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(
+                    kFakeDisplayPeriod * 2 / 1000));
             }
             // Alternately a little after and a little before the stamp it
             // repeats, as Hubris's are.

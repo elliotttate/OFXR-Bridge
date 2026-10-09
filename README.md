@@ -397,11 +397,21 @@ OpenXR session, and extrapolation wins if both are set.
   the deeper pipeline: the game rendered every frame for a head pose that much
   early, and SteamVR's reprojection made up the difference. The layer now
   counts, at the presenter, how many whole periods late real frames go down,
-  and once 90% of a 64-frame window agree, moves the promise by that much
-  (`[ofxr] promise_shown_time=1`, the default). Live, real frames then went
-  down at their promised time in every mode. When frames go down is
-  unchanged; only the promise follows it. `xrfg_layer_promise_shown_time`
-  checks it on the presenter, interpolating and extrapolating.
+  and moves the promise to the window's median (`[ofxr]
+  promise_shown_time=1`, the default) once two 64-frame windows in a row name
+  it. Live, real frames then went down at their promised time in every mode.
+  When frames go down is unchanged; only the promise follows it.
+  `xrfg_layer_promise_shown_time` checks it on the presenter, interpolating
+  and extrapolating.
+- **The promise follows games whose frames go down in two groups.** It moved
+  only when nine in ten of a window agreed. Kayak VR's real frames go down in
+  two groups a frame apart (about 72% and 27%, as Unreal Engine 4 ends a frame
+  now before and now after its next wait), so it never moved, and with
+  FidelityFX flow 71% of its frames went down a period after their promise -
+  the game rendered them for a head pose that much early. Following the
+  median, 73% now go down at their promise and the rest a frame later, in
+  every method. `xrfg_layer_promise_two_groups` hands every fourth frame over
+  late on the fake runtime and fails with the old rule.
 - **Extrapolation from the game's vectors reads depth again.** In release 6,
   the combined mode's packed constants also reached the vectors-only shader,
   which then read the depth rectangle from the wrong constants and scored
