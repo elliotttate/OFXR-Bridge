@@ -143,22 +143,25 @@ ofxr/
   XR_APILAYER_XRFrameBridge_diagnostic.dll
   ofxr_bridge.ini
   nvngx_dlssg.dll
+  OFXRBenchmark.exe      (the tray's "Benchmark this PC")
 licenses/
   NVIDIA-DLSS.txt, plus the SafetyHook, Zydis, Zycore and UEVR API notices
 ```
 
-When you copy the tray build, keep `nvngx_dlssg.dll` with the other files in
+When you copy the tray build, keep `nvngx_dlssg.dll` (and `OFXRBenchmark.exe`,
+which finds it there) with the other files in
 `ofxr`, together with `licenses/NVIDIA-DLSS.txt`. When the tray arms, it
 installs that DLL beside its cached layer. Do not distribute PDBs, static
 libraries, test executables or the NVIDIA SDK.
 
 ### Turning it on
 
-In the tray menu, select **NVIDIA DLSS Frame Generation (experimental)**
-before the game starts its OpenXR session. The choice applies to the next
-session. Select **OFXR frame generation** to go back to OFXR's own methods.
-While native generation is selected, the tray tooltip shows "native DLSS FG".
-The **3X Frame Gen** option switches native generation to 3X.
+In the tray menu, under **Frame generation method**, select **NVIDIA DLSS
+Frame Generation (experimental)** before the game starts its OpenXR session.
+The choice applies to the next session. Select one of the optical-flow methods
+in the same list to go back to OFXR's own. While native generation is
+selected, the menu's status line and the tray tooltip name it. **3X** under
+*Frames shown per game frame* switches native generation to 3X.
 
 | Where | Setting |
 |---|---|
@@ -173,9 +176,10 @@ time it arms. The optical-flow backend, preset, scale and bidirectional
 controls only configure OFXR's own algorithm. They do not tune NVIDIA's
 feature.
 
-**Native generation's resolution.** The tray's **DLSS Frame Generation
-resolution** submenu offers 100%, 67% (the default) and 50%, applied the next
-time the game starts. Below 100%, NVIDIA generates at that fraction of each
+**Native generation's resolution.** The tray's **Quality and performance >
+DLSS Frame Generation resolution** submenu offers 100%, 67% (the default)
+and 50%, applied the next time the game starts. Below 100%, NVIDIA generates
+at that fraction of each
 eye's resolution, and the bridge puts back the real frames' detail wherever it
 can follow the game's motion. NVIDIA's full-resolution frame is the softest of
 the three: on 42 recorded Galactic Racer triplets, 67% erred less where the
@@ -639,13 +643,67 @@ Blank frames compress to almost nothing in GPU memory, and NGX then measures
 
 ## Using OFXR Bridge
 
-For everyday use, the tray works as it does upstream:
+For everyday use:
 
 1. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away.
 2. Right-click the tray icon to choose the method and options.
 3. Start the game normally. For injectors such as UEVR, start the tray before
    the game.
 4. Select **Disarm bridge**, or close the tray, when you are finished.
+
+### The tray menu
+
+The menu is grouped in the order you decide things. Its top lines say whether
+the bridge is armed or paused and which method is in use.
+
+| Entry | What it holds |
+|---|---|
+| **Disarm bridge** / **Pause frame generation** | Arming, and the pause, with its key shown beside it. |
+| **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then what OFXR does in games with DLSS: use **the game's motion vectors** (default), **motion vectors + FidelityFX flow** (best quality), or **extrapolate, SpaceWarp-style** (no added latency, less accurate). Then **2X** or **3X**. |
+| **Quality and performance** | Optical-flow resolution, NVIDIA's both-ways check, DLSS Frame Generation resolution, and Prefer FPS over latency. |
+| **Benchmark this PC...** | See below. |
+| **FPS overlay**, **Diagnostics**, **Advanced** | Overlay position; flight recorder and logs; Lower VRAM and the pause key. |
+
+Options that do not apply to the chosen method are greyed out. The settings
+are stored as before in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`; the DLSS-game
+choice adds `dlss_flow_hybrid=0|1` and `extrapolate=0|1`, which the tray
+also writes to the layer's `[ofxr]` section.
+
+### Benchmark this PC
+
+**Benchmark this PC...** measures, on your own graphics card, the GPU time of
+every frame-generation method at your headset's per-eye resolution: each
+optical-flow engine at each resolution, the DLSS-vector modes, native DLSS
+Frame Generation at 100/67/50% in 2X and 3X, and the per-frame copy of a DLSS
+game's vectors and depth. It takes about half a minute; close VR games first.
+The headset's resolution and refresh rate are filled in from the last session
+the flight recorder recorded, or you pick a headset or type them. Methods the
+PC cannot run (NVIDIA optical flow without an NVIDIA card, DLSS Frame
+Generation without an RTX 40/50 card or `nvngx_dlssg.dll`, 3X without RTX 50)
+are listed as not available, with the reason.
+
+The run is `ofxr\OFXRBenchmark.exe`, started as a separate process, so the
+tray stays responsive and keeps working while it runs. The results are kept
+in `%LOCALAPPDATA%\OFXR Bridge\benchmark.ini` with the GPU, driver and
+resolution. From then on each choice in the menu shows what it costs on this
+PC and the best it can do, for example "0.59 ms, up to +93%"; results from
+a different graphics card are not used.
+
+How to read the numbers. With 2X, the headset shows two frames for every frame
+the game renders, so at 90 Hz the game has 22.2 ms per frame instead of 11.1.
+Frame generation runs on the same GPU, and its time comes out of that budget.
+A game therefore reaches the full refresh rate when its own GPU time is at most
+the budget minus the cost; the window shows that as the frame rate the game
+must reach by itself, without frame generation ("Game needs"). The speed-up
+is what a game running at exactly that rate gains: at R Hz with N frames per
+game frame it is N - 1 - cost x R. Faster games gain less, since nothing goes
+past the refresh rate, and slower ones cannot hold it with that method. 3X
+works the same with three frames per game frame. The window also lists each
+method's measured image error on recorded Galactic Racer frames, and the
+latency it adds: interpolation shows each real frame one display frame later
+(two at 3X), extrapolation adds none. The times are measured on test frames
+with nothing else running; in a game, which shares the GPU, expect somewhat
+more.
 
 > [!IMPORTANT]
 > **OpenXR games only.** Games built on OpenVR, SteamVR's older system, are
@@ -655,7 +713,8 @@ For everyday use, the tray works as it does upstream:
 > there.
 
 The [upstream README](https://github.com/djules75/OFXR-Bridge#readme) has the
-full user guide and explains every tray option. For more, see:
+full user guide and explains every tray option; this fork's menu groups them
+as above. For more, see:
 
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
 - [docs/FPS_OVERLAY.md](docs/FPS_OVERLAY.md)
