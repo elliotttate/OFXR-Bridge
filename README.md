@@ -1,4 +1,4 @@
-# OFXR Bridge
+# OFXR Bridge: native DLSS Frame Generation fork
 
 OFXR Bridge makes VR games look smoother when your PC cannot render as
 many frames as your headset displays. For every frame the game renders, it
@@ -11,494 +11,435 @@ It is "almost" because generating frames costs some GPU time, which lowers
 the game's own frame rate a little. Generated frames can also show small
 artifacts around fast-moving objects. OFXR runs in the background from a
 tray icon, and you switch it on or off there. It works with OpenXR games
-only (see below).
+only.
 
-Technically, OFXR Bridge is an experimental OpenXR API layer. It uses
-optical flow to generate frames between the ones the game renders.
+Technically, OFXR Bridge is an experimental OpenXR API layer. It generates
+frames between the ones the game renders, from optical flow or, when the game
+uses DLSS, from the game's own motion vectors.
 
-The working **V439 experimental build** also offers **NVIDIA DLSS Frame
-Generation** in the tray. It runs the native NVIDIA NGX feature with separate
-eye histories, engine motion and depth, alongside the existing OFXR option.
-It can capture guides directly from a D3D12 DLSS or Ray Reconstruction upscaler,
-or accept a cooperating producer through the V2 guide API. UEVR's public
-projection API supplies the depth convention when OpenXR depth metadata is
-absent. It needs an NGX-supported GPU/driver. Missing or reset guides show the
-current frame. GPU regressions cover array and side-by-side stereo on an RTX
-5090; live Galactic Racer tests on the Steam Frame verify guide capture and
-native generation. Headset image quality and comparative performance remain
-under evaluation. See
-[building the native option](docs/BUILDING.md#native-nvidia-dlss-frame-generation).
+## About this fork
 
-Current release: **v0.2.13.1 (internal build V438)**.
-See the [release notes](docs/releases/0.2.13.1.md). 0.2.13.1 is a
-performance and stability release: it fixes the higher latency and the
-frame drops some games had on Virtual Desktop since 0.2.12.1, stops
-hangars, menus and loading screens dropping to 60 fps after a hiccup,
-shortens the frame-rate dips SteamVR showed after a hiccup, stops MSFS
-2024 staying "loaded but not generating" after one rejected frame, and
-adds a tray switch for the VRAM saving of 0.2.10.1, for the cards on which
-it costs smoothness.
-0.2.12.2 removed a flicker in the left eye in MSFS 2024 with 3X Frame Gen,
-and 0.2.12.1 lets you pause and resume frame generation while you play,
-from the tray or with a key you choose.
+This is [elliotttate/OFXR-Bridge](https://github.com/elliotttate/OFXR-Bridge).
+It is a fork of [djules75/OFXR-Bridge](https://github.com/djules75/OFXR-Bridge),
+which maintains the 0.2.x line. That project is itself a fork of
+[tig3rmast3r/OFXR-Bridge](https://github.com/tig3rmast3r/OFXR-Bridge), the
+original OFXR. The fork's work is on the `native-dlss-fg` branch. It sits on
+top of upstream release v0.2.13.1 (internal build V438) and builds as internal
+version **V439**.
 
-> [!WARNING]
-> **Pimax headsets: use SteamVR, not Pimax OpenXR.** Pimax Play's OpenXR
-> runtime keeps an extra copy in VRAM of every image it is handed, so OFXR
-> costs about **1.5 times** more on it than on SteamVR, and the copies stay
-> until the game closes. We have reported it to Pimax so they can fix their
-> runtime; there is nothing OFXR can do about it in the meantime. Until it is
-> fixed, run your Pimax through SteamVR with
-> [sboys3's native SteamVR driver](https://store.pimax.com/blogs/blogs/sboys3-native-steamvr-driver-setup-guide)
-> and make SteamVR the active OpenXR runtime (SteamVR → Settings → OpenXR).
-> This matters most in MSFS 2024, which is already close to the VRAM limit
-> at Pimax resolutions. Details in the
-> [troubleshooting guide](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
+The fork adds **native NVIDIA DLSS Frame Generation** (NGX DLSS-G) as a VR
+frame-generation backend. It sits alongside the methods OFXR already had:
 
-## 🛠️ Not working, or not feeling smoother?
+| Method | What makes the in-between frame |
+|---|---|
+| OFXR, FidelityFX optical flow | AMD FidelityFX optical flow, on any supported D3D12 GPU |
+| OFXR, NVIDIA optical flow | the Optical Flow hardware engine of Turing and newer NVIDIA GPUs |
+| OFXR + DLSS vectors | OFXR's own synthesis, driven by the game's DLSS motion vectors |
+| **Native DLSS FG** (new) | NVIDIA's DLSS Frame Generation feature, fed the game's DLSS motion vectors and depth |
 
-### ➡️ [Read the troubleshooting guide first](docs/TROUBLESHOOTING.md)
-
-It checks in one step whether OFXR is running in your game, then lists the
-usual causes and fixes: OpenVR games, running as administrator, the game's
-frame rate, frame smoothing in your VR software, and running out of VRAM.
-
----
-
-> [!IMPORTANT]
-> **OpenXR games only.** The bridge works only with games that talk to your
-> headset through **OpenXR**. Games built on **OpenVR**, SteamVR's older
-> system, are not supported, even though they run on SteamVR: the bridge
-> never loads in them and changes nothing.
->
-> It doesn't matter which headset you have or which VR software it runs
-> through (SteamVR, Pimax, Virtual Desktop): what matters is whether the game
-> itself uses OpenXR. Examples of OpenXR games: Microsoft Flight Simulator
-> 2020 and 2024, DCS World, Assetto Corsa EVO, and Unreal games played through
-> **UEVR with its OpenXR option selected** (not OpenVR). Some OpenVR-only
-> games can be run through OpenXR with
-> [OpenComposite](https://gitlab.com/znixian/OpenOVR), for example Elite
-> Dangerous, Skyrim VR and No Man's Sky.
+In native-enabled builds, it also makes OFXR + DLSS vectors work without a
+separate guide provider. It fixes a hang under SteamVR, corrects the flight
+recorder's GPU timings, and adds benchmark and quality tooling. The rest of
+OFXR Bridge is unchanged from upstream: the tray, Prefer FPS over latency,
+3X Frame Gen, Lower VRAM, the D3D11 and Vulkan bridges, SteamVR pacing, the
+FPS overlay and the flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
 
 > [!WARNING]
-> This is experimental software. It may not work with your game, VR mod, GPU or OpenXR
-> runtime. It may produce visual artifacts, fail to activate, freeze the game
-> or cause a crash. Use it at your own risk.
+> Native DLSS Frame Generation is **experimental**. It is off in the default
+> build and in CI builds, so you have to build it yourself. It needs an NVIDIA
+> RTX GPU and a game that uses DLSS. So far it has been tested on one RTX 5090.
 
-> [!IMPORTANT]
-> The bridge runs on any Direct3D 12 GPU with Shader Model 6 support - GTX
-> 10-series and newer NVIDIA cards, AMD GCN and RDNA, Intel Arc - through one
-> of two optical-flow backends. The NVIDIA backend uses the Optical Flow hardware
-> engine of Turing-generation GPUs and newer (RTX 20/30/40/50-series and the
-> GTX 1660 family, with a compatible driver; not TU117 cards such as the
-> GTX 1650). On every other GPU - AMD, Intel, and older NVIDIA cards such as
-> the GTX 10 series - the bridge uses the AMD FidelityFX backend automatically.
-> FidelityFX computes the flow on the same GPU that renders the game, so it
-> costs more frame time than the NVIDIA engine and leaves less headroom.
+## Native DLSS Frame Generation
 
-> [!TIP]
-> A game that holds about half your headset's refresh rate can reach the full
-> rate: a game at 45–50 FPS on a 90 Hz headset typically delivers 90, a
-> **frame-rate increase of up to 100%**, with NVIDIA Medium at 50% optical-flow
-> resolution or FidelityFX. Actual results vary by game, GPU, resolution and
-> base frame rate; the bridge cannot recover frames the game does not render.
->
-> A game that can only hold about a third of the refresh rate can reach it
-> too, with **3X Frame Gen**: 30 FPS on a 90 Hz headset delivers 90.
+### How it works
 
-The current build provides:
+- **The game's DLSS guides are captured from its upscaler.** A native-enabled
+  layer hooks the game's NGX calls. It captures the motion vectors and depth
+  that the game hands to its D3D12 DLSS or Ray Reconstruction upscaler, along
+  with their rectangles, motion scale, jitter and depth flags. Camera depth
+  metadata comes from OpenXR depth submissions. When those are missing, it
+  comes from UEVR's public projection API. A cooperating producer can supply
+  the same guides through the V2 guide publication API instead. Snapshots copy
+  only the rectangle DLSS reads, and only the depth plane.
+- **Both eyes share one NGX feature.** The eyes are packed side by side into
+  one double-width feature, with a 64-pixel seam that repeats each eye's edge.
+  Most of an NGX evaluation's cost is fixed, so one wide evaluation costs far
+  less than one per eye. The seam stops either eye's history from reaching the
+  other. NGX refuses features wider than 8192 pixels, so for very wide eyes
+  the seam narrows, down to 16 pixels. Eyes from 4089 pixels wide get a
+  feature each.
+- **The previous frame is aligned into the new camera.** The previous real
+  frame is rotated into the new frame's camera. The same mapping removes
+  tracked head rotation from the game's vectors. When the alignment moves any
+  pixel by more than a tenth of a pixel, NGX's history is reset. It is then
+  reseeded with the aligned previous frame before the new frame is evaluated.
+  A still head, or a translation alone, keeps the history.
+- **2X and 3X.** NGX makes one frame at 1/2, or two frames at 1/3 and 2/3 with
+  OFXR's 3X Frame Gen setting. 3X needs NGX multi-frame generation. On
+  adapters without it, native mode stays at 2X.
+- **The real frame stays bit-exact.** Only the in-between frames are
+  generated, and OFXR's bit-exact copy of the real frame is preserved. Colour
+  reaches NGX display-encoded: sRGB is encoded in the pack and decoded on
+  composition, and unchanged pixels round-trip exactly.
+- **It fails safe.** When guides are missing or reset, the headset shows the
+  current frame. If NGX refuses to create or evaluate a feature, that pair
+  shows the current frame and creation is retried after 120 pairs. OFXR never
+  calls `NVSDK_NGX_D3D12_Shutdown1`, because the driver shares one NGX
+  instance per adapter. Calling it would also shut down the game's own DLSS.
 
-- AMD FidelityFX Optical Flow (the fallback: used automatically on GPUs where NVIDIA optical flow is unavailable)
-- NVIDIA Optical Flow with Fast (test), Medium and Slow presets (the default, Medium)
-- 100%, 75% and 50% NVIDIA optical-flow calculation scales
-- a tray icon that arms the bridge as soon as it starts, with manual
-  Arm/Disarm
-- **Pause frame generation**: switch generation off and back on while you
-  play, without restarting the game, from the tray or with a key
-  (Ctrl + Alt + F7 by default, changed from the tray menu)
-- **Prefer FPS over latency** (on by default): one frame of extra latency in
-  exchange for reaching full frame rate from half, with smoother dips
-- **3X Frame Gen** (off by default): two generated frames per game frame,
-  for games at a third of your refresh rate, switchable live while you play
-- **Lower VRAM** (on by default): about half a gigabyte less VRAM at high
-  resolutions; untick it if that shows as stutter on your card
-- a pipeline built specifically for SteamVR's compositor
-- a **D3D11 bridge** (on by default): D3D11 games run on the same pipeline
-  as native D3D12 games, and the OpenXR runtime never touches the game's
-  D3D11 device. DCS World, Assetto Corsa, SkyrimVR and Cyberpunk 2077 run
-  through it
-- **Vulkan support (on by default)**: frame generation for Vulkan games,
-  tested with No Man's Sky through OpenComposite. Since 0.2.10.1 Vulkan
-  games run through a bridge like D3D11 games, on the same pipeline as
-  native D3D12 games
-- eye tracking that keeps working alongside Cheeky Foveated DLSS
-- an optional transparent in-headset FPS number with four corner positions;
-  green means recent synthetic submissions and red means inactive generation
-- an optional bridge flight recorder for diagnostics, which can be switched
-  on and off while you play
+### Requirements
 
-OFXR Bridge uses color-only optical flow. It does not receive game motion
-vectors or depth, so artifacts around moving objects, disocclusions and head
-rotation are still possible.
+- An NVIDIA RTX GPU and driver for which NGX reports DLSS Frame Generation
+  available. Testing so far: an RTX 5090 with driver 616.56.
+- A game that uses a D3D12 DLSS or Ray Reconstruction upscaler, for its motion
+  vectors and depth. A producer using the V2 guide API also works.
+- Everything the normal build needs (see [docs/BUILDING.md](docs/BUILDING.md)):
+  Visual Studio 2022, CMake 3.24 or newer, a Windows SDK with `fxc.exe`, the
+  FidelityFX SDK v1.1.4 and `openvr.h`.
+- The **NVIDIA DLSS SDK, 310.6 or later**. The tested version is 310.9.1, at
+  commit `374959484e79a640feaba44c93ac8cfb0a03f5b5` of
+  [NVIDIA/DLSS](https://github.com/NVIDIA/DLSS). Older SDKs still build, but
+  the `nvngx_dlssg.dll` in 310.6 and later generates the same pixels about 4%
+  faster than 310.5.3 at 3004x3004 (2% for a turning head). 310.6, 310.7 and
+  310.9.1 measure alike. Native builds also fetch pinned SafetyHook v0.6.9 and
+  its Zydis dependency.
 
-## Installation and use
+### Build
 
-1. Download the latest release archive from GitHub Releases.
-2. Extract the complete archive to a writable folder.
-3. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away.
-4. Right-click the tray icon to choose the optical-flow backend and options.
-   Most options take effect the next time the game starts. Pause, 3X Frame
-   Gen, the FPS overlay position and the flight recorder change in a running
-   game.
-5. Start the game normally. For injectors such as UEVR, start the tray before
-   the game and leave it armed while the VR mod is injected.
-6. Select **Disarm bridge** or close the tray application when finished.
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+  -DXRFG_NATIVE_DLSSG=ON -DXRFG_DLSS_SDK_ROOT=path/to/DLSS
+cmake --build build --config Release
+```
 
-### Pause and resume
+`XRFG_NATIVE_DLSSG` is `OFF` by default. `XRFG_DLSS_SDK_ROOT` defaults to
+`external/DLSS`, which git ignores. The SDK folder must contain:
 
-To compare with and without generated frames while you play, use **Pause
-frame generation** in the tray menu. The entry turns into **Resume frame
-generation** with an orange pause symbol, and the FPS number in the headset
-shows the same symbol (two vertical bars) until you resume. Every arm starts
-resumed.
+```text
+include/nvsdk_ngx_helpers_dlssg.h
+lib/Windows_x86_64/x64/nvsdk_ngx_d.lib
+lib/Windows_x86_64/x64/nvsdk_ngx_d_dbg.lib
+lib/Windows_x86_64/rel/nvngx_dlssg.dll
+```
 
-A paused game still runs through the bridge: it only stops making extra
-frames. To rule OFXR out of a problem, disarm it and restart the game
-instead.
+The build output in `build/Release` looks like this:
 
-**Ctrl + Alt + F7** does the same from inside the game, while the bridge is
-armed. To change the key, select **Current key binding** in the tray menu,
-press the key or keys you want and confirm:
+```text
+OFXRBridgeTray.exe
+ofxr/
+  XR_APILAYER_XRFrameBridge_diagnostic.dll
+  ofxr_bridge.ini
+  nvngx_dlssg.dll
+licenses/
+  NVIDIA-DLSS.txt, plus the SafetyHook, Zydis, Zycore and UEVR API notices
+```
 
-- any key works, with or without Ctrl, Alt and Shift;
-- **Default** goes back to Ctrl + Alt + F7 and **No key** turns the key off;
-- a combination another program already uses is refused.
+When you copy the tray build, keep `nvngx_dlssg.dll` with the other files in
+`ofxr`, together with `licenses/NVIDIA-DLSS.txt`. When the tray arms, it
+installs that DLL beside its cached layer. Do not distribute PDBs, static
+libraries, test executables or the NVIDIA SDK.
 
-The game still sees the key press, so pick keys your game and mods do not
-use. A key used on its own, without Ctrl, Alt or Shift, stops working in
-every other program while the bridge is armed. The setting is `pause_hotkey`
-under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`.
+### Turning it on
 
-If arming fails at start-up, the tray shows the reason and stays disarmed;
-select **Arm bridge until manual disarm** to retry.
+In the tray menu, select **NVIDIA DLSS Frame Generation (experimental)**
+before the game starts its OpenXR session. The choice applies to the next
+session. Select **OFXR frame generation** to go back to OFXR's own methods.
+While native generation is selected, the tray tooltip shows "native DLSS FG".
+The **3X Frame Gen** option switches native generation to 3X.
 
-> [!IMPORTANT]
-> **Never run the game as administrator.** The bridge is registered for your
-> Windows user, and the OpenXR loader deliberately ignores per-user layers in a
-> program running as administrator. An elevated game runs in VR as normal but
-> never loads the bridge, with no error, no FPS number and no flight log.
-> Check the game's `.exe` and any shortcut or launcher you start it from
-> (Properties → Compatibility → "Run this program as an administrator").
->
-> The same applies to anything that *starts* the game: a launcher or mod
-> manager running as administrator passes that on to the game. The UEVR
-> injector is fine as administrator, since it injects into a game you already
-> started normally; only a front-end that launches the game for you must not
-> run elevated.
+| Where | Setting |
+|---|---|
+| Tray settings (`%LOCALAPPDATA%\OFXR Bridge\tray.ini`) | `[tray] frame_generation=dlss` |
+| A directly loaded layer (`ofxr_bridge.ini`) | `[ofxr] frame_generation=dlss` |
+| V2 provider control | `frame_generation=1` (`0` selects OFXR) |
 
-For supported NVIDIA GPUs, the suggested starting configuration is **NVIDIA
-Medium** with **50% optical flow resolution**. It should provide a decent
-performance boost with minimal visual-quality loss. Running the optical flow at
-100% resolution is usually too expensive and often produces only a small or
-negligible net performance gain, so it is not recommended for normal use.
+The default is `frame_generation=ofxr`. With the tray, close it before you
+edit `tray.ini`. Edit `tray.ini` rather than the `ofxr_bridge.ini` beside the
+tray, because the tray rewrites the layer's settings from `tray.ini` each
+time it arms. The optical-flow backend, preset, scale and bidirectional
+controls only configure OFXR's own algorithm. They do not tune NVIDIA's
+feature.
 
-> [!NOTE]
-> **Use the OFXR FPS number, not other FPS tools, while the bridge is active.**
-> Other counters can be wrong in either direction:
->
-> - **fpsVR, SteamVR's frame timing and other compositor-side tools** count
->   every frame the bridge hands over. When the game runs below half the
->   refresh rate, the bridge repeats frames to fill the gaps, and these tools
->   count the repeats as new frames. They can show 90 on a 90 Hz headset while
->   far fewer new frames reach your eyes.
-> - **Counters inside the game or the VR mod**, and xrFPS in some setups,
->   count the game's own frames before the bridge adds any. While frame
->   generation is active they show about half of what reaches the headset.
->   This does not mean OFXR is inactive.
+Environment variables for experiments and diagnostics. Set them before you
+launch the game:
 
-The bridge's own optional FPS number counts only new frames: real and
-generated, but not repeats. On SteamVR it starts from what the compositor
-reports it actually showed, so frames SteamVR shows late are left out too.
-On other runtimes it counts the new frames the bridge submits. See
-[FPS overlay details](docs/FPS_OVERLAY.md).
+| Variable | Effect |
+|---|---|
+| `XRFG_NATIVE_DLSSG_PER_EYE=1` | A feature per eye instead of the shared one. |
+| `XRFG_NATIVE_DLSSG_SEAM` | Overrides the seam width. Without a seam the eyes visibly bleed into each other. |
+| `XRFG_TEST_NATIVE_DLSSG_DECISIONS=1` | Logs the GPU's choice for each pair, generated image or current frame, to `ofxr-native-decisions-pid*-instance*.log` beside the layer DLL. It is not a frame-rate benchmark. |
+| `XRFG_TEST_NATIVE_DLSSG_RESEED_EVERY_PAIR` | Makes every pair take the turning-head reseed, so its cost can be measured with the headset still. |
 
-When both the **Bridge flight recorder** and an FPS overlay position are
-enabled, OFXR draws a small purple rectangle into synthetic frames near the FPS
-counter. Its purpose is to verify whether generated frames are actually
-reaching the headset: if the rectangle is visible there, the synthetic output
-has reached the displayed presentation path. The green FPS number alone only
-confirms accepted submissions. Disable the flight recorder after testing to
-remove the marker.
+## Other changes in this fork
 
-The tray and bridge require the [Microsoft Visual C++ Redistributable
-x64](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
-OFXR Bridge does not replace your active OpenXR runtime.
+- **OFXR + DLSS vectors without a guide provider.** NGX guide capture now
+  runs whenever DLSS motion vectors are selected, not only for native
+  generation. In a native-enabled build, OFXR's own synthesis
+  (`motion_vectors=dlss` with `frame_generation=ofxr`) therefore uses the
+  game's vectors. Before this fix, in Galactic Racer under UEVR it never
+  used them and silently ran plain optical flow.
+- **Side-by-side stereo with per-eye guides.** UEVR submits both eyes side by
+  side in one texture, while DLSS guides arrive per eye. The game-motion path
+  rejected every such pair as a temporal mismatch. Each view now uses its own
+  eye's guide, as native generation does.
+- **DLSS features created before the hook.** Capture recovers a feature the
+  game created before the hook was installed, from its evaluation
+  parameters.
+- **A hang fixed under the SteamVR presenter.** Changing the frame-generation
+  method from the tray while Galactic Racer ran on SteamVR hung the game.
+  Frames the presenter still held, made by the old synthesizer, waited on
+  fence values the new one would never reach. Every control change now drains
+  the presenter first. As a second guard, the copy and queue-synchronisation
+  paths skip fence values that were never issued. The new test
+  `xrfg_layer_steamvr_live_switch` covers this.
+- **Cheaper guide snapshots.** Snapshots copy only the rectangle each DLSS
+  evaluation reads, and only the depth plane of a depth-stencil target. In
+  Galactic Racer, the game-side cost per frame went from 165 us to 65 us on
+  an RTX 5090.
+- **Flight recorder GPU timings fixed.** DLSS-vector and repeated pairs
+  reported zero. The FidelityFX path resolved NVIDIA stage marks it never
+  wrote, which raised a D3D12 debug-layer error. The first record read back
+  could be all zeros. Each path now resolves only the spans it wrote.
+- **Benchmark and quality tooling.** There are benchmarks for every method,
+  with a configurable eye size, plus a native layout benchmark and a
+  rotation-quality sweep. See [Testing](#testing).
 
-FidelityFX is the most performing one but will produce artifacts during headset rotation in dark areas, this is known and cannot be avoided.
+## Performance
 
-### Prefer FPS over latency
+All figures were measured on one RTX 5090 with DLSS SDK 310.9.1. Each is the
+median GPU time per stereo pair. These are measurements from one machine, not
+guarantees.
 
-This tray option is **on by default**. The bridge holds each generated frame
-back by one display refresh, so the optical flow gets a whole refresh to
-finish instead of the gap the game leaves between frames.
+**Offline, by eye size.** These come from `XRFG_TEST_FG_BENCH`, run through
+the synthesizer the layer uses. The head is turning, guides are at two thirds
+of the eye size, frames are patterned, and no VR game is running.
 
-- **Gain:** a game that only sustains about half your headset's refresh rate
-  can reach the full rate. A game holding 45–50 FPS on a 90 Hz headset is
-  likely to reach 90. Dips are also much smoother.
-- **Cost:** one frame of extra latency, about 11 ms at 90 Hz.
-- **Turn it off** when your GPU has budget to spare. Try it: turn the option
-  off and play the same scene. If you still hold your full frame rate, leave
-  it off and save one frame of latency. If you lose frames, turn it back on.
+| Method | 1440x1584 | 2004x2004 | 3004x3004 | 3600x3600 |
+|---|---|---|---|---|
+| OFXR + DLSS vectors | 0.12 ms | 0.21 ms | 0.45 ms | 0.63 ms |
+| OFXR FidelityFX, half-res flow | 0.20 ms | 0.31 ms | 0.58 ms | 0.78 ms |
+| OFXR FidelityFX, full-res flow | 0.38 ms | 0.64 ms | 1.30 ms | 1.80 ms |
+| Native DLSS FG 2X | 1.14 ms | 1.49 ms | 2.38 ms | 3.42 ms |
+| OFXR NVIDIA medium flow | 1.30 ms | 1.61 ms | 2.89 ms | 3.80 ms |
+| Native DLSS FG 3X | 1.66 ms | 2.13 ms | 3.73 ms | 5.02 ms |
 
-The change applies the next time the game starts.
+**Live, Galactic Racer on a Steam Frame.** The game ran under UEVR through
+SteamVR, at 3004x3004 per eye and 120 Hz, racing the Arcade time trial at
+speed. Each method had four interleaved rounds of ten seconds.
 
-### 3X Frame Gen
-
-Tray option **3X Frame Gen [live change]**, **off by default**. The bridge
-generates two frames for every frame the game renders instead of one, so a
-game running at a third of your headset's refresh rate (30 FPS at 90 Hz)
-reaches the full rate. If your game already holds about half the refresh
-rate, the normal 2X mode looks better: leave this off.
-
-- **Live switch:** toggle it while you play. No need to restart the game,
-  the VR session or OFXR; you will see one short hitch at the switch.
-- **Prefer FPS over latency** is switched on with 3X and greyed out while 3X
-  is on. If the game you are playing was started with it off, 3X cannot
-  switch live: a **"game restart needed"** window opens on your desktop, and
-  3X applies the next time the game starts. Some games close and reopen
-  their VR session (on loading, for example); the new session uses the
-  settings in force at that moment.
-- **Artefacts:** more than OFXR's 2X mode, fewer than SteamVR Motion Smoothing at 3X, and
-  mostly in sideways motion such as strafing or flying past something close.
-- **Latency**, at 90 Hz, from the game finishing a frame to that frame
-  reaching the headset: 31 ms with 2X and Prefer FPS over latency, 39 ms with
-  3X in a game with headroom (The Callisto Protocol), up to 49 ms in a very
-  heavy one (MSFS 2024 at very high resolution). OFXR tunes this by itself
-  over the first 15 seconds or so. Head rotation is corrected at display
-  time in every mode.
-- **Games:** D3D12, D3D11 (through the D3D11 bridge, on by default) and
-  Vulkan. Tested in MSFS 2024, The Callisto Protocol, Cyberpunk 2077 and
-  No Man's Sky.
-
-### Lower VRAM
-
-Tray option **Lower VRAM (may cause stuttering)**, **on by default**. Since
-0.2.10.1 the bridge keeps one working image per output instead of two,
-which saves about half a gigabyte of VRAM at high resolutions (the VRAM
-table in the troubleshooting guide assumes it on). On most cards it costs
-nothing. On some it shows as stutter that an older version did not have:
-an AMD RX 9070 XT running AMS2 at the edge of its GPU budget was smooth on
-0.2.9.1 and not on later versions, with nothing in the flight log to show
-for it, and unticking this brought the smoothness back.
-
-Untick it if you see that and have VRAM to spare. It is not a live change:
-the bridge decides the layout when the game creates its VR session, so it
-takes effect the next time the game starts.
-
-### D3D12 games
-
-Since 0.2.12.2 the bridge takes its copy of each eye's image when the game
-ends its frame, not when the game hands each eye over. A game that hands the
-first eye over before it has finished drawing it otherwise gave the bridge a
-picture of that eye that was one frame old, which showed as flicker in one
-eye only: reported in MSFS 2024 with 3X Frame Gen.
-
-There is no menu entry. To go back to the earlier behaviour for diagnosis,
-close the tray, set `capture_at_end_frame=0` under `[tray]` in
-`%LOCALAPPDATA%\OFXR Bridge\tray.ini` and start the tray again.
-
-### D3D11 games
-
-D3D11 games go through the **D3D11 bridge**, on by default since 0.2.6. The
-bridge creates the OpenXR runtime's session on its own D3D12 device; the game
-keeps rendering in D3D11, into textures shared between the two devices, and
-generation, pacing and submission then follow the D3D12 path that UEVR games
-use. The runtime never works the game's D3D11 device, which is what crashed
-NVIDIA's D3D11 driver in DCS World and SkyrimVR, and D3D11 games get the
-SteamVR pacing described below. A runtime that does not offer D3D12 keeps the
-previous path automatically.
-
-There is no menu entry. To turn the bridge off for diagnosis, close the tray,
-set `d3d11_bridge=0` under `[tray]` in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`
-and start the tray again. Editing the `ofxr_bridge.ini` beside the tray does
-nothing: the tray rewrites the layer's settings from `tray.ini` each time it
-arms.
-
-### Cheeky Foveated DLSS
-
-The bridge works alongside [Cheeky Foveated DLSS](https://github.com/ClarkCheekyKent/CheekyFoveatedDLSS),
-including its eye-tracked foveation, since 0.2.6. Cheeky's OpenXR layer sits
-above the bridge and reads the game's frames before the bridge submits
-anything, so its calibration and gaze are unaffected. If Cheeky shows a
-flashing grid of small white coded squares at high resolutions, that is its
-own eye calibration failing to lock, with or without the bridge; its
-**Standard corners** calibration method avoids it, and setting the resolution
-before launching the game helps, since every change restarts the calibration.
-
-### Vulkan games (experimental)
-
-Vulkan support is **on by default** and no longer has a tray menu entry.
-It covers games that render through Vulkan — No Man's Sky through
-[OpenComposite](https://www.nexusmods.com/nomanssky/mods/4363) is the one it
-has been tested with. To turn it off, quit the tray, set `vulkan_bridge=0` in
-`%LOCALAPPDATA%\OFXR Bridge\tray.ini`, and start the tray again. An older
-`vulkan_support=0` line there is ignored: it was written automatically while
-the option was off by default.
-
-- While the bridge is armed, it registers a small Vulkan layer of its own
-  (`OFXR_vulkan_queue_layer.dll`) that serialises GPU queue submissions,
-  which the bridge's second thread otherwise races the game for. It is
-  removed when you disarm or close the tray. A Vulkan implicit layer loads
-  into every Vulkan application while registered, browsers included.
-- **No FPS number in Vulkan games** for now: the overlay has no Vulkan path.
-  The diagnostic squares still show generation running. fpsVR or the Virtual
-  Desktop overlay give a rough rate, but they count repeated frames as new
-  ones, so they read high whenever the game is below half the refresh rate.
-- On SteamVR, turn off the game's **fixed frame rate at half** and Motion
-  Smoothing in the per-application video settings, or SteamVR holds the game
-  to half rate and the bridge can only deliver half.
-- Since 0.2.10.1 a Vulkan game's VR session goes through a bridge, like a
-  D3D11 game's: the game renders into images the bridge shares with it, and
-  everything after that is the native D3D12 pipeline. That halves the VRAM
-  the bridge needs and gives Vulkan games SteamVR's frame pacing. To go back
-  to the earlier path, set `vulkan_session_bridge=0` in `tray.ini`.
-- Off, Vulkan games are passed through unchanged and nothing Vulkan is
-  registered.
-
-### SteamVR users
-
-SteamVR headsets (Pimax and others) get a pipeline built specifically for
-SteamVR's compositor. The bridge sends two frames for every game frame, and
-they must arrive one display refresh apart. Other runtimes, such as Virtual
-Desktop, pace this by themselves. SteamVR does not, so the bridge times each
-frame against SteamVR's compositor directly. The bridge also gives SteamVR a
-GPU queue of its own, so the game's next frame can no longer make a finished
-generated frame look unready; with the D3D11 bridge, D3D11 games get this
-too.
-
-For the best results on SteamVR:
-
-- Leave **Prefer FPS over latency** on, then try the same scene with it off.
-  If you still hold full frame rate without it, keep it off for one frame
-  less latency.
-- Pick a refresh rate close to double your game's frame rate, or triple it
-  with **3X Frame Gen**. If that is still short of the refresh rate, SteamVR
-  fills the gap with repeated frames and the image judders.
-- If you get dips, disarm the bridge and play the same scene. If the dips
-  remain, lower SteamVR's per-eye resolution; the bridge cannot recover
-  frames the game does not render. Pausing is not enough for this test: a
-  paused game still runs through the bridge.
-
-### Virtual Desktop and Pimax OpenXR users
-
-On these two runtimes the bridge chooses how it sends frames once, from how
-the game itself is built, and keeps that choice for the whole session. A
-given game behaves the same way every time; earlier versions could switch in
-the middle of a session when the game stalled, and stay that way.
-
-### When the number stops short of the refresh rate
-
-Generating frames costs GPU time too, so a game needs some headroom above
-half the refresh rate, on every runtime. Each pair of frames is one frame
-from the game plus the optical flow and the generated frame, and the pair
-has to fit in two display refreshes.
-
-An example from our test machine, No Man's Sky on Virtual Desktop, which
-runs at 94 FPS without the bridge:
-
-| Refresh rate | Time allowed per pair | Result |
+| Method | GPU per stereo pair (median) | Game frames a second |
 |---|---|---|
-| 100 Hz | 20.0 ms | an even 100 |
-| 120 Hz | 16.7 ms | 113 to 115 |
-| 144 Hz | 13.9 ms | about 110 |
+| OFXR + DLSS vectors | 0.44 ms | 117.8 |
+| OFXR FidelityFX flow | 0.90 ms | 113.7 |
+| Native DLSS FG 2X | 4.9 ms | 109.8 |
+| OFXR NVIDIA medium flow | 7.8 ms | 113.5 |
 
-A pair took about 17.7 ms there: about 10.5 ms for the game's frame, about
-5 ms of optical flow and generation, and the rest in handing the extra frame
-over. That fits at 100 Hz and not above.
+- In the headset, the GPU is shared with the game. Offline at that size, the
+  same native pair takes 2.4 ms, so about half of the live figure comes from
+  that sharing.
+- NVIDIA flow's long span runs largely on the optical-flow engine, beside the
+  game's rendering.
+- The track's sections load the GPU differently, so single rounds of a method
+  ranged by up to 11 frames a second.
+- On the Meta XR Simulator (1440x1584 per eye), every method held the
+  simulator's 90 frames a second.
 
-If your number stops short like this, lower the refresh rate, the per-eye
-resolution or the optical-flow resolution. The refresh rate where the number
-reaches the refresh rate is the one to play at.
+**Where native's time goes.** NGX's own evaluations take most of a pair. At
+3004x3004 they take 1.66 of 1.89 ms with a still head, and 2.02 of 2.36 ms
+turning. OFXR's own work is the remainder: about 180 us to pack the new
+frame, about 105 us for the reseed's colour pack (turning head only) and
+about 75 us to compose. That work writes the full-resolution colour, motion
+and depth that NGX takes in its own feature layout, and composes NGX's output.
+At 3004x3004 that is about 350 MB per pair, so the GPU's memory bandwidth
+sets its speed.
 
-### How much VRAM the bridge uses
+## Optimizations, and what was rejected
 
-See the VRAM table in [Troubleshooting](docs/TROUBLESHOOTING.md#how-much-vram-ofxr-uses).
-Since 0.2.10.1 the mode no longer changes it: 2X, Prefer FPS over latency
-and 3X Frame Gen all use the same amount. The table assumes **Lower VRAM**
-on, which it is by default; with it off, add about 15% on D3D12 and D3D11.
-The bridge also stays out of Pimax Home, which takes the headset whenever a
-game leaves VR.
+Changes kept, with their measured effect:
 
-### What the tray changes on your PC
+- **One shared side-by-side feature instead of one per eye.** It measured
+  cheaper at every size tried: by 29% (still head) and 28% (turning) at
+  1440x1584, down to 14% and 9% at 3600x3600.
+- **Reseeding only when rotation moves a pixel by more than 0.1 px.** A still
+  head or a translation keeps NGX's history.
+- **Motion as a fraction of the feature,** with the size of the motion grid as
+  NGX's motion scale. The same vectors in pixels with a unit scale lose
+  measurable quality.
+- **Undilated vectors.** NGX dilates them itself. Quality is the same, and a
+  pair costs about 35 us less than dilating them in the pack.
+- **DLSS SDK 310.9.1.** It generates identical pixels, faster than 310.5.3.
+- **A colour-only reseed in 16x8 thread groups.** NGX's output from a reset
+  is bit-identical whatever motion and depth it is given. A turning pair at
+  3004x3004 went from 2.58 to 2.49 ms.
+- **8-bit packing for 8-bit swapchains, with the reseed kept at 10 bits.** A
+  pair is 2-4% faster, and almost every quality test measures less error.
+- **A two-thirds guide grid** when the game renders at two thirds of the
+  output or less (DLSS Quality and below). A pair at 3004x3004 is 1.8-2.2%
+  faster at the median, with the same quality.
+- **Leaner native mode.** It skips OFXR's optical-flow contexts, scratch
+  textures and extra command lists. Fully covered outputs skip the
+  preliminary current-frame copy, and the real-frame copy can be deferred
+  until after the generated image is submitted.
 
-When the tray arms the bridge (at start-up, or when you select **Arm**), it copies the versioned OFXR layer and its
-configuration into `%LOCALAPPDATA%\OFXR Bridge`, creates an absolute-path
-OpenXR implicit-layer manifest and registers that manifest for the current
-Windows user. It does not inject a DLL into the game, replace game files or
-replace the active OpenXR runtime.
+Tried and rejected:
 
-Selecting **Disarm** removes the exact OpenXR registration. Closing the tray
-also disarms it, with a watchdog providing cleanup if the tray exits
-unexpectedly. After disarming and closing the application, no active OFXR hook
-or OpenXR registration remains on the system. Versioned cache files, settings
-and diagnostic logs may remain under `%LOCALAPPDATA%\OFXR Bridge`, but they are
-inert and may be deleted manually at any time.
+- **Keeping NGX's history through small rotations,** and aligning the
+  generated image in the compose pass. This saves the reseed, but the error
+  was two to five times higher, even at a quarter pixel of rotation.
+- **Catmull-Rom instead of bilinear** for the aligned previous frame. It was
+  slightly worse (0.36 against 0.32 at the smallest rotation).
+- **Skipping the reseed, or raising the 0.1 px threshold.** A quarter pixel
+  of unaligned history already triples the error.
+- **Running the pack and NGX on an async compute queue.** The output was
+  identical, but live on the Steam Frame, in the game's hub scene, the median
+  pair was 0.2-0.7 ms slower at every load tried. While racing, the median
+  went from 5.1-5.3 ms to 6.3 ms and the game lost about two frames a second.
+- **Generating below eye resolution and upscaling.** At 75% per axis it is
+  cheaper, but the resample alone adds about four times a native pair's error
+  to every generated frame. It is recorded as a trade-off and was not taken.
+- **A half-size guide grid.** Depth edges measured worse.
+- **8-bit colour for the reseed too.** It is slightly faster, but the
+  rotation sweep's error rises from 0.31 to 0.40.
+- **Separate input textures for the reseed.** They are no faster and cost
+  about 220 MB more video memory at 3004x3004.
+- **32-bit motion.** It is 2% slower, with worse depth edges (0.33 against
+  0.21).
+- **Settings with no measurable effect:** 16-bit depth, a 16-pixel seam, the
+  pack's thread-group shapes, NGX's undocumented `DLSSG.InternalWidth`,
+  `DLSSG.DynamicResolution` and `DLSSG.EvalFlags` parameters, and every NGX
+  evaluation option.
 
-## Reporting problems
+The full measurements and reasoning are in
+[docs/BUILDING.md](docs/BUILDING.md#native-nvidia-dlss-frame-generation).
 
-Please report both working and non-working games, rendering problems, freezes
-and crashes in [GitHub Issues](https://github.com/djules75/OFXR-Bridge/issues)
-or on the [Flat2VR Modding Discord](https://discord.gg/flat2vr).
+## Testing
 
-Reported results are collected in the
-[OFXR Bridge Compatibility Chart](https://docs.google.com/spreadsheets/d/1lhaJm1wzt29exmx4tZbxdwf82RcrlLcyZJ850GcTf1w/edit?usp=sharing).
+```powershell
+# Default build
+ctest --test-dir build -C Release --output-on-failure
 
-Before reproducing a problem:
+# Native build, as in docs/BUILDING.md
+ctest --test-dir build -C Release --output-on-failure -LE needs_gpu_timing
+ctest --test-dir build -C Release -R '^xrfg_native_dlssg_tests$' --output-on-failure
+```
 
-1. Right-click the tray icon and enable **Bridge flight recorder**.
-2. Start the game and reproduce the problem once. The recorder can also be
-   switched on while the game is already running, right when the problem
-   shows up: recording starts within a moment, and the log still begins with
-   what was noted when the game started (your headset's runtime, the
-   resolution, the game's graphics API). The game hitches once when you
-   switch it on or off.
-3. Close the game, then select **Open bridge logs** from the tray.
-4. Attach the newest `ofxr-bridge-flight-*.log` file to the issue.
-5. Make sure OFXR has worked on your system on at least another game before claiming that is not working for the game you are reporting
+In a native build, the first command skips the tests labelled
+`needs_gpu_timing`, and the native GPU test is one of them. The second
+command runs the native GPU test, `xrfg_native_dlssg_tests`. That test needs
+an adapter and driver for which NGX reports frame generation available. It
+checks:
 
-Please also include:
+- translated stereo quality against a same-pixel blend
+- 3X output order
+- cropped view bounds
+- rotational camera isolation
+- command-list reuse
+- real-frame copies
+- explicit resets
+- missing-depth fallback
 
-- game name and version
-- VR mod or injector, if any
-- headset and OpenXR runtime
-- GPU and driver version
-- Windows version/build and OFXR build number
-- selected OFXR backend and options
-- exact steps and the observed result
+These small synthetic tests do not establish headset-resolution cost,
+headset comfort, or behaviour in a particular game.
 
-If no OFXR log was created, report that too: it usually means the layer was not
-loaded or the process stopped before the recorder could start. Game logs and a
-crash dump are also useful when available.
+**Benchmarks.** Set one of the variables below and run
+`build\Release\xrfg_d3d12_history_tests.exe`. A benchmark replaces the normal
+test run. Close VR games first, because GPU contention makes the medians
+meaningless.
 
-The recorder is independent from game and mod logging. It records OpenXR
-negotiation, resource eligibility, frame-generation stages, recovery events
-and potentially blocked call boundaries. It does not record video or replace a
-native crash dump.
+| Variable | Measures |
+|---|---|
+| `XRFG_TEST_FG_BENCH=1` | Every frame-generation method through the synthesizer, at 2004x2004 per eye by default: OFXR FidelityFX and NVIDIA flow, DLSS vectors, and native 2X/3X. It also times the game-side guide snapshot copies. The native rows need a native build. |
+| `XRFG_TEST_NATIVE_DLSSG_BENCH=1` | One native stereo pair, still and turning head, at 2X and 3X, at 2064x2208 per eye by default. |
+| `XRFG_TEST_BENCH_EYE=WxH` | The per-eye size for the two benchmarks above, for example `3004x3004`. Guides stay at two thirds of it. |
+| `XRFG_TEST_NATIVE_DLSSG_ROTATION_SWEEP=1` | Native quality on a detailed static scene after head rotations of about 0.25 to 16 pixels. |
+| `XRFG_TEST_NATIVE_DLSSG_LAYOUT_BENCH=1` | NGX alone, for one eye, for two features, and for one shared feature. |
 
-## Building from source
+```powershell
+$env:XRFG_TEST_FG_BENCH = '1'
+$env:XRFG_TEST_BENCH_EYE = '3004x3004'
+.\build\Release\xrfg_d3d12_history_tests.exe
+Remove-Item Env:XRFG_TEST_FG_BENCH, Env:XRFG_TEST_BENCH_EYE
+```
 
-See the [Windows build instructions](docs/BUILDING.md).
+The native pair and all-methods benchmarks generate from patterned frames.
+Blank frames compress to almost nothing in GPU memory, and NGX then measures
+20-25% faster than it does on real content.
 
-## License
+## Status and caveats
+
+- **Experimental.** It is off in the default build, and CI builds the default
+  configuration. Image quality in the headset is still being evaluated.
+- **NVIDIA RTX only.** It needs an adapter and driver for which NGX reports
+  frame generation available. It has been tested on one RTX 5090.
+- **It needs a game that uses DLSS.** Native generation needs complete,
+  continuous motion and depth guides for both source frames. Capture works
+  with a D3D12 DLSS or Ray Reconstruction upscaler. Other depth conventions
+  need explicit metadata or the V2 publication API.
+- **UEVR depth.** For UEVR's projection metadata to be used, both eyes'
+  reversed, infinite projections must be valid and agree.
+- **Motion-only producers.** A V1 producer that sends only motion can keep
+  using OFXR. Native mode shows the current frame until depth is available,
+  and its statistics report `waiting_for_depth` (status 7).
+- **No silent fallback.** If the native feature is unavailable, the session
+  fails to initialise and reports the error; it does not quietly switch
+  algorithms. If NGX later refuses a feature, the statistics report
+  `native_unavailable` (status 8). A 3X request on an adapter without NGX
+  multi-frame generation reports `multi_frame_unsupported` (status 9).
+- **Fixed cadence.** Native mode uses NGX's fixed fractions, so it suits games
+  that hold half or a third of the display rate. Away from that cadence, each
+  generated image is shown at the wrong instant and motion judders. OFXR's own
+  algorithm corrects for this.
+- **Camera translation.** Full reprojection of camera translation, and
+  separate guides for baked-in HUD and UI, remain future work. The bridge's
+  existing limitation for camera translation still applies.
+- **Live testing so far** covers Galactic Racer under UEVR, on a Steam Frame
+  through SteamVR and on the Meta XR Simulator.
+
+## Using OFXR Bridge
+
+For everyday use, the tray works as it does upstream:
+
+1. Run `OFXRBridgeTray.exe`. The bridge arms itself straight away.
+2. Right-click the tray icon to choose the method and options.
+3. Start the game normally. For injectors such as UEVR, start the tray before
+   the game.
+4. Select **Disarm bridge**, or close the tray, when you are finished.
+
+> [!IMPORTANT]
+> **OpenXR games only.** Games built on OpenVR, SteamVR's older system, are
+> not supported, even though they run on SteamVR. For UEVR, select its OpenXR
+> option. Also, **never run the game as administrator.** The OpenXR loader
+> ignores per-user layers in an elevated program, so the bridge never loads
+> there.
+
+The [upstream README](https://github.com/djules75/OFXR-Bridge#readme) has the
+full user guide and explains every tray option. For more, see:
+
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
+- [docs/FPS_OVERLAY.md](docs/FPS_OVERLAY.md)
+- [docs/releases](docs/releases)
+
+If you report a problem, the flight recorder log helps. Turn on **Bridge
+flight recorder** in the tray, reproduce the problem, then use **Open bridge
+logs**.
+
+## Credits and license
+
+- **tig3rmast3r** created OFXR:
+  [tig3rmast3r/OFXR-Bridge](https://github.com/tig3rmast3r/OFXR-Bridge),
+  [ko-fi.com/tig3rmast3r](https://ko-fi.com/tig3rmast3r).
+- **Djules** maintains the 0.2.x version that this fork builds on:
+  [djules75/OFXR-Bridge](https://github.com/djules75/OFXR-Bridge),
+  [ko-fi.com/djules](https://ko-fi.com/djules).
 
 OFXR Bridge is licensed under [LGPL-3.0-or-later](LICENSE). Third-party
-components retain their respective licenses.
+components keep their own licenses. See [THIRD_PARTY.md](THIRD_PARTY.md) and
+[licenses/](licenses).
 
-## Support
-
-If you find OFXR Bridge useful and want to support its development:
-
-- Created by tig3rmast3r, the original author of OFXR:
-  [ko-fi.com/tig3rmast3r](https://ko-fi.com/tig3rmast3r)
-- 0.2.X version maintained by Djules:
-  [ko-fi.com/djules](https://ko-fi.com/djules)
+Native-enabled builds statically link the NGX D3D12 interface from the NVIDIA
+DLSS SDK. They ship NVIDIA's unmodified production `nvngx_dlssg.dll` under
+the SDK license in
+[licenses/NVIDIA-DLSS.txt](licenses/NVIDIA-DLSS.txt). They also statically
+link SafetyHook (Boost Software License 1.0), Zydis and Zycore (MIT), and use
+UEVR's public API header (MIT). Their notices are in [licenses/](licenses).
+This fork is not sponsored or endorsed by NVIDIA.
