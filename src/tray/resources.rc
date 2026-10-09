@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <commctrl.h>
 #include "resource.h"
 
 IDI_OFXR_DISARMED ICON "../../OFXR_disarmed.ico"
@@ -20,4 +21,34 @@ BEGIN
     PUSHBUTTON "No key", IDC_PAUSE_KEY_NONE, 60, 126, 46, 14
     DEFPUSHBUTTON "OK", IDOK, 134, 126, 46, 14
     PUSHBUTTON "Cancel", IDCANCEL, 184, 126, 46, 14
+END
+
+// "Benchmark this PC": the headset's size and rate, a run with its
+// progress, and the results with what they mean. Modeless; the tray keeps
+// working while it is open, and a run keeps going if it is closed.
+IDD_BENCHMARK DIALOGEX 0, 0, 540, 342
+STYLE DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+EXSTYLE WS_EX_APPWINDOW
+CAPTION "OFXR Bridge - Benchmark this PC"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "Measures how much GPU time each frame-generation method takes on this PC at your headset's resolution, and what that means for your games. It takes about half a minute; close VR games first, since anything else using the graphics card slows the results.", IDC_BENCH_INTRO, 7, 6, 526, 18
+    GROUPBOX "Headset", -1, 7, 27, 526, 42
+    LTEXT "Per-eye resolution:", -1, 14, 40, 66, 8
+    COMBOBOX IDC_BENCH_PRESET, 82, 38, 170, 160, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    EDITTEXT IDC_BENCH_WIDTH, 258, 38, 38, 12, ES_NUMBER | WS_TABSTOP
+    CTEXT "x", -1, 297, 40, 8, 8
+    EDITTEXT IDC_BENCH_HEIGHT, 306, 38, 38, 12, ES_NUMBER | WS_TABSTOP
+    LTEXT "Refresh rate:", -1, 362, 40, 46, 8
+    COMBOBOX IDC_BENCH_REFRESH, 410, 38, 46, 120, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
+    LTEXT "Hz", -1, 460, 40, 14, 8
+    LTEXT "", IDC_BENCH_DETECTED, 14, 55, 512, 10
+    DEFPUSHBUTTON "Run benchmark", IDC_BENCH_RUN, 7, 75, 70, 14
+    PUSHBUTTON "Stop", IDC_BENCH_STOP, 81, 75, 40, 14, WS_DISABLED
+    CONTROL "", IDC_BENCH_PROGRESS, "msctls_progress32", WS_BORDER, 127, 77, 140, 10
+    LTEXT "", IDC_BENCH_STATUS, 273, 77, 260, 10
+    LTEXT "", IDC_BENCH_SUMMARY, 7, 95, 526, 10
+    CONTROL "", IDC_BENCH_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 7, 107, 526, 158
+    LTEXT "", IDC_BENCH_EXPLAIN, 7, 270, 526, 50
+    PUSHBUTTON "Close", IDCANCEL, 483, 323, 50, 14
 END

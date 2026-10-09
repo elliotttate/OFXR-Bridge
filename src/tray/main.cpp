@@ -1,5 +1,7 @@
+#include "xrfg/benchmark_labels.hpp"
 #include "xrfg/implicit_layer.hpp"
 #include "xrfg/standalone_launcher.hpp"
+#include "benchmark_window.hpp"
 #include "resource.h"
 
 #include <windows.h>
@@ -9,6 +11,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +33,9 @@ constexpr wchar_t kWindowClass[] = L"OFXRBridgeTrayWindow";
 constexpr wchar_t kApplicationName[] = L"OFXR Bridge";
 constexpr wchar_t kCleanupArgument[] = L"--cleanup-manual-arm";
 constexpr UINT kTrayMessage = WM_APP + 1;
+// Posted by the benchmark's reader thread: new output, and the run's end.
+constexpr UINT kBenchmarkProgressMessage = WM_APP + 2;
+constexpr UINT kBenchmarkFinishedMessage = WM_APP + 3;
 constexpr UINT_PTR kTrayId = 1;
 constexpr int kPauseHotkeyId = 1;
 constexpr UINT kArmPollMilliseconds = 250;
@@ -73,6 +79,23 @@ enum MenuCommand : UINT {
     donate_maintainer = 139,
     show_about = 140,
     exit_application = 150,
+    // The menu's single method list: each sets the algorithm and, for OFXR,
+    // the optical-flow engine. The older commands above still do what they
+    // did, for anything that sends them.
+    method_fidelity_fx = 160,
+    method_nvidia_fast = 161,
+    method_nvidia_medium = 162,
+    method_nvidia_slow = 163,
+    method_native_dlss = 164,
+    // What OFXR does in a game with DLSS motion vectors.
+    dlss_mode_vectors = 165,
+    dlss_mode_hybrid = 166,
+    dlss_mode_extrapolate = 167,
+    // 2X and 3X as a pair of choices; each is toggle_triple_frame_gen when
+    // it changes anything.
+    frames_2x = 168,
+    frames_3x = 169,
+    show_benchmark = 170,
 };
 
 struct AppState {
@@ -101,6 +124,8 @@ struct AppState {
     HICON disarmed_icon{};
     UINT taskbar_created_message{};
     bool armed{};
+    // "Benchmark this PC": its results label the menu's methods.
+    ofxr_tray::BenchmarkController benchmark;
 };
 
 [[nodiscard]] std::wstring last_error_message(std::wstring_view action) {
@@ -496,49 +521,30 @@ void log_lifecycle(const std::filesystem::path& local_directory,
 }
 
 [[nodiscard]] std::wstring tray_tooltip(const AppState& state) {
+    namespace sl = xrfg::standalone;
     std::wstring tooltip = state.paused
         ? L"OFXR Bridge PAUSED - "
         : state.armed ? L"OFXR Bridge ARMED - " : L"OFXR Bridge - ";
-    if (state.settings.backend == xrfg::standalone::FlowBackend::nvidia) {
-        switch (state.settings.nvidia_preset) {
-        case xrfg::standalone::NvidiaPerformancePreset::fast:
-            tooltip += L"NVIDIA Fast (test)";
+    // What the menu's top says: the method, its resolution, 2X or 3X.
+    tooltip += sl::active_method_summary(state.settings);
+    if (sl::current_method(state.settings) != sl::Method::native_dlss) {
+        if (state.settings.backend == sl::FlowBackend::nvidia && state.settings.nvidia_bidirectional) {
+            tooltip += L" + bidirectional";
+        }
+        switch (sl::dlss_game_mode(state.settings)) {
+        case sl::DlssGameMode::hybrid:
+            tooltip += L" - DLSS games: vectors + flow";
             break;
-        case xrfg::standalone::NvidiaPerformancePreset::slow:
-            tooltip += L"NVIDIA Slow";
+        case sl::DlssGameMode::extrapolate:
+            tooltip += L" - DLSS games: extrapolation";
             break;
-        case xrfg::standalone::NvidiaPerformancePreset::medium:
+        case sl::DlssGameMode::vectors:
         default:
-            tooltip += L"NVIDIA Medium";
             break;
         }
-        tooltip += state.settings.nvidia_bidirectional
-            ? L" + bidirectional"
-            : L" + forward";
-        switch (state.settings.nvidia_input_scale) {
-        case xrfg::standalone::NvidiaInputScale::three_quarter:
-            tooltip += L" @ 75%";
-            break;
-        case xrfg::standalone::NvidiaInputScale::half:
-            tooltip += L" @ 50%";
-            break;
-        case xrfg::standalone::NvidiaInputScale::full:
-        default:
-            tooltip += L" @ 100%";
-            break;
-        }
-    } else {
-        tooltip += L"FidelityFX";
     }
-    if (state.settings.triple_frame_gen) {
-        tooltip += L" - 3X";
-    } else if (state.settings.deep_pipeline) {
+    if (!state.settings.triple_frame_gen && state.settings.deep_pipeline) {
         tooltip += L" - prefer FPS";
-    }
-    if (state.settings.frame_generation == xrfg::standalone::FrameGeneration::native_dlss)
-        tooltip += L" - native DLSS FG";
-    if (state.settings.vulkan_support) {
-        tooltip += L" - Vulkan";
     }
     if (state.settings.diagnostics) {
         tooltip += L" - recorder on";
@@ -718,6 +724,7 @@ void close_pause_signal(AppState& state) {
 void update_runtime_options(
     AppState& state, const wchar_t* running_message = nullptr) {
     save_settings(state);
+    state.benchmark.settings_changed(state.settings);
     if (state.armed) {
         std::wstring error;
         if (!write_runtime_configuration(state, &error)) {
@@ -915,18 +922,86 @@ void change_pause_hotkey(AppState& state) {
     }
 }
 
-void show_context_menu(AppState& state) {
-    HMENU menu = CreatePopupMenu();
-    HMENU backend_menu = CreatePopupMenu();
-    HMENU nvidia_scale_menu = CreatePopupMenu();
-    if (menu == nullptr || backend_menu == nullptr ||
-        nvidia_scale_menu == nullptr) {
-        if (nvidia_scale_menu) DestroyMenu(nvidia_scale_menu);
-        if (backend_menu) DestroyMenu(backend_menu);
-        if (menu) DestroyMenu(menu);
-        return;
-    }
+// Menu building. Every entry is text, optionally followed by a tab and a
+// right-aligned annotation: the benchmark's estimate for that choice.
+void append_entry(HMENU menu, UINT id, const std::wstring& text, bool checked = false,
+                  bool enabled = true, bool radio = false, const std::wstring& annotation = {}) {
+    std::wstring label = annotation.empty() ? text : text + L"\t" + annotation;
+    MENUITEMINFOW item{};
+    item.cbSize = sizeof(item);
+    item.fMask = MIIM_ID | MIIM_STRING | MIIM_STATE | MIIM_FTYPE;
+    item.fType = MFT_STRING | (radio ? MFT_RADIOCHECK : 0U);
+    item.fState = (checked ? MFS_CHECKED : MFS_UNCHECKED) | (enabled ? MFS_ENABLED : MFS_DISABLED);
+    item.wID = id;
+    item.dwTypeData = label.data();
+    InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &item);
+}
 
+// A line that informs and does nothing: a heading or the bridge's state.
+void append_note(HMENU menu, const std::wstring& text, bool bold = false) {
+    std::wstring label = text;
+    MENUITEMINFOW item{};
+    item.cbSize = sizeof(item);
+    item.fMask = MIIM_STRING | MIIM_STATE | MIIM_FTYPE;
+    item.fType = MFT_STRING;
+    item.fState = MFS_DISABLED | (bold ? MFS_DEFAULT : 0U);
+    item.dwTypeData = label.data();
+    InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &item);
+}
+
+void append_submenu(HMENU menu, HMENU submenu, const std::wstring& text, bool enabled = true) {
+    std::wstring label = text;
+    MENUITEMINFOW item{};
+    item.cbSize = sizeof(item);
+    item.fMask = MIIM_SUBMENU | MIIM_STRING | MIIM_STATE;
+    item.fState = enabled ? MFS_ENABLED : MFS_DISABLED;
+    item.hSubMenu = submenu;
+    item.dwTypeData = label.data();
+    InsertMenuItemW(menu, static_cast<UINT>(GetMenuItemCount(menu)), TRUE, &item);
+}
+
+void append_separator(HMENU menu) {
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+}
+
+// The menu, in the order a user decides things: what the bridge is doing,
+// arming and pausing, which frame-generation method and what it costs, its
+// quality and performance options, then the display, diagnostics and the
+// rarely needed. Every choice that has a benchmark result says what it costs
+// on this PC and the best it can do.
+void show_context_menu(AppState& state) {
+    namespace sl = xrfg::standalone;
+    namespace bm = xrfg::benchmark;
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) return;
+    const auto& settings = state.settings;
+    const sl::Method method = sl::current_method(settings);
+    const bool native = method == sl::Method::native_dlss;
+    const bool nvidia_flow = !native && method != sl::Method::fidelity_fx;
+    const bool triple = settings.triple_frame_gen;
+    const sl::DlssGameMode game_mode = sl::dlss_game_mode(settings);
+    // Estimates only from results measured on this PC's graphics card.
+    const bm::Results* results =
+        state.benchmark.results_for_this_gpu() ? state.benchmark.results() : nullptr;
+    const double refresh = state.benchmark.refresh_hz();
+    const auto method_note = [&](sl::Method entry, const sl::CostQuery& query = {}) {
+        if (results == nullptr) return std::wstring();
+        return sl::menu_annotation(sl::method_cost(*results, settings, entry, query), refresh,
+                                   query.triple.value_or(triple));
+    };
+    const auto game_note = [&](sl::DlssGameMode mode) {
+        if (results == nullptr) return std::wstring();
+        return sl::menu_annotation(sl::dlss_game_cost(*results, settings, mode), refresh, triple);
+    };
+
+    // What the bridge is doing.
+    wchar_t title[96]{};
+    swprintf_s(title, L"OFXR Bridge V%03u: %s", kImplementationVersion,
+               state.paused ? L"paused" : state.armed ? L"armed" : L"not armed");
+    append_note(menu, title, true);
+    append_note(menu, L"Frame generation: " + sl::active_method_summary(settings));
+    if (!native) append_note(menu, L"In games with DLSS: " + sl::dlss_game_mode_name(game_mode));
+    append_separator(menu);
     AppendMenuW(
         menu,
         MF_STRING | (state.armed ? MF_CHECKED : MF_UNCHECKED),
@@ -934,48 +1009,12 @@ void show_context_menu(AppState& state) {
         state.armed
             ? L"Disarm bridge"
             : L"Arm bridge until manual disarm");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (state.settings.frame_generation == xrfg::standalone::FrameGeneration::ofxr ? MF_CHECKED : 0),
-        generation_ofxr, L"OFXR frame generation");
-#ifdef XRFG_NATIVE_DLSSG
-    AppendMenuW(menu, MF_STRING | (state.settings.frame_generation == xrfg::standalone::FrameGeneration::native_dlss ? MF_CHECKED : 0),
-        generation_dlss, L"NVIDIA DLSS Frame Generation (experimental)");
-    // Below 100%, NVIDIA generates at a lower resolution and the bridge puts
-    // back the real frame's detail wherever it can follow the game's motion.
-    // On recorded Galactic Racer frames 67% and 50% had less error than 100%
-    // and were sharper, so 67% is the default; a sharp synthetic scene loses
-    // detail at 50%. dlssg_resolution in the layer's INI takes 25 to 100.
-    if (HMENU dlssg_scale_menu = CreatePopupMenu()) {
-        const struct { UINT command; int percent; const wchar_t* text; } scales[]{
-            {dlssg_scale_full, 100, L"100% (most GPU time)"},
-            {dlssg_scale_two_thirds, 67, L"67% (default)"},
-            {dlssg_scale_half, 50, L"50% (fastest)"},
-        };
-        for (const auto& scale : scales) {
-            AppendMenuW(dlssg_scale_menu,
-                MF_STRING | (state.settings.native_scale == scale.percent ? MF_CHECKED : MF_UNCHECKED),
-                scale.command, scale.text);
-        }
-        AppendMenuW(menu,
-            MF_POPUP | (state.settings.frame_generation == xrfg::standalone::FrameGeneration::native_dlss
-                            ? MF_ENABLED : MF_GRAYED),
-            reinterpret_cast<UINT_PTR>(dlssg_scale_menu), L"DLSS Frame Generation resolution");
-    }
-#endif
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.armed && state.pause_signal ? MF_ENABLED : MF_GRAYED),
-        toggle_pause,
-        state.paused ? L"Resume frame generation" : L"Pause frame generation");
-    // Opens the dialog that changes it. While armed, a key the system would
-    // not give the tray says so here, since it will not work.
-    std::wstring binding_label =
-        L"Current key binding: " + pause_key_display(state.settings.pause_hotkey);
-    if (state.armed && state.pause_signal && !state.pause_hotkey_registered &&
-        xrfg::standalone::parse_hotkey(state.settings.pause_hotkey)) {
-        binding_label += L" (used by another program)";
-    }
-    AppendMenuW(menu, MF_STRING, change_pause_key, binding_label.c_str());
+    // The key is shown beside the entry it presses.
+    const std::wstring key = xrfg::standalone::parse_hotkey(settings.pause_hotkey)
+        ? pause_key_display(settings.pause_hotkey) : std::wstring();
+    append_entry(menu, toggle_pause,
+                 state.paused ? L"Resume frame generation" : L"Pause frame generation", false,
+                 state.armed && state.pause_signal, false, key);
     // Must outlive the menu, which only borrows it.
     HBITMAP pause_bitmap = state.paused ? create_pause_bitmap() : nullptr;
     if (pause_bitmap) {
@@ -985,117 +1024,130 @@ void show_context_menu(AppState& state) {
         item.hbmpItem = pause_bitmap;
         SetMenuItemInfoW(menu, toggle_pause, FALSE, &item);
     }
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::fidelity_fx
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_fidelity_fx,
-        L"FidelityFX");
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::nvidia &&
-                     state.settings.nvidia_preset ==
-                         xrfg::standalone::NvidiaPerformancePreset::fast
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_nvidia_fast,
-        L"NVIDIA Fast (test)");
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::nvidia &&
-                     state.settings.nvidia_preset ==
-                         xrfg::standalone::NvidiaPerformancePreset::medium
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_nvidia_medium,
-        L"NVIDIA Medium");
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.backend == xrfg::standalone::FlowBackend::nvidia &&
-                     state.settings.nvidia_preset ==
-                         xrfg::standalone::NvidiaPerformancePreset::slow
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        backend_nvidia_slow,
-        L"NVIDIA Slow (best quality)");
-    AppendMenuW(backend_menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(
-        backend_menu,
-        MF_STRING |
-            (state.settings.nvidia_bidirectional ? MF_CHECKED : MF_UNCHECKED),
-        toggle_nvidia_bidirectional,
-        L"NVIDIA bidirectional consistency");
-    AppendMenuW(
-        menu,
-        MF_POPUP,
-        reinterpret_cast<UINT_PTR>(backend_menu),
-        L"Optical flow backend");
-    AppendMenuW(
-        nvidia_scale_menu,
-        MF_STRING |
-            (state.settings.nvidia_input_scale ==
-                     xrfg::standalone::NvidiaInputScale::full
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        nvidia_scale_full,
-        L"100% (full resolution)");
-    AppendMenuW(
-        nvidia_scale_menu,
-        MF_STRING |
-            (state.settings.nvidia_input_scale ==
-                     xrfg::standalone::NvidiaInputScale::three_quarter
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        nvidia_scale_three_quarter,
-        L"75%");
-    AppendMenuW(
-        nvidia_scale_menu,
-        MF_STRING |
-            (state.settings.nvidia_input_scale ==
-                     xrfg::standalone::NvidiaInputScale::half
-                 ? MF_CHECKED
-                 : MF_UNCHECKED),
-        nvidia_scale_half,
-        L"50%");
-    AppendMenuW(
-        menu,
-        MF_POPUP,
-        reinterpret_cast<UINT_PTR>(nvidia_scale_menu),
-        L"Optical flow resolution");
-    // 3X needs what "Prefer FPS over latency" sets up, so it holds that on.
-    AppendMenuW(
-        menu,
-        MF_STRING |
-            (state.settings.deep_pipeline || state.settings.triple_frame_gen
-                 ? MF_CHECKED
-                 : MF_UNCHECKED) |
-            (state.settings.triple_frame_gen ? MF_GRAYED : MF_ENABLED),
-        toggle_deep_pipeline,
-        state.settings.triple_frame_gen
-            ? L"Prefer FPS over latency (on with 3X Frame Gen)"
-            : L"Prefer FPS over latency");
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED),
-        toggle_triple_frame_gen,
-        L"3X Frame Gen [live change]");
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.settings.single_swapchain_rings ? MF_CHECKED : MF_UNCHECKED),
-        toggle_lower_vram,
-        L"Lower VRAM (may cause stuttering)");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(
-        menu,
-        MF_STRING | (state.settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
-        toggle_diagnostics,
-        L"Bridge flight recorder [live change]");
+    append_separator(menu);
+
+    // Frame generation method: one list, then what OFXR does in DLSS games,
+    // then how many frames.
+    if (HMENU methods = CreatePopupMenu()) {
+        if (results != nullptr) {
+            append_note(methods, L"On this PC at " + std::to_wstring(results->eye_width) + L" \u00D7 " +
+                                     std::to_wstring(results->eye_height) + L" per eye, " +
+                                     std::to_wstring(static_cast<int>(std::lround(refresh))) +
+                                     L" Hz: GPU time per generated frame, best speed-up");
+        } else if (state.benchmark.results() != nullptr) {
+            append_note(methods, L"The benchmark results are for another graphics card: run Benchmark this PC again");
+        } else {
+            append_note(methods, L"Run Benchmark this PC to see what each method costs here");
+        }
+        append_separator(methods);
+        append_note(methods, L"Any game: OFXR with optical flow");
+        append_entry(methods, method_fidelity_fx, L"FidelityFX optical flow (any graphics card)",
+                     method == sl::Method::fidelity_fx, true, true, method_note(sl::Method::fidelity_fx));
+        append_entry(methods, method_nvidia_fast, L"NVIDIA optical flow, fast (testing)",
+                     method == sl::Method::nvidia_fast, true, true, method_note(sl::Method::nvidia_fast));
+        append_entry(methods, method_nvidia_medium, L"NVIDIA optical flow, medium (default)",
+                     method == sl::Method::nvidia_medium, true, true, method_note(sl::Method::nvidia_medium));
+        append_entry(methods, method_nvidia_slow, L"NVIDIA optical flow, slow (best flow quality)",
+                     method == sl::Method::nvidia_slow, true, true, method_note(sl::Method::nvidia_slow));
+#ifdef XRFG_NATIVE_DLSSG
+        append_separator(methods);
+        append_note(methods, L"Games with DLSS: NVIDIA's own frame generation");
+        append_entry(methods, method_native_dlss, L"NVIDIA DLSS Frame Generation (experimental)",
+                     native, true, true, method_note(sl::Method::native_dlss));
+#endif
+        append_separator(methods);
+        append_note(methods, native ? L"In games with DLSS, OFXR uses (not with DLSS Frame Generation)"
+                                    : L"In games with DLSS, OFXR uses");
+        append_entry(methods, dlss_mode_vectors, L"The game's motion vectors (default)",
+                     game_mode == sl::DlssGameMode::vectors, !native, true,
+                     game_note(sl::DlssGameMode::vectors));
+        append_entry(methods, dlss_mode_hybrid, L"Motion vectors + FidelityFX flow (best quality)",
+                     game_mode == sl::DlssGameMode::hybrid, !native, true,
+                     game_note(sl::DlssGameMode::hybrid));
+        const std::wstring extrapolation = game_note(sl::DlssGameMode::extrapolate);
+        append_entry(methods, dlss_mode_extrapolate, L"Extrapolate, SpaceWarp-style (lowest latency)",
+                     game_mode == sl::DlssGameMode::extrapolate, !native, true,
+                     extrapolation.empty() || extrapolation.find(L"ms") == std::wstring::npos
+                         ? extrapolation : extrapolation + L" \u00B7 no added latency");
+        append_separator(methods);
+        append_note(methods, L"Frames shown per game frame");
+        append_entry(methods, frames_2x, L"2X: one generated frame per game frame", !triple, true, true,
+                     method_note(method, {.triple = false}));
+        append_entry(methods, frames_3x, L"3X: two generated frames per game frame (switches live)",
+                     triple, true, true, method_note(method, {.triple = true}));
+        append_submenu(menu, methods, L"Frame generation method");
+    }
+
+    // Quality and performance: the chosen method's resolution and checks,
+    // and the pipeline's latency trade.
+    if (HMENU quality = CreatePopupMenu()) {
+        const sl::Method flow_method = native ? sl::Method::fidelity_fx : method;
+        if (HMENU scales = CreatePopupMenu()) {
+            const struct {
+                UINT command;
+                xrfg::standalone::NvidiaInputScale scale;
+                int percent;
+                const wchar_t* text;
+            } entries[]{
+                {nvidia_scale_full, xrfg::standalone::NvidiaInputScale::full, 100, L"100% (finest flow)"},
+                {nvidia_scale_three_quarter, xrfg::standalone::NvidiaInputScale::three_quarter, 75, L"75%"},
+                {nvidia_scale_half, xrfg::standalone::NvidiaInputScale::half, 50, L"50% (default)"},
+            };
+            for (const auto& entry : entries) {
+                append_entry(scales, entry.command, entry.text, settings.nvidia_input_scale == entry.scale,
+                             true, true, method_note(flow_method, {.input_scale = entry.percent}));
+            }
+            append_submenu(quality, scales, L"Optical flow resolution", !native);
+        }
+        std::wstring both_ways;
+        if (results != nullptr && nvidia_flow) {
+            const auto with = sl::method_cost(*results, settings, method, {.bidirectional = true});
+            const auto without = sl::method_cost(*results, settings, method, {.bidirectional = false});
+            if (with.status == bm::CaseStatus::ok && without.status == bm::CaseStatus::ok) {
+                both_ways = L"+" + bm::format_ms(std::max(with.cost_ms - without.cost_ms, 0.0));
+            }
+        }
+        append_entry(quality, toggle_nvidia_bidirectional,
+                     L"NVIDIA optical flow both ways (cleaner edges)", settings.nvidia_bidirectional,
+                     nvidia_flow, false, both_ways);
+#ifdef XRFG_NATIVE_DLSSG
+        // Below 100%, NVIDIA generates at a lower resolution and the bridge
+        // puts back the real frame's detail wherever it can follow the
+        // game's motion. On recorded Galactic Racer frames 67% and 50% had
+        // less error than 100% and were sharper, so 67% is the default; a
+        // sharp synthetic scene loses detail at 50%. dlssg_resolution in the
+        // layer's INI takes 25 to 100.
+        if (HMENU native_scales = CreatePopupMenu()) {
+            const struct { UINT command; int percent; const wchar_t* text; } entries[]{
+                {dlssg_scale_full, 100, L"100% (most GPU time)"},
+                {dlssg_scale_two_thirds, 67, L"67% (default)"},
+                {dlssg_scale_half, 50, L"50% (fastest)"},
+            };
+            for (const auto& entry : entries) {
+                append_entry(native_scales, entry.command, entry.text,
+                             settings.native_scale == entry.percent, true, true,
+                             method_note(sl::Method::native_dlss, {.native_scale = entry.percent}));
+            }
+            append_submenu(quality, native_scales, L"DLSS Frame Generation resolution", native);
+        }
+#endif
+        append_separator(quality);
+        // 3X needs what "Prefer FPS over latency" sets up, so it holds that on.
+        AppendMenuW(
+            quality,
+            MF_STRING |
+                (settings.deep_pipeline || settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED) |
+                (settings.triple_frame_gen ? MF_GRAYED : MF_ENABLED),
+            toggle_deep_pipeline,
+            settings.triple_frame_gen
+                ? L"Prefer FPS over latency (on with 3X Frame Gen)"
+                : L"Prefer FPS over latency (adds a frame of latency)");
+        append_submenu(menu, quality, L"Quality and performance");
+    }
+    append_entry(menu, show_benchmark, L"Benchmark this PC\u2026", false, true, false,
+                 state.benchmark.menu_hint());
+    append_separator(menu);
+
     HMENU overlay_menu = CreatePopupMenu();
     if (overlay_menu) {
         const struct { UINT command; xrfg::FpsOverlayPosition position; const wchar_t* text; } entries[]{
@@ -1106,14 +1158,32 @@ void show_context_menu(AppState& state) {
             {overlay_off, xrfg::FpsOverlayPosition::off, L"Off"}};
         for (const auto& entry : entries) {
             if (entry.position == xrfg::FpsOverlayPosition::off) AppendMenuW(overlay_menu, MF_SEPARATOR, 0, nullptr);
-            AppendMenuW(overlay_menu, MF_STRING |
-                (state.settings.overlay_position == entry.position ? MF_CHECKED : MF_UNCHECKED),
-                entry.command, entry.text);
+            append_entry(overlay_menu, entry.command, entry.text,
+                         settings.overlay_position == entry.position, true, true);
         }
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(overlay_menu), L"FPS overlay");
     }
-    AppendMenuW(menu, MF_STRING, open_logs, L"Open bridge logs");
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (HMENU diagnostics = CreatePopupMenu()) {
+        AppendMenuW(diagnostics, MF_STRING | (settings.diagnostics ? MF_CHECKED : MF_UNCHECKED),
+                    toggle_diagnostics, L"Bridge flight recorder (switches live)");
+        AppendMenuW(diagnostics, MF_STRING, open_logs, L"Open bridge logs");
+        append_submenu(menu, diagnostics, L"Diagnostics");
+    }
+    if (HMENU advanced = CreatePopupMenu()) {
+        AppendMenuW(advanced, MF_STRING | (settings.single_swapchain_rings ? MF_CHECKED : MF_UNCHECKED),
+                    toggle_lower_vram, L"Lower VRAM (may cause stuttering)");
+        // Opens the dialog that changes it. While armed, a key the system
+        // would not give the tray says so here, since it will not work.
+        std::wstring binding_label =
+            L"Pause key: " + pause_key_display(settings.pause_hotkey) + L"\u2026";
+        if (state.armed && state.pause_signal && !state.pause_hotkey_registered &&
+            xrfg::standalone::parse_hotkey(settings.pause_hotkey)) {
+            binding_label += L" (used by another program)";
+        }
+        AppendMenuW(advanced, MF_STRING, change_pause_key, binding_label.c_str());
+        append_submenu(menu, advanced, L"Advanced");
+    }
+    append_separator(menu);
     HMENU donate_menu = CreatePopupMenu();
     if (donate_menu) {
         AppendMenuW(donate_menu, MF_STRING, donate_creator,
@@ -1393,6 +1463,44 @@ void handle_command(AppState& state, UINT command) {
         }
         break;
     }
+    case method_fidelity_fx:
+    case method_nvidia_fast:
+    case method_nvidia_medium:
+    case method_nvidia_slow:
+    case method_native_dlss: {
+        namespace sl = xrfg::standalone;
+        const auto previous = state.settings.frame_generation;
+        sl::apply_method(state.settings,
+            command == method_fidelity_fx ? sl::Method::fidelity_fx
+            : command == method_nvidia_fast ? sl::Method::nvidia_fast
+            : command == method_nvidia_slow ? sl::Method::nvidia_slow
+            : command == method_native_dlss ? sl::Method::native_dlss
+            : sl::Method::nvidia_medium);
+        // The messages generation_* and backend_* give.
+        update_runtime_options(state, previous != state.settings.frame_generation
+            ? L"The frame-generation algorithm will be used by the next OpenXR session."
+            : nullptr);
+        break;
+    }
+    case dlss_mode_vectors:
+    case dlss_mode_hybrid:
+    case dlss_mode_extrapolate:
+        xrfg::standalone::apply_dlss_game_mode(state.settings,
+            command == dlss_mode_hybrid ? xrfg::standalone::DlssGameMode::hybrid
+            : command == dlss_mode_extrapolate ? xrfg::standalone::DlssGameMode::extrapolate
+            : xrfg::standalone::DlssGameMode::vectors);
+        update_runtime_options(state,
+            L"In games with DLSS, OFXR will use this from the next OpenXR session.");
+        break;
+    case frames_2x:
+    case frames_3x:
+        if (state.settings.triple_frame_gen != (command == frames_3x)) {
+            handle_command(state, toggle_triple_frame_gen);
+        }
+        break;
+    case show_benchmark:
+        state.benchmark.show(state.settings);
+        break;
     case exit_application:
         SendMessageW(state.window, WM_CLOSE, 0, 0);
         break;
@@ -1436,6 +1544,15 @@ LRESULT CALLBACK window_procedure(
     case WM_HOTKEY:
         if (wparam == kPauseHotkeyId) handle_command(*state, toggle_pause);
         return 0;
+    case kBenchmarkProgressMessage:
+        state->benchmark.on_progress();
+        return 0;
+    case kBenchmarkFinishedMessage:
+        if (const auto notice = state->benchmark.on_finished()) {
+            show_balloon(*state, notice->title, notice->message,
+                         notice->error ? NIIF_WARNING : NIIF_INFO);
+        }
+        return 0;
     case WM_CLOSE: {
         std::wstring error;
         if (!disarm_bridge(*state, &error)) {
@@ -1469,6 +1586,8 @@ LRESULT CALLBACK window_procedure(
         std::wstring error;
         if (!disarm_bridge(*state, &error))
             log_lifecycle(state->local_directory, L"destroy-cleanup", error);
+        // A run in progress ends with the tray.
+        state->benchmark.shutdown();
         Shell_NotifyIconW(NIM_DELETE, &state->icon);
         PostQuitMessage(0);
         return 0;
@@ -1660,6 +1779,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         CloseHandle(single_instance);
         return EXIT_FAILURE;
     }
+    // The last benchmark's results, for the menu's estimates. The tool sits
+    // in the ofxr folder beside nvngx_dlssg.dll, which NGX looks for there.
+    state.benchmark.initialize(window, state.local_directory,
+        state.executable_directory / L"ofxr" / L"OFXRBenchmark.exe",
+        kBenchmarkProgressMessage, kBenchmarkFinishedMessage);
 
     // Arm straight away: launching the tray is the user asking for the
     // bridge. A failure leaves it disarmed with the reason shown, exactly as
@@ -1673,6 +1797,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        // The benchmark window is modeless: Tab and Enter work in it here.
+        if (state.benchmark.translate(message)) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }

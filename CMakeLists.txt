@@ -476,12 +476,28 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 FAIL_REGULAR_EXPRESSION "result [a-z0-9_]+ failed;error ")
         endif()
 
+        # The tray's "Benchmark this PC" window and the child process behind
+        # it. A library of its own because the lifecycle tests compile the
+        # tray's main.cpp, which holds one.
+        add_library(xrfg_tray_benchmark STATIC
+            src/tray/benchmark_window.cpp
+            src/tray/benchmark_window.hpp)
+        target_link_libraries(xrfg_tray_benchmark PUBLIC
+            xrfg_standalone_core comctl32 dxgi gdi32 user32)
+        target_compile_features(xrfg_tray_benchmark PUBLIC cxx_std_20)
+        target_compile_definitions(xrfg_tray_benchmark PRIVATE
+            NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+        if(MSVC)
+            target_compile_options(xrfg_tray_benchmark PRIVATE /W4 /permissive- /EHsc)
+        endif()
+
         enable_language(RC)
         add_executable(OFXRBridgeTray WIN32
             src/tray/main.cpp
             src/tray/resources.rc)
         target_link_libraries(OFXRBridgeTray PRIVATE
             xrfg_standalone_core
+            xrfg_tray_benchmark
             comctl32
             gdi32
             ole32
@@ -564,7 +580,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             add_test(NAME xrfg_benchmark_model_tests COMMAND xrfg_benchmark_model_tests)
             add_executable(xrfg_tray_lifecycle_tests tests/tray_lifecycle_tests.cpp)
             target_link_libraries(xrfg_tray_lifecycle_tests PRIVATE
-                xrfg_standalone_core comctl32 gdi32 ole32 shell32 user32)
+                xrfg_standalone_core xrfg_tray_benchmark comctl32 gdi32 ole32 shell32 user32)
             target_compile_definitions(xrfg_tray_lifecycle_tests PRIVATE
                 XRFG_IMPLEMENTATION_VERSION=${PROJECT_VERSION_MINOR}
                 NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
