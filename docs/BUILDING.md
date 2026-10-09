@@ -648,10 +648,13 @@ ahead (1 + dt2/dt1 spans from A):
 | 13 candidates, ordered by the game's depth | 12.58 | 0.677 |
 | Plus a still-content hypothesis checked against A | 12.56 | 0.674 |
 | Search only near motion edges (second differences within 48 px) | 12.56 | 0.676 |
-| Nine candidates over three steps there (kept for `extrapolate=1`) | 12.68 | 0.679 |
+| Nine candidates over three steps there (until release 7) | 12.68 | 0.679 |
+| Five: the pixel and its four neighbours 12 px off (kept) | 12.63 | 0.684 |
+| Five, 8 px off | 12.66 | 0.686 |
 | From FidelityFX's flow alone, half / full resolution | 12.44 / 12.12 | 0.651 / 0.658 |
 | The flow's edge test at 6 px and its four nearest starts, 8 px off (kept) | 12.41 | 0.660 |
 | Vectors and flow, the better prediction per pixel (`extrapolate=2`) | 11.87 | 0.684 |
+| The same with five candidates (kept) | 11.88 | 0.688 |
 
 The flow's search was tuned on the same triplets, timed warm on them
 (`XRFG_TEST_REPLAY_TIMING_PAIRS=7`, one replay at a time):
@@ -672,7 +675,10 @@ The flow's search was tuned on the same triplets, timed warm on them
 FidelityFX's flow comes in blocks, so its motion steps by a few pixels
 between them where there is no edge, and its neighbours 40 px off are another
 block's noise as often as another surface. On the same frames, timed the same
-way, extrapolating from the vectors costs 1.13 ms and from both 1.93 ms. In
+way, extrapolating from the vectors cost 1.13 ms and from both 1.93 ms with
+nine candidates, and 0.76 ms and 1.49 ms with five; letting the vectors skip
+the flow below an error of 0.04 or 0.08 instead of 0.02 saved 1% and erred
+more (11.90, 11.98). In
 release 6 the vectors-only shader inherited the combined mode's constants
 layout and read depth from the wrong ones (13.83 error, SSIM 0.666); that is
 fixed.

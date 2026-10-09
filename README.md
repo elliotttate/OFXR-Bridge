@@ -259,8 +259,8 @@ does.
   pixel, background the moving content uncovers, the background beside it is
   stretched over it, as Meta's mesh warp stretches.
 - Predicting a whole frame ahead from recorded frames, a harder test than the
-  half frame a headset needs, it erred 12.7 where the scene moved, against
-  20.6 for showing the last frame again, with SSIM 0.679 against 0.489. From
+  half frame a headset needs, it erred 12.6 where the scene moved, against
+  20.6 for showing the last frame again, with SSIM 0.684 against 0.489. From
   FidelityFX's flow instead it erred 12.4, with SSIM 0.660: the flow follows
   a shadow the vectors move with the ground, but leaves more structure out of
   place.
@@ -272,18 +272,19 @@ does.
   The prediction shown after it is made for its own display time, so every
   frame on screen is that much fresher. (SteamVR's own lead from its wait to
   the display is 35.3 ms there; the rest is the game rendering.)
-- It costs 0.46 ms a pair offline at 3004x3004 per eye and 0.71-1.11 ms live
-  in Galactic Racer, against 1.61-1.63 ms for native generation at 67% in the
-  same rounds. From FidelityFX's flow it costs 1.44 ms offline and 1.11-1.59
-  ms live. In Hubris, a native OpenXR Unreal Engine 4 game, it ran through
+- It costs 0.43 ms a pair offline at 3004x3004 per eye, and 0.71-1.11 ms live
+  in Galactic Racer before its search was cut to five candidates (below),
+  against 1.61-1.63 ms for native generation at 67% in the same rounds. From
+  FidelityFX's flow it costs 1.44 ms offline and 1.11-1.59 ms live. In Hubris, a native OpenXR Unreal Engine 4 game, it ran through
   SteamVR at 0.29 ms a pair from the game's vectors and 1.12 ms from
   FidelityFX's flow, each real frame handed over before its prediction.
 - `extrapolate=2` also runs FidelityFX's flow beside the game's vectors and
   keeps, per pixel, whichever prediction explains the frame before better.
-  It erred least of all (11.87, SSIM 0.684). Timed warm, it costs 1.93 ms a
-  pair on the recorded frames, against 1.13 ms from the vectors and 1.22 ms
-  from the flow, and 1.27-1.91 ms live in Galactic Racer at 2316x2316 per eye,
-  so it is an INI option rather than a tray one.
+  It erred least of all (11.88, SSIM 0.688). Timed warm, it costs 1.49 ms a
+  pair on the recorded frames, against 0.76 ms from the vectors and 1.22 ms
+  from the flow (1.27-1.91 ms live in Galactic Racer at 2316x2316 per eye with
+  the earlier nine-candidate search), so it is an INI option rather than a
+  tray one.
 - Content its vectors do not describe, such as a shadow on ground rushing
   past, moves with the vectors; there is no second frame to correct it.
   The deeper pipeline is turned off, since its held period would add the
@@ -320,12 +321,17 @@ OpenXR session, and extrapolation wins if both are set.
   which then read the depth rectangle from the wrong constants and scored
   every pixel for a choice it never made: it erred 13.83 where the scene
   moved on the recorded frames instead of 12.68. Both are fixed.
-- **Extrapolation from FidelityFX's flow is a third cheaper.** The flow is
-  measured in blocks, so its motion steps between blocks without an edge
-  there, and the motion-edge search ran on far more pixels than for the
-  game's vectors. A 6-pixel step threshold for the flow, and its four nearest
-  candidates rather than nine, erred less on the recorded frames (12.41
-  against 12.46, SSIM 0.660 against 0.652) for 1.22 ms a pair against 1.94.
+- **Extrapolation searches five candidates, not nine.** Near a motion edge
+  each pixel solved from its own motion and its neighbours' at 12 and 40
+  pixels. The outer ring erred more on the recorded frames, and a headset
+  predicts half as far as that test. With the pixel and its four nearest
+  neighbours: from the game's vectors 12.63 error and SSIM 0.684 against
+  12.68 and 0.679, for 0.76 ms a pair warm against 1.13; from both, 11.88 and
+  0.688 against 11.87 and 0.684, for 1.49 ms against 1.93. FidelityFX's flow
+  is measured in blocks, so its motion steps between them without an edge;
+  with a 6-pixel step threshold too and its neighbours 8 pixels off, flow
+  extrapolation erred 12.41 with SSIM 0.660 against 12.46 and 0.652, for
+  1.22 ms against 1.94.
 - **Latency in the flight log.** Each submission records the display time
   the game was promised for the newest real frame it holds and the one it
   went down for (`presenter_content`), with the log's clock origin
@@ -445,8 +451,8 @@ speed. Each method had four interleaved rounds of ten seconds.
   simulator's 90 frames a second.
 - The two new modes, live on the same track, interleaved with native
   generation at 67% (1.61-1.82 ms): DLSS vectors + FidelityFX flow
-  1.58-1.71 ms, and extrapolation 0.71-1.11 ms from the game's vectors and
-  1.11-1.59 ms from FidelityFX's flow.
+  1.58-1.71 ms, and extrapolation 0.71-1.11 ms from the game's vectors (before
+  its five-candidate search) and 1.11-1.59 ms from FidelityFX's flow.
 
 **Latency, live.** Galactic Racer on a Steam Frame at 120 Hz, from the game's
 xrWaitFrame returning to its real frame going down, read from the flight log
@@ -470,14 +476,14 @@ the reference timed before and after agreed within 0.2% (drift 1.002).
 
 | Mode | Per pair | Mode | Per pair |
 |---|---|---|---|
-| OFXR + DLSS vectors | 0.50 ms | Extrapolation, DLSS vectors | 0.46 ms |
-| FidelityFX 50 / 75 / 100% | 0.59 / 0.88 / 1.31 ms | Extrapolation, FidelityFX 50 / 75 / 100% | 1.44 / 1.88 / 2.48 ms |
+| OFXR + DLSS vectors | 0.50 ms | Extrapolation, DLSS vectors | 0.43 ms |
+| FidelityFX 50 / 75 / 100% | 0.59 / 0.88 / 1.31 ms | Extrapolation, FidelityFX 50 / 75 / 100% | 1.44 / 1.88 / 2.24 ms |
 | FidelityFX 3X | 0.81 ms | Hybrid 50 / 75 / 100% | 1.20 / 1.49 / 1.92 ms |
 | Native 100 / 67 / 50% | 2.58 / 1.81 / 1.47 ms | Native 3X 100 / 67 / 50% | 3.78 / 2.88 / 2.44 ms |
 | NVIDIA fast / medium / slow 50% | 2.47 / 2.89 / 4.41 ms | NVIDIA medium 50%, both ways | 4.49 ms |
 | Guide snapshot (game side) | 0.03 ms | | |
 
-The extrapolation rows were timed again after its tuning (drift 1.008).
+The extrapolation rows were timed again after its tuning (drift 1.004).
 
 **Live, Hubris.** Hubris is a native Unreal Engine 4 VR game with DLSS 310.2.1
 and no DLSS Frame Generation of its own. It ran through SteamVR at 2568x2568

@@ -1133,20 +1133,21 @@ float4 extrapolate_pixel(float2 pixel, CameraSample here) {
             (extrapolate_flow ? 6.0 : 1.0);
     }
     // In the hybrid the vectors order the surfaces by depth; the flow only
-    // offers its own point. Alone, the flow is too coarse for the outer ring:
-    // its neighbours' motion 40 pixels off belongs to other blocks' noise as
-    // often as to another surface, and the four nearest starts, 8 pixels off,
-    // erred less with better SSIM on recorded frames, at five starts not nine.
-    uint candidates = smooth_motion || (extrapolate_flow && extrapolate_both) ? 1
-                    : extrapolate_flow ? 5 : 9;
+    // offers its own point. Otherwise the pixel's own motion and its four
+    // neighbours' start a solve each. A second ring 40 pixels out, nine
+    // starts in all, erred more on recorded frames, from the vectors (12.68
+    // against 12.63, SSIM 0.679 against 0.684) and from the flow, whose
+    // motion that far off is another block's noise as often as another
+    // surface, for half as much again of the time: a headset predicts half
+    // as far as that test, so the far ring matters less still.
+    uint candidates = smooth_motion || (extrapolate_flow && extrapolate_both) ? 1 : 5;
     // The hybrid's flow pass always takes one candidate; FXC warns that such
     // a loop runs once (3557) for that entry point alone.
 #pragma warning(disable : 3557)
     [loop] for (uint candidate = 0; candidate < candidates; ++candidate) {
         float2 start = pixel;
         if (candidate > 0) {
-            uint ring = (candidate - 1) / 4;
-            float radius = ring == 0 ? (extrapolate_flow ? 8.0 : 12.0) : 40.0;
+            float radius = extrapolate_flow ? 8.0 : 12.0;
             uint direction = (candidate - 1) % 4;
             float2 offset = direction == 0 ? float2(radius, 0) : direction == 1 ? float2(-radius, 0)
                           : direction == 2 ? float2(0, radius) : float2(0, -radius);
