@@ -501,7 +501,7 @@ struct Context {
         }
     }
     const bool triple = spec.generated_frames >= 2;
-    const bool game_motion = spec.kind != CaseKind::flow;
+    const bool game_motion = benchmark::uses_game_guides(spec.kind);
 
     auto history = std::make_shared<D3D12SwapchainHistory>();
     const std::array<ID3D12Resource*, 2> sources{scene.sources[0].Get(), scene.sources[1].Get()};
@@ -519,7 +519,7 @@ struct Context {
         : D3D12OpticalFlowInputScale::half;
     options.bidirectional = spec.bidirectional;
     options.hybrid = spec.kind == CaseKind::hybrid;
-    options.extrapolate = spec.kind == CaseKind::extrapolate;
+    options.extrapolate = benchmark::extrapolates(spec.kind);
     if (spec.kind == CaseKind::native) {
         options.frame_generation = D3D12FrameGeneration::native_dlss;
         options.native_scale = static_cast<std::uint32_t>(spec.native_scale);
@@ -599,7 +599,7 @@ struct Context {
     const UINT total = warmup + std::max(context.options.measured_pairs, 4U);
     // The first frame after the prime extrapolates past; interpolation sits
     // halfway, or at thirds for 3X.
-    const float fraction = spec.kind == CaseKind::extrapolate ? 1.5F : triple ? 1.0F / 3.0F : 0.5F;
+    const float fraction = benchmark::extrapolates(spec.kind) ? 1.5F : triple ? 1.0F / 3.0F : 0.5F;
     std::vector<double> samples;
     for (UINT pair = 1; pair <= total; ++pair) {
         HRESULT gate = synthesizer.wait_for_previous_submission(2000);
@@ -767,10 +767,18 @@ HRESULT run(const Options& options, const Callbacks& callbacks, std::wstring* er
         Scene scene;
         create_scene(gpu, scene, options.eye_width, options.eye_height);
         Context context{gpu, scene, options, adapter, std::nullopt, {}};
+        double first_median = 0.0;
         for (std::size_t index = 0; index < cases.size(); ++index) {
             if (callbacks.begin) callbacks.begin(index, cases.size(), *cases[index]);
             const CaseResult result = run_case(context, *cases[index]);
+            if (index == 0 && result.status == CaseStatus::ok) first_median = result.median_us;
             if (callbacks.result) callbacks.result(result);
+        }
+        // The first case again: other GPU work that started or stopped
+        // during the run shows as a different time.
+        if (first_median > 0.0 && cases.size() > 1 && callbacks.drift) {
+            const CaseResult repeat = run_case(context, *cases.front());
+            if (repeat.status == CaseStatus::ok) callbacks.drift(repeat.median_us / first_median);
         }
         return S_OK;
     } catch (const Fatal& fatal) {

@@ -43,15 +43,17 @@ struct LauncherSettings {
     NvidiaPerformancePreset nvidia_preset{NvidiaPerformancePreset::medium};
     NvidiaInputScale nvidia_input_scale{NvidiaInputScale::half};
     bool nvidia_bidirectional{};
-    // What OFXR does in a game that publishes DLSS motion vectors; the layer's
-    // dlss_flow_hybrid and extrapolate. Both off: the game's vectors alone.
-    // dlss_flow_hybrid runs FidelityFX's flow beside the vectors and keeps,
-    // per pixel, whichever explains both frames better (the layer uses the
-    // FidelityFX backend for those games while it is on). extrapolate
-    // predicts the next frame from the vectors and depth instead of
-    // interpolating, SpaceWarp-style, so no real frame waits. Neither applies
-    // to native DLSS Frame Generation. The tray menu sets at most one; with
-    // both set by hand the synthesizer runs the hybrid, and so does the menu.
+    // How OFXR makes frames; the layer's dlss_flow_hybrid and extrapolate,
+    // read at session start. Both off: interpolation, from the game's DLSS
+    // vectors where it has them and the chosen optical flow where it does
+    // not. dlss_flow_hybrid runs FidelityFX's flow beside the vectors and
+    // keeps, per pixel, whichever explains both frames better. extrapolate
+    // shows each real frame at once and predicts the next from it,
+    // SpaceWarp-style, from the vectors and depth or else FidelityFX flow, and
+    // turns the deeper pipeline off. Either takes the FidelityFX backend.
+    // Neither applies to native DLSS Frame Generation. The tray menu sets at
+    // most one; with both set by hand the layer extrapolates, and so does the
+    // menu.
     bool dlss_flow_hybrid{};
     bool extrapolate{};
     // "Prefer FPS over latency": the layer's deeper pipeline. On by default.

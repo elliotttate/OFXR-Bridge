@@ -19,7 +19,7 @@ constexpr Backend kNv = Backend::nvidia;
 
 // The order is the run order: what any GPU can run first, NVIDIA's optical
 // flow next, NGX last.
-constexpr std::array<CaseSpec, 34> kCases{{
+constexpr std::array<CaseSpec, 37> kCases{{
     {"ffx_50", "FidelityFX optical flow, 50%", Kind::flow, kFfx, Preset::medium, 50},
     {"ffx_75", "FidelityFX optical flow, 75%", Kind::flow, kFfx, Preset::medium, 75},
     {"ffx_100", "FidelityFX optical flow, 100%", Kind::flow, kFfx, Preset::medium, 100},
@@ -29,6 +29,9 @@ constexpr std::array<CaseSpec, 34> kCases{{
     {"hybrid_75", "Motion vectors + FidelityFX flow, 75%", Kind::hybrid, kFfx, Preset::medium, 75},
     {"hybrid_100", "Motion vectors + FidelityFX flow, 100%", Kind::hybrid, kFfx, Preset::medium, 100},
     {"extrapolate", "Extrapolation from motion vectors", Kind::extrapolate, kFfx, Preset::medium, 50},
+    {"extrapolate_ffx_50", "Extrapolation from FidelityFX optical flow, 50%", Kind::flow_extrapolate, kFfx, Preset::medium, 50},
+    {"extrapolate_ffx_75", "Extrapolation from FidelityFX optical flow, 75%", Kind::flow_extrapolate, kFfx, Preset::medium, 75},
+    {"extrapolate_ffx_100", "Extrapolation from FidelityFX optical flow, 100%", Kind::flow_extrapolate, kFfx, Preset::medium, 100},
     {"guide_snapshot", "Copying the game's vectors and depth (per game frame)", Kind::guide_snapshot},
     {"nv_fast_50", "NVIDIA optical flow, fast, 50%", Kind::flow, kNv, Preset::fast, 50},
     {"nv_fast_75", "NVIDIA optical flow, fast, 75%", Kind::flow, kNv, Preset::fast, 75},
@@ -87,10 +90,10 @@ template <typename Integer>
     return value;
 }
 
-[[nodiscard]] std::string format_double(double value) {
+[[nodiscard]] std::string format_double(double value, int decimals = 1) {
     std::array<char, 64> buffer{};
     const auto [end, error] = std::to_chars(
-        buffer.data(), buffer.data() + buffer.size(), value, std::chars_format::fixed, 1);
+        buffer.data(), buffer.data() + buffer.size(), value, std::chars_format::fixed, decimals);
     if (error != std::errc{}) return "0";
     return std::string(buffer.data(), end);
 }
@@ -159,6 +162,19 @@ std::string flow_case_key(CaseBackend backend, CasePreset preset, int input_scal
     return std::string("nv_") + name + "_" + scale + (bidirectional ? "_bidi" : "");
 }
 
+bool uses_game_guides(CaseKind kind) noexcept {
+    return kind == CaseKind::vectors || kind == CaseKind::hybrid || kind == CaseKind::extrapolate ||
+           kind == CaseKind::native;
+}
+
+bool extrapolates(CaseKind kind) noexcept {
+    return kind == CaseKind::extrapolate || kind == CaseKind::flow_extrapolate;
+}
+
+std::string flow_extrapolate_case_key(int input_scale) {
+    return "extrapolate_ffx_" + std::to_string(input_scale);
+}
+
 std::string hybrid_case_key(int input_scale) {
     return "hybrid_" + std::to_string(input_scale);
 }
@@ -183,6 +199,10 @@ CaseStatus parse_status(std::string_view text) noexcept {
     if (text == "unavailable") return CaseStatus::unavailable;
     if (text == "failed") return CaseStatus::failed;
     return CaseStatus::not_run;
+}
+
+bool Results::drifted() const noexcept {
+    return drift > 0.0 && (drift > 1.25 || drift < 0.8);
 }
 
 const CaseResult* Results::find(std::string_view key) const noexcept {
@@ -249,6 +269,7 @@ Results parse_results(std::string_view text) {
                 const double hz = parse_double(value).value_or(90.0);
                 results.refresh_hz = hz >= 30.0 && hz <= 500.0 ? hz : 90.0;
             } else if (key == "date") results.date = std::string(value);
+            else if (key == "drift") results.drift = std::max(parse_double(value).value_or(0.0), 0.0);
         } else if (current != nullptr) {
             if (key == "status") current->status = parse_status(value);
             else if (key == "median_us") current->median_us = parse_double(value).value_or(0.0);
@@ -272,7 +293,8 @@ std::string serialize_results(const Results& results) {
         "\r\neye_width=" + std::to_string(results.eye_width) +
         "\r\neye_height=" + std::to_string(results.eye_height) +
         "\r\nrefresh_hz=" + format_double(results.refresh_hz) +
-        "\r\ndate=" + single_line(results.date) + "\r\n";
+        "\r\ndate=" + single_line(results.date) +
+        "\r\ndrift=" + format_double(results.drift, 3) + "\r\n";
     for (const auto& result : results.cases) {
         text += "\r\n[case." + single_line(result.key) + "]\r\nstatus=" +
             std::string(status_name(result.status));
@@ -457,7 +479,7 @@ std::wstring short_annotation(const Estimate& value) {
 }
 
 int added_latency_frames(CaseKind kind, int frames_per_game_frame) noexcept {
-    if (kind == CaseKind::extrapolate || kind == CaseKind::guide_snapshot) return 0;
+    if (extrapolates(kind) || kind == CaseKind::guide_snapshot) return 0;
     return std::clamp(frames_per_game_frame, 2, 3) - 1;
 }
 

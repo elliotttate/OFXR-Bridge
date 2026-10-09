@@ -87,10 +87,10 @@ enum MenuCommand : UINT {
     method_nvidia_medium = 162,
     method_nvidia_slow = 163,
     method_native_dlss = 164,
-    // What OFXR does in a game with DLSS motion vectors.
-    dlss_mode_vectors = 165,
-    dlss_mode_hybrid = 166,
-    dlss_mode_extrapolate = 167,
+    // How OFXR makes frames: interpolation, the hybrid, extrapolation.
+    ofxr_mode_interpolate = 165,
+    ofxr_mode_hybrid = 166,
+    ofxr_mode_extrapolate = 167,
     // 2X and 3X as a pair of choices; each is toggle_triple_frame_gen when
     // it changes anything.
     frames_2x = 168,
@@ -527,23 +527,28 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         : state.armed ? L"OFXR Bridge ARMED - " : L"OFXR Bridge - ";
     // What the menu's top says: the method, its resolution, 2X or 3X.
     tooltip += sl::active_method_summary(state.settings);
-    if (sl::current_method(state.settings) != sl::Method::native_dlss) {
-        if (state.settings.backend == sl::FlowBackend::nvidia && state.settings.nvidia_bidirectional) {
+    const bool ofxr = sl::current_method(state.settings) != sl::Method::native_dlss;
+    const sl::OfxrMode mode = sl::ofxr_mode(state.settings);
+    if (ofxr) {
+        if (state.settings.backend == sl::FlowBackend::nvidia && state.settings.nvidia_bidirectional &&
+            !sl::mode_forces_fidelity_fx(mode)) {
             tooltip += L" + bidirectional";
         }
-        switch (sl::dlss_game_mode(state.settings)) {
-        case sl::DlssGameMode::hybrid:
-            tooltip += L" - DLSS games: vectors + flow";
+        switch (mode) {
+        case sl::OfxrMode::hybrid:
+            tooltip += L" - vectors + FidelityFX flow";
             break;
-        case sl::DlssGameMode::extrapolate:
-            tooltip += L" - DLSS games: extrapolation";
+        case sl::OfxrMode::extrapolate:
+            tooltip += L" - extrapolating";
             break;
-        case sl::DlssGameMode::vectors:
+        case sl::OfxrMode::interpolate:
         default:
             break;
         }
     }
-    if (!state.settings.triple_frame_gen && state.settings.deep_pipeline) {
+    // Extrapolation turns the deeper pipeline off in the layer.
+    if (!state.settings.triple_frame_gen && state.settings.deep_pipeline &&
+        !(ofxr && mode == sl::OfxrMode::extrapolate)) {
         tooltip += L" - prefer FPS";
     }
     if (state.settings.diagnostics) {
@@ -977,9 +982,12 @@ void show_context_menu(AppState& state) {
     const auto& settings = state.settings;
     const sl::Method method = sl::current_method(settings);
     const bool native = method == sl::Method::native_dlss;
-    const bool nvidia_flow = !native && method != sl::Method::fidelity_fx;
     const bool triple = settings.triple_frame_gen;
-    const sl::DlssGameMode game_mode = sl::dlss_game_mode(settings);
+    const sl::OfxrMode mode = sl::ofxr_mode(settings);
+    // The hybrid and extrapolation run FidelityFX flow whatever is chosen.
+    const bool forced_fidelity_fx = !native && sl::mode_forces_fidelity_fx(mode);
+    const bool nvidia_flow = !native && method != sl::Method::fidelity_fx && !forced_fidelity_fx;
+    const bool extrapolating = !native && mode == sl::OfxrMode::extrapolate;
     // Estimates only from results measured on this PC's graphics card.
     const bm::Results* results =
         state.benchmark.results_for_this_gpu() ? state.benchmark.results() : nullptr;
@@ -989,9 +997,14 @@ void show_context_menu(AppState& state) {
         return sl::menu_annotation(sl::method_cost(*results, settings, entry, query), refresh,
                                    query.triple.value_or(triple));
     };
-    const auto game_note = [&](sl::DlssGameMode mode) {
+    // An NVIDIA engine is not what runs under the hybrid or extrapolation.
+    const auto engine_note = [&](sl::Method entry) {
+        return forced_fidelity_fx ? std::wstring(L"FidelityFX runs in this OFXR mode")
+                                  : method_note(entry);
+    };
+    const auto mode_note = [&](sl::OfxrMode entry) {
         if (results == nullptr) return std::wstring();
-        return sl::menu_annotation(sl::dlss_game_cost(*results, settings, mode), refresh, triple);
+        return sl::menu_annotation(sl::ofxr_mode_cost(*results, settings, entry), refresh, triple);
     };
 
     // What the bridge is doing.
@@ -1000,7 +1013,7 @@ void show_context_menu(AppState& state) {
                state.paused ? L"paused" : state.armed ? L"armed" : L"not armed");
     append_note(menu, title, true);
     append_note(menu, L"Frame generation: " + sl::active_method_summary(settings));
-    if (!native) append_note(menu, L"In games with DLSS: " + sl::dlss_game_mode_name(game_mode));
+    if (!native) append_note(menu, L"OFXR is " + sl::ofxr_mode_name(mode));
     append_separator(menu);
     AppendMenuW(
         menu,
@@ -1026,8 +1039,8 @@ void show_context_menu(AppState& state) {
     }
     append_separator(menu);
 
-    // Frame generation method: one list, then what OFXR does in DLSS games,
-    // then how many frames.
+    // Frame generation method: one list, then how OFXR makes frames, then
+    // how many frames.
     if (HMENU methods = CreatePopupMenu()) {
         if (results != nullptr) {
             append_note(methods, L"On this PC at " + std::to_wstring(results->eye_width) + L" \u00D7 " +
@@ -1040,34 +1053,38 @@ void show_context_menu(AppState& state) {
             append_note(methods, L"Run Benchmark this PC to see what each method costs here");
         }
         append_separator(methods);
-        append_note(methods, L"Any game: OFXR with optical flow");
+        append_note(methods, L"OFXR from optical flow (games without DLSS vectors)");
         append_entry(methods, method_fidelity_fx, L"FidelityFX optical flow (any graphics card)",
                      method == sl::Method::fidelity_fx, true, true, method_note(sl::Method::fidelity_fx));
         append_entry(methods, method_nvidia_fast, L"NVIDIA optical flow, fast (testing)",
-                     method == sl::Method::nvidia_fast, true, true, method_note(sl::Method::nvidia_fast));
+                     method == sl::Method::nvidia_fast, true, true, engine_note(sl::Method::nvidia_fast));
         append_entry(methods, method_nvidia_medium, L"NVIDIA optical flow, medium (default)",
-                     method == sl::Method::nvidia_medium, true, true, method_note(sl::Method::nvidia_medium));
+                     method == sl::Method::nvidia_medium, true, true, engine_note(sl::Method::nvidia_medium));
         append_entry(methods, method_nvidia_slow, L"NVIDIA optical flow, slow (best flow quality)",
-                     method == sl::Method::nvidia_slow, true, true, method_note(sl::Method::nvidia_slow));
+                     method == sl::Method::nvidia_slow, true, true, engine_note(sl::Method::nvidia_slow));
 #ifdef XRFG_NATIVE_DLSSG
         append_separator(methods);
         append_note(methods, L"Games with DLSS: NVIDIA's own frame generation");
         append_entry(methods, method_native_dlss, L"NVIDIA DLSS Frame Generation (experimental)",
                      native, true, true, method_note(sl::Method::native_dlss));
 #endif
+        // How OFXR makes frames. The costs here are in games with DLSS
+        // vectors; the list above shows what runs in the others.
         append_separator(methods);
-        append_note(methods, native ? L"In games with DLSS, OFXR uses (not with DLSS Frame Generation)"
-                                    : L"In games with DLSS, OFXR uses");
-        append_entry(methods, dlss_mode_vectors, L"The game's motion vectors (default)",
-                     game_mode == sl::DlssGameMode::vectors, !native, true,
-                     game_note(sl::DlssGameMode::vectors));
-        append_entry(methods, dlss_mode_hybrid, L"Motion vectors + FidelityFX flow (best quality)",
-                     game_mode == sl::DlssGameMode::hybrid, !native, true,
-                     game_note(sl::DlssGameMode::hybrid));
-        const std::wstring extrapolation = game_note(sl::DlssGameMode::extrapolate);
-        append_entry(methods, dlss_mode_extrapolate, L"Extrapolate, SpaceWarp-style (lowest latency)",
-                     game_mode == sl::DlssGameMode::extrapolate, !native, true,
-                     extrapolation.empty() || extrapolation.find(L"ms") == std::wstring::npos
+        append_note(methods, native ? L"How OFXR makes frames (not with DLSS Frame Generation)"
+                                    : L"How OFXR makes frames (cost in games with DLSS vectors)");
+        append_entry(methods, ofxr_mode_interpolate,
+                     L"Interpolate, from the game's DLSS vectors where it has them (default)",
+                     mode == sl::OfxrMode::interpolate, !native, true,
+                     mode_note(sl::OfxrMode::interpolate));
+        append_entry(methods, ofxr_mode_hybrid,
+                     L"Interpolate, DLSS vectors + FidelityFX flow (best quality)",
+                     mode == sl::OfxrMode::hybrid, !native, true, mode_note(sl::OfxrMode::hybrid));
+        const std::wstring extrapolation = mode_note(sl::OfxrMode::extrapolate);
+        append_entry(methods, ofxr_mode_extrapolate,
+                     L"Extrapolate, SpaceWarp-style (lowest latency)",
+                     mode == sl::OfxrMode::extrapolate, !native, true,
+                     extrapolation.find(L" ms") == std::wstring::npos
                          ? extrapolation : extrapolation + L" \u00B7 no added latency");
         append_separator(methods);
         append_note(methods, L"Frames shown per game frame");
@@ -1132,14 +1149,17 @@ void show_context_menu(AppState& state) {
         }
 #endif
         append_separator(quality);
-        // 3X needs what "Prefer FPS over latency" sets up, so it holds that on.
+        // 3X needs what "Prefer FPS over latency" sets up, so it holds that
+        // on; extrapolation is there for latency, and the layer turns it off.
         AppendMenuW(
             quality,
             MF_STRING |
-                (settings.deep_pipeline || settings.triple_frame_gen ? MF_CHECKED : MF_UNCHECKED) |
-                (settings.triple_frame_gen ? MF_GRAYED : MF_ENABLED),
+                (!extrapolating && (settings.deep_pipeline || settings.triple_frame_gen)
+                     ? MF_CHECKED : MF_UNCHECKED) |
+                (settings.triple_frame_gen || extrapolating ? MF_GRAYED : MF_ENABLED),
             toggle_deep_pipeline,
-            settings.triple_frame_gen
+            extrapolating ? L"Prefer FPS over latency (off while extrapolating)"
+            : settings.triple_frame_gen
                 ? L"Prefer FPS over latency (on with 3X Frame Gen)"
                 : L"Prefer FPS over latency (adds a frame of latency)");
         append_submenu(menu, quality, L"Quality and performance");
@@ -1482,16 +1502,35 @@ void handle_command(AppState& state, UINT command) {
             : nullptr);
         break;
     }
-    case dlss_mode_vectors:
-    case dlss_mode_hybrid:
-    case dlss_mode_extrapolate:
-        xrfg::standalone::apply_dlss_game_mode(state.settings,
-            command == dlss_mode_hybrid ? xrfg::standalone::DlssGameMode::hybrid
-            : command == dlss_mode_extrapolate ? xrfg::standalone::DlssGameMode::extrapolate
-            : xrfg::standalone::DlssGameMode::vectors);
-        update_runtime_options(state,
-            L"In games with DLSS, OFXR will use this from the next OpenXR session.");
+    case ofxr_mode_interpolate:
+    case ofxr_mode_hybrid:
+    case ofxr_mode_extrapolate: {
+        namespace sl = xrfg::standalone;
+        const auto mode = command == ofxr_mode_hybrid ? sl::OfxrMode::hybrid
+            : command == ofxr_mode_extrapolate ? sl::OfxrMode::extrapolate
+            : sl::OfxrMode::interpolate;
+        sl::apply_ofxr_mode(state.settings, mode);
+        update_runtime_options(state);
+        // A menu item cannot carry a tooltip, so the trade goes in the
+        // notification, armed or not, as for "Prefer FPS over latency".
+        show_balloon(
+            state,
+            mode == sl::OfxrMode::extrapolate ? L"OFXR: extrapolate"
+            : mode == sl::OfxrMode::hybrid ? L"OFXR: vectors + FidelityFX flow"
+                                           : L"OFXR: interpolate",
+            mode == sl::OfxrMode::extrapolate
+                ? L"Each real frame is shown at once and the next predicted from it: a display "
+                  L"frame less latency, but predictions err more. Uses FidelityFX flow without "
+                  L"DLSS vectors; Prefer FPS over latency is off. From the next game start."
+            : mode == sl::OfxrMode::hybrid
+                ? L"In games with DLSS, FidelityFX flow runs beside the game's vectors and each "
+                  L"pixel takes the better: the least error measured, for about 1 ms more. "
+                  L"FidelityFX flow is used in every game. From the next game start."
+                : L"Frames are generated between two real frames, from the game's DLSS vectors "
+                  L"where it has them and the chosen optical flow where not. From the next game "
+                  L"start.");
         break;
+    }
     case frames_2x:
     case frames_3x:
         if (state.settings.triple_frame_gen != (command == frames_3x)) {

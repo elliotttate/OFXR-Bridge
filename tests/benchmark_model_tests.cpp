@@ -33,6 +33,11 @@ void catalogue() {
         require(find_case(flow_case_key(CaseBackend::fidelity_fx, CasePreset::medium, scale, false)),
                 "FidelityFX flow at every scale");
         require(find_case(hybrid_case_key(scale)), "hybrid at every scale");
+        const auto* extrapolation = find_case(flow_extrapolate_case_key(scale));
+        require(extrapolation && extrapolation->kind == CaseKind::flow_extrapolate &&
+                    extrapolation->input_scale == scale && !uses_game_guides(extrapolation->kind) &&
+                    extrapolates(extrapolation->kind),
+                "extrapolation from FidelityFX flow at every scale");
         for (const auto preset : {CasePreset::fast, CasePreset::medium, CasePreset::slow}) {
             for (const bool bidirectional : {false, true}) {
                 require(find_case(flow_case_key(CaseBackend::nvidia, preset, scale, bidirectional)),
@@ -53,6 +58,10 @@ void catalogue() {
         require(find_case(key) != nullptr, "named keys exist");
     }
     require(find_case(kOfxrTripleReferenceKey)->generated_frames == 2, "3X reference is 3X");
+    require(uses_game_guides(CaseKind::vectors) && uses_game_guides(CaseKind::native) &&
+                uses_game_guides(CaseKind::extrapolate) && !uses_game_guides(CaseKind::flow) &&
+                extrapolates(CaseKind::extrapolate) && !extrapolates(CaseKind::hybrid),
+            "kinds");
     // NGX runs last: a fault there costs the fewest results.
     const auto cases = standard_cases();
     bool seen_native = false;
@@ -75,6 +84,7 @@ void results_file() {
     results.refresh_hz = 120.0;
     results.date = "2026-10-09 12:00";
     results.last_started = "native_50_3x";
+    results.drift = 1.031;
     results.set({"ffx_50", CaseStatus::ok, 590.4, 571.0, 32, ""});
     results.set({"nv_fast_50", CaseStatus::unavailable, 0, 0, 0, "Needs an NVIDIA\r\nGPU"});
     results.set({"native_100", CaseStatus::failed, 0, 0, 0, "NGX = 0xBAD00004"});
@@ -88,6 +98,10 @@ void results_file() {
                 parsed.last_started == "native_50_3x",
             "resolution and refresh round trip");
     require(parsed.cases.size() == 3, "every case round trips");
+    require(near(parsed.drift, 1.031) && !parsed.drifted(), "drift round trips");
+    Results busy;
+    busy.drift = 1.6;
+    require(busy.drifted() && !Results{}.drifted(), "a busy GPU is noticed; unchecked is not drift");
     const auto* ffx = parsed.find("ffx_50");
     require(ffx && ffx->status == CaseStatus::ok && near(ffx->median_us, 590.4, 0.05) &&
                 near(ffx->p10_us, 571.0, 0.05) && ffx->samples == 32,
@@ -210,16 +224,20 @@ void tray_lookups() {
     require(native.frame_generation == FrameGeneration::ofxr &&
                 native.backend == FlowBackend::fidelity_fx,
             "a flow method leaves native generation");
-    require(dlss_game_mode(settings) == DlssGameMode::vectors, "vectors by default");
-    for (const auto mode : {DlssGameMode::vectors, DlssGameMode::hybrid, DlssGameMode::extrapolate}) {
+    require(ofxr_mode(settings) == OfxrMode::interpolate, "interpolation by default");
+    for (const auto mode : {OfxrMode::interpolate, OfxrMode::hybrid, OfxrMode::extrapolate}) {
         LauncherSettings changed;
-        apply_dlss_game_mode(changed, mode);
-        require(dlss_game_mode(changed) == mode && !(changed.dlss_flow_hybrid && changed.extrapolate),
-                "one DLSS-game mode at a time");
+        apply_ofxr_mode(changed, mode);
+        require(ofxr_mode(changed) == mode && !(changed.dlss_flow_hybrid && changed.extrapolate),
+                "one OFXR mode at a time");
+        require(mode_forces_fidelity_fx(mode) == (mode != OfxrMode::interpolate),
+                "the hybrid and extrapolation take FidelityFX");
     }
     LauncherSettings both;
     both.dlss_flow_hybrid = both.extrapolate = true;
-    require(dlss_game_mode(both) == DlssGameMode::hybrid, "the synthesizer prefers the hybrid");
+    require(ofxr_mode(both) == OfxrMode::extrapolate, "the layer prefers extrapolation");
+    require(active_method_summary(both).rfind(L"FidelityFX optical flow 50%", 0) == 0,
+            "the status line names the engine that runs");
     require(active_method_summary(settings) == L"NVIDIA optical flow, medium 50% \u00B7 2X",
             "status line");
 
@@ -260,11 +278,24 @@ void tray_lookups() {
             "native includes the guide copy");
     require(near(method_cost(results, settings, Method::native_dlss, {.triple = true}).cost_ms, 2.6),
             "native 3X is measured");
-    require(near(dlss_game_cost(results, settings, DlssGameMode::vectors).cost_ms, 0.6) &&
-                near(dlss_game_cost(results, settings, DlssGameMode::hybrid).cost_ms, 1.7),
-            "DLSS-game modes include the guide copy");
-    require(dlss_game_cost(results, settings, DlssGameMode::extrapolate).status == CaseStatus::not_run,
+    require(near(ofxr_mode_cost(results, settings, OfxrMode::interpolate).cost_ms, 0.6) &&
+                near(ofxr_mode_cost(results, settings, OfxrMode::hybrid).cost_ms, 1.7),
+            "modes in DLSS games include the guide copy");
+    require(ofxr_mode_cost(results, settings, OfxrMode::extrapolate).status == CaseStatus::not_run,
             "no extrapolation result");
+    // The hybrid and extrapolation run FidelityFX whatever the list says.
+    LauncherSettings hybrid = settings;
+    apply_ofxr_mode(hybrid, OfxrMode::hybrid);
+    require(near(method_cost(results, hybrid, Method::nvidia_medium).cost_ms, 0.6),
+            "under the hybrid an NVIDIA choice costs FidelityFX's flow");
+    LauncherSettings extrapolating = settings;
+    apply_ofxr_mode(extrapolating, OfxrMode::extrapolate);
+    results.set({"extrapolate_ffx_50", CaseStatus::ok, 450, 440, 32, ""});
+    require(near(method_cost(results, extrapolating, Method::nvidia_slow).cost_ms, 0.45) &&
+                near(method_cost(results, extrapolating, Method::fidelity_fx).cost_ms, 0.45),
+            "extrapolating, any flow choice costs FidelityFX extrapolation");
+    require(method_cost(results, extrapolating, Method::native_dlss).status == CaseStatus::ok,
+            "native generation does not change with the OFXR mode");
     require(menu_annotation(medium, 90.0, false) == L"2.9 ms \u00B7 up to +74%",
             "annotation from settings");
     require(menu_annotation(method_cost(results, settings, Method::nvidia_slow), 90.0, false) ==

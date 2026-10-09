@@ -12,6 +12,7 @@
 //   count <cases>
 //   begin <1-based index> <key>
 //   result <key> <ok|unavailable|failed> <median us> <note>
+//   drift <ratio>             (the first case again, over its first time)
 //   done                      (every case answered; exit code 0)
 //   error <message>           (the run stopped; exit code 2)
 // The results file is rewritten after every case, complete=0 until the
@@ -171,6 +172,13 @@ int wmain(int argc, wchar_t** argv) {
         std::snprintf(median, sizeof(median), "%.1f", result.median_us);
         emit("result " + result.key + " " + std::string(xrfg::benchmark::status_name(result.status)) +
              " " + median + (result.note.empty() ? "" : " " + result.note));
+    };
+
+    callbacks.drift = [&](double ratio) {
+        results.drift = ratio;
+        char text[32]{};
+        std::snprintf(text, sizeof(text), "%.3f", ratio);
+        emit(std::string("drift ") + text);
     };
 
     std::wstring error;

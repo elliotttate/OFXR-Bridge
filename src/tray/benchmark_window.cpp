@@ -62,7 +62,7 @@ struct RowSpec {
     std::string_view key;
     const wchar_t* label;
 };
-constexpr std::array<RowSpec, 33> kRows{{
+constexpr std::array<RowSpec, 36> kRows{{
     {flow_group, "ffx_50", L"FidelityFX, 50%"},
     {flow_group, "ffx_75", L"FidelityFX, 75%"},
     {flow_group, "ffx_100", L"FidelityFX, 100%"},
@@ -84,6 +84,9 @@ constexpr std::array<RowSpec, 33> kRows{{
     {flow_group, "nv_slow_50_bidi", L"NVIDIA slow, 50%, both ways"},
     {flow_group, "nv_slow_75_bidi", L"NVIDIA slow, 75%, both ways"},
     {flow_group, "nv_slow_100_bidi", L"NVIDIA slow, 100%, both ways"},
+    {flow_group, "extrapolate_ffx_50", L"Extrapolation, FidelityFX, 50%"},
+    {flow_group, "extrapolate_ffx_75", L"Extrapolation, FidelityFX, 75%"},
+    {flow_group, "extrapolate_ffx_100", L"Extrapolation, FidelityFX, 100%"},
     {vectors_group, "vectors", L"Motion vectors (default)"},
     {vectors_group, "hybrid_50", L"Vectors + FidelityFX flow, 50%"},
     {vectors_group, "hybrid_75", L"Vectors + FidelityFX flow, 75%"},
@@ -180,11 +183,6 @@ constexpr std::array<RowSpec, 33> kRows{{
     wchar_t buffer[48]{};
     std::swprintf(buffer, std::size(buffer), pattern, value);
     return buffer;
-}
-
-[[nodiscard]] bool needs_guides(CaseKind kind) noexcept {
-    return kind == CaseKind::vectors || kind == CaseKind::hybrid || kind == CaseKind::extrapolate ||
-           kind == CaseKind::native;
 }
 
 // The graphics card games run on, as DXGI names it.
@@ -415,8 +413,8 @@ void BenchmarkController::initialize_dialog() {
         Group id;
         const wchar_t* header;
     } groups[]{
-        {flow_group, L"Any game: OFXR with optical flow"},
-        {vectors_group, L"Games with DLSS: OFXR with the game's motion vectors"},
+        {flow_group, L"Games without DLSS vectors: OFXR from optical flow"},
+        {vectors_group, L"Games with DLSS vectors: OFXR from the game's motion vectors"},
         {native_group, L"Games with DLSS: NVIDIA DLSS Frame Generation"},
         {triple_group, L"3X Frame Gen: two generated frames per game frame"},
     };
@@ -605,28 +603,36 @@ void BenchmarkController::populate_list() {
     const auto triple_base = shown ? shown->cost_ms(xrfg::benchmark::kOfxrTripleBaseKey) : std::nullopt;
     const auto triple_reference = shown ? shown->cost_ms(xrfg::benchmark::kOfxrTripleReferenceKey) : std::nullopt;
     const sl::Method method = sl::current_method(settings_);
-    const sl::DlssGameMode game_mode = sl::dlss_game_mode(settings_);
+    const sl::OfxrMode mode = sl::ofxr_mode(settings_);
+    const bool ofxr = method != sl::Method::native_dlss;
     const int flow_scale = sl::input_scale_percent(settings_.nvidia_input_scale);
 
+    // What runs with the current settings: in a game without DLSS vectors
+    // the chosen flow, or FidelityFX under the hybrid, or FidelityFX
+    // extrapolation; in a game with them the OFXR mode's own case.
     const auto in_use = [&](const CaseSpec& spec) {
         if ((spec.generated_frames >= 2) != settings_.triple_frame_gen) return false;
         switch (spec.kind) {
         case CaseKind::flow:
-            if (method == sl::Method::native_dlss || spec.input_scale != flow_scale) return false;
-            if (spec.backend == xrfg::benchmark::CaseBackend::fidelity_fx) return method == sl::Method::fidelity_fx;
-            return method != sl::Method::fidelity_fx && spec.bidirectional == settings_.nvidia_bidirectional &&
+            if (!ofxr || mode == sl::OfxrMode::extrapolate || spec.input_scale != flow_scale) return false;
+            if (spec.backend == xrfg::benchmark::CaseBackend::fidelity_fx) {
+                return method == sl::Method::fidelity_fx || mode == sl::OfxrMode::hybrid;
+            }
+            return method != sl::Method::fidelity_fx && mode == sl::OfxrMode::interpolate &&
+                   spec.bidirectional == settings_.nvidia_bidirectional &&
                    spec.preset == (method == sl::Method::nvidia_fast ? xrfg::benchmark::CasePreset::fast
                                    : method == sl::Method::nvidia_slow ? xrfg::benchmark::CasePreset::slow
                                                                         : xrfg::benchmark::CasePreset::medium);
+        case CaseKind::flow_extrapolate:
+            return ofxr && mode == sl::OfxrMode::extrapolate && spec.input_scale == flow_scale;
         case CaseKind::vectors:
-            return method != sl::Method::native_dlss && game_mode == sl::DlssGameMode::vectors;
+            return ofxr && mode == sl::OfxrMode::interpolate;
         case CaseKind::hybrid:
-            return method != sl::Method::native_dlss && game_mode == sl::DlssGameMode::hybrid &&
-                   spec.input_scale == flow_scale;
+            return ofxr && mode == sl::OfxrMode::hybrid && spec.input_scale == flow_scale;
         case CaseKind::extrapolate:
-            return method != sl::Method::native_dlss && game_mode == sl::DlssGameMode::extrapolate;
+            return ofxr && mode == sl::OfxrMode::extrapolate;
         case CaseKind::native:
-            return method == sl::Method::native_dlss && spec.native_scale == settings_.native_scale;
+            return !ofxr && spec.native_scale == settings_.native_scale;
         default:
             return false;
         }
@@ -645,12 +651,13 @@ void BenchmarkController::populate_list() {
         std::wstring notes;
         const bool used = in_use(*spec);
         if (used) {
-            notes = needs_guides(spec->kind) && spec->kind != CaseKind::native ? L"in use in DLSS games"
-                                                                               : L"in use";
+            notes = spec->kind == CaseKind::native ? L"in use"
+                : xrfg::benchmark::uses_game_guides(spec->kind) ? L"in use with DLSS vectors"
+                                                                : L"in use without DLSS vectors";
         }
         LPARAM flags = used ? 1 : 0;
         if (result != nullptr && result->status == CaseStatus::ok) {
-            const double cost = result->median_us / 1000.0 + (needs_guides(spec->kind) ? snapshot_ms : 0.0);
+            const double cost = result->median_us / 1000.0 + (xrfg::benchmark::uses_game_guides(spec->kind) ? snapshot_ms : 0.0);
             const auto estimate = xrfg::benchmark::estimate(cost, hz, frames);
             cells[1] = xrfg::benchmark::format_ms(cost);
             cells[2] = format(L"%.1f%%", estimate.budget_share * 100.0);
@@ -675,7 +682,7 @@ void BenchmarkController::populate_list() {
         if (const auto error = xrfg::benchmark::recorded_error(*spec)) {
             cells[5] = format(L"%.2f ", *error) + xrfg::benchmark::quality_word(*error);
         } else {
-            cells[5] = spec->kind == CaseKind::extrapolate ? L"lower (predicts)" : L"\u2014";
+            cells[5] = xrfg::benchmark::extrapolates(spec->kind) ? L"lower (predicts)" : L"\u2014";
         }
         const int latency_frames = xrfg::benchmark::added_latency_frames(spec->kind, frames);
         cells[6] = latency_frames == 0 ? L"none" : format(L"+%.1f ms", latency_frames * 1000.0 / hz);
@@ -711,7 +718,8 @@ void BenchmarkController::populate_list() {
         L"the gain for a game at exactly that rate; a faster game gains less (nothing goes past " +
         hz_text(hz) + L") and a slower one cannot hold " + hz_text(hz) + L" with that method. 3X is the "
         L"same with " + xrfg::benchmark::format_ms(3 * period) + L" per game frame. Interpolation shows each "
-        L"real frame later (Latency); extrapolation adds no delay but predicts, so it errs more. Quality: "
+        L"real frame later (Latency); extrapolation adds no delay but predicts, so it errs more, and uses "
+        L"FidelityFX flow where a game has no DLSS vectors. Quality: "
         L"error on 42 recorded Galactic Racer frames where the scene moved, lower is better (a plain blend: "
         L"13.0). Games-with-DLSS rows include " + xrfg::benchmark::format_ms(snapshot_ms) +
         L" per game frame to copy the game's motion vectors and depth. Measured on test frames with nothing "
@@ -739,6 +747,9 @@ void BenchmarkController::update_summary() {
             text += L". The driver has changed since.";
         } else if (width != results_->eye_width || height != results_->eye_height) {
             text += L". Run it again for the resolution above.";
+        } else if (results_->drifted()) {
+            text += format(L". Other GPU work changed the times by %.0f%% during the run: close it and "
+                           L"run again.", (results_->drift - 1.0) * 100.0);
         }
     } else {
         text = L"No results yet: choose your headset and press Run benchmark.";
@@ -946,6 +957,10 @@ void BenchmarkController::handle_line(const std::string& line) {
         result.note = rest();
         if (live_) live_->set(std::move(result));
         ++cases_done_;
+        // The tool measures its first case once more at the end.
+        if (case_count_ > 1 && cases_done_ >= case_count_) {
+            status_ = L"Checking that nothing else used the GPU\u2026";
+        }
     } else if (verb == "adapter") {
         std::uint32_t vendor = 0, device = 0;
         std::string driver;
@@ -1000,9 +1015,14 @@ std::optional<BenchmarkNotice> BenchmarkController::on_finished() {
             results_ = std::move(run);
             save_results();
             status_ = L"Finished.";
-            notice = BenchmarkNotice{L"Benchmark finished",
-                                     L"Each method in the OFXR Bridge menu now shows what it costs on this PC.",
-                                     false};
+            notice = results_->drifted()
+                ? BenchmarkNotice{L"Benchmark finished, but the GPU was busy",
+                                  L"Something else used the graphics card during the run, so the times "
+                                  L"are uncertain. Close games and other GPU work and run it again.",
+                                  true}
+                : BenchmarkNotice{L"Benchmark finished",
+                                  L"Each method in the OFXR Bridge menu now shows what it costs on this PC.",
+                                  false};
         } else {
             wchar_t exit_text[16]{};
             std::swprintf(exit_text, std::size(exit_text), L"0x%08X", static_cast<unsigned>(code));

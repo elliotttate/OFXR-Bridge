@@ -470,7 +470,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             # NVIDIA flow and native generation answer "unavailable" there.
             add_test(NAME xrfg_benchmark_tool_warp
                 COMMAND OFXRBenchmark --warp --eye 256x256 --warmup 1 --pairs 4
-                    --cases ffx_50,ffx_50_3x,vectors,hybrid_50,extrapolate,guide_snapshot,nv_medium_50,native_67
+                    --cases ffx_50,ffx_50_3x,vectors,hybrid_50,extrapolate,extrapolate_ffx_50,guide_snapshot,nv_medium_50,native_67
                     --output "${CMAKE_CURRENT_BINARY_DIR}/benchmark-tool-warp.ini")
             set_tests_properties(xrfg_benchmark_tool_warp PROPERTIES TIMEOUT 120
                 FAIL_REGULAR_EXPRESSION "result [a-z0-9_]+ failed;error ")

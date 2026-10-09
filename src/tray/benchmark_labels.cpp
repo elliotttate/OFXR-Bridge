@@ -87,15 +87,19 @@ void apply_method(LauncherSettings& settings, Method method) noexcept {
     }
 }
 
-DlssGameMode dlss_game_mode(const LauncherSettings& settings) noexcept {
-    if (settings.dlss_flow_hybrid) return DlssGameMode::hybrid;
-    if (settings.extrapolate) return DlssGameMode::extrapolate;
-    return DlssGameMode::vectors;
+OfxrMode ofxr_mode(const LauncherSettings& settings) noexcept {
+    if (settings.extrapolate) return OfxrMode::extrapolate;
+    if (settings.dlss_flow_hybrid) return OfxrMode::hybrid;
+    return OfxrMode::interpolate;
 }
 
-void apply_dlss_game_mode(LauncherSettings& settings, DlssGameMode mode) noexcept {
-    settings.dlss_flow_hybrid = mode == DlssGameMode::hybrid;
-    settings.extrapolate = mode == DlssGameMode::extrapolate;
+void apply_ofxr_mode(LauncherSettings& settings, OfxrMode mode) noexcept {
+    settings.dlss_flow_hybrid = mode == OfxrMode::hybrid;
+    settings.extrapolate = mode == OfxrMode::extrapolate;
+}
+
+bool mode_forces_fidelity_fx(OfxrMode mode) noexcept {
+    return mode != OfxrMode::interpolate;
 }
 
 int input_scale_percent(NvidiaInputScale scale) noexcept {
@@ -118,18 +122,20 @@ std::wstring method_name(Method method) {
     }
 }
 
-std::wstring dlss_game_mode_name(DlssGameMode mode) {
+std::wstring ofxr_mode_name(OfxrMode mode) {
     switch (mode) {
-    case DlssGameMode::hybrid: return L"game's motion vectors + FidelityFX flow";
-    case DlssGameMode::extrapolate: return L"extrapolation from the game's motion vectors";
-    case DlssGameMode::vectors:
-    default: return L"the game's motion vectors";
+    case OfxrMode::hybrid: return L"interpolating, DLSS vectors + FidelityFX flow";
+    case OfxrMode::extrapolate: return L"extrapolating, SpaceWarp-style";
+    case OfxrMode::interpolate:
+    default: return L"interpolating, with DLSS vectors where a game has them";
     }
 }
 
 std::wstring active_method_summary(const LauncherSettings& settings) {
     const Method method = current_method(settings);
-    std::wstring text = method_name(method);
+    // The engine that runs: the hybrid and extrapolation take FidelityFX.
+    std::wstring text = method_name(method != Method::native_dlss && mode_forces_fidelity_fx(ofxr_mode(settings))
+                                        ? Method::fidelity_fx : method);
     if (method == Method::native_dlss) {
         text += L" " + std::to_wstring(settings.native_scale) + L"%";
     } else {
@@ -148,32 +154,39 @@ ModeCost method_cost(const benchmark::Results& results, const LauncherSettings& 
                       benchmark::CaseKind::native, true);
     }
     const int scale = query.input_scale.value_or(input_scale_percent(settings.nvidia_input_scale));
-    const bool nvidia = method != Method::fidelity_fx;
-    const bool bidirectional = nvidia && query.bidirectional.value_or(settings.nvidia_bidirectional);
-    ModeCost cost = lookup(results,
-        benchmark::flow_case_key(nvidia ? benchmark::CaseBackend::nvidia
-                                        : benchmark::CaseBackend::fidelity_fx,
-                                 case_preset(method), scale, bidirectional),
-        benchmark::CaseKind::flow, false);
+    const OfxrMode mode = ofxr_mode(settings);
+    ModeCost cost;
+    if (mode == OfxrMode::extrapolate) {
+        cost = lookup(results, benchmark::flow_extrapolate_case_key(scale),
+                      benchmark::CaseKind::flow_extrapolate, false);
+    } else {
+        const bool nvidia = method != Method::fidelity_fx && !mode_forces_fidelity_fx(mode);
+        const bool bidirectional = nvidia && query.bidirectional.value_or(settings.nvidia_bidirectional);
+        cost = lookup(results,
+            benchmark::flow_case_key(nvidia ? benchmark::CaseBackend::nvidia
+                                            : benchmark::CaseBackend::fidelity_fx,
+                                     case_preset(method), scale, bidirectional),
+            benchmark::CaseKind::flow, false);
+    }
     if (triple) add_triple(results, cost);
     return cost;
 }
 
-ModeCost dlss_game_cost(const benchmark::Results& results, const LauncherSettings& settings,
-                        DlssGameMode mode, const CostQuery& query) {
+ModeCost ofxr_mode_cost(const benchmark::Results& results, const LauncherSettings& settings,
+                        OfxrMode mode, const CostQuery& query) {
     const bool triple = query.triple.value_or(settings.triple_frame_gen);
     ModeCost cost;
     switch (mode) {
-    case DlssGameMode::hybrid:
+    case OfxrMode::hybrid:
         cost = lookup(results,
             benchmark::hybrid_case_key(query.input_scale.value_or(
                 input_scale_percent(settings.nvidia_input_scale))),
             benchmark::CaseKind::hybrid, true);
         break;
-    case DlssGameMode::extrapolate:
+    case OfxrMode::extrapolate:
         cost = lookup(results, benchmark::kExtrapolateKey, benchmark::CaseKind::extrapolate, true);
         break;
-    case DlssGameMode::vectors:
+    case OfxrMode::interpolate:
     default:
         cost = lookup(results, benchmark::kVectorsKey, benchmark::CaseKind::vectors, true);
         break;

@@ -15,13 +15,18 @@ namespace xrfg::benchmark {
 
 // One measured configuration of the synthesizer.
 enum class CaseKind {
-    flow,           // OFXR from optical flow alone: any game
-    vectors,        // OFXR from the game's DLSS motion vectors
-    hybrid,         // the game's vectors and FidelityFX flow, per pixel
-    extrapolate,    // SpaceWarp-style prediction from the vectors and depth
-    native,         // NVIDIA DLSS Frame Generation through NGX
-    guide_snapshot, // the copy of the game's vectors and depth, per game frame
+    flow,             // OFXR interpolating from optical flow alone: any game
+    flow_extrapolate, // SpaceWarp-style prediction from FidelityFX flow: no vectors
+    vectors,          // OFXR interpolating from the game's DLSS motion vectors
+    hybrid,           // the game's vectors and FidelityFX flow, per pixel
+    extrapolate,      // SpaceWarp-style prediction from the vectors and depth
+    native,           // NVIDIA DLSS Frame Generation through NGX
+    guide_snapshot,   // the copy of the game's vectors and depth, per game frame
 };
+// Whether a kind runs on the game's DLSS vectors (and so needs their copy).
+[[nodiscard]] bool uses_game_guides(CaseKind kind) noexcept;
+// Whether a kind predicts past the real frame rather than interpolating.
+[[nodiscard]] bool extrapolates(CaseKind kind) noexcept;
 enum class CaseBackend { fidelity_fx, nvidia };
 enum class CasePreset { fast, medium, slow };
 
@@ -46,6 +51,7 @@ struct CaseSpec {
 [[nodiscard]] std::string flow_case_key(
     CaseBackend backend, CasePreset preset, int input_scale, bool bidirectional);
 [[nodiscard]] std::string hybrid_case_key(int input_scale);
+[[nodiscard]] std::string flow_extrapolate_case_key(int input_scale);
 [[nodiscard]] std::string native_case_key(int native_scale, bool triple);
 inline constexpr std::string_view kVectorsKey = "vectors";
 inline constexpr std::string_view kExtrapolateKey = "extrapolate";
@@ -89,7 +95,14 @@ struct Results {
     // measurement: changing it only changes the arithmetic.
     double refresh_hz{90.0};
     std::string date;
+    // The first case measured again at the end, over its first time: well
+    // away from 1 means something else used the GPU during the run. 0 when
+    // it was not checked.
+    double drift{};
     std::vector<CaseResult> cases;
+
+    // Whether the GPU's load changed enough during the run to doubt it.
+    [[nodiscard]] bool drifted() const noexcept;
 
     [[nodiscard]] const CaseResult* find(std::string_view key) const noexcept;
     // The case's median in milliseconds, when it ran.

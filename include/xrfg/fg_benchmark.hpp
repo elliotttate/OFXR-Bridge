@@ -55,6 +55,9 @@ struct Callbacks {
     std::function<void(const AdapterInfo&)> adapter;
     std::function<void(std::size_t index, std::size_t count, const benchmark::CaseSpec&)> begin;
     std::function<void(const benchmark::CaseResult&)> result;
+    // After the last case the first is measured again: its new time over its
+    // first. Far from 1, something else used the GPU during the run.
+    std::function<void(double ratio)> drift;
 };
 
 // Runs each case and reports its answer: ok with times, unavailable with a
