@@ -14,6 +14,7 @@
 #include "game_motion_synthesize_midpoint_pixel_shader.hpp"
 #include "hybrid_synthesize_midpoint_pixel_shader.hpp"
 #include "extrapolate_pixel_shader.hpp"
+#include "extrapolate_flow_pixel_shader.hpp"
 #include "nvidia_bidirectional_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_synthesize_midpoint_pixel_shader.hpp"
 #include "nvidia_fast_bidirectional_synthesize_midpoint_pixel_shader.hpp"
@@ -795,6 +796,7 @@ struct D3D12FrameSynthesizer::Impl {
     ComPtr<ID3D12PipelineState> game_motion_graphics_pipeline;
     ComPtr<ID3D12PipelineState> hybrid_graphics_pipeline;
     ComPtr<ID3D12PipelineState> extrapolate_graphics_pipeline;
+    ComPtr<ID3D12PipelineState> extrapolate_flow_graphics_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_luma_pack_pipeline;
     ComPtr<ID3D12PipelineState> nvidia_graphics_pipeline;
@@ -1152,6 +1154,17 @@ struct D3D12FrameSynthesizer::Impl {
         result = device->CreateGraphicsPipelineState(
             &graphics_description,
             IID_PPV_ARGS(extrapolate_graphics_pipeline.GetAddressOf()));
+        if (FAILED(result)) {
+            return result;
+        }
+
+        graphics_description.PS = {
+            g_xrfg_extrapolate_flow_pixel_shader,
+            sizeof(g_xrfg_extrapolate_flow_pixel_shader),
+        };
+        result = device->CreateGraphicsPipelineState(
+            &graphics_description,
+            IID_PPV_ARGS(extrapolate_flow_graphics_pipeline.GetAddressOf()));
         if (FAILED(result)) {
             return result;
         }
@@ -3957,7 +3970,10 @@ struct D3D12FrameSynthesizer::Impl {
                 gpu_start,
                 kSrvDescriptorCount,
                 descriptor_increment));
-        slot.command_list->SetPipelineState(guides ? hybrid_graphics_pipeline.Get() : graphics_pipeline.Get());
+        // Without the game's vectors, extrapolation follows FidelityFX's flow.
+        slot.command_list->SetPipelineState(guides ? hybrid_graphics_pipeline.Get()
+            : nvidia_options.extrapolate ? extrapolate_flow_graphics_pipeline.Get()
+            : graphics_pipeline.Get());
         dred_marker(slot.command_list.Get(), "OFXR FidelityFX composition draw");
         // The guides' motion is read by the hybrid composition.
         const auto motion_barriers = [&](bool to_read) {
@@ -3982,7 +3998,9 @@ struct D3D12FrameSynthesizer::Impl {
             rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
             parameters.synthesis_flags = (parameters.synthesis_flags & 0xFFU) |
-                packed_synthesis_fraction(synthetic_output_fraction(output));
+                packed_synthesis_fraction(nvidia_options.extrapolate && !guides
+                    ? (synthetic_output_fraction(output) - 1.0F) * 0.5F
+                    : synthetic_output_fraction(output));
             const UINT first_rtv =
                 synthetic_output_destination(output, synthetic_destination_index) *
                 image_description.DepthOrArraySize;

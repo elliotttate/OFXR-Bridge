@@ -239,11 +239,13 @@ their two samples must disagree and the flow can look the better explanation.
 
 **Extrapolation, SpaceWarp-style.** Every interpolating method, NVIDIA's
 included, holds each real frame back a display period, to show a frame
-between it and the one before first. With `[ofxr] extrapolate=1`, in a game
-with DLSS vectors and depth, OFXR shows each real frame as soon as it is
-ready, at its own display time, and then predicts the next display period
-from it, as Meta's Application SpaceWarp does: a display period less latency,
-for the quality of a prediction.
+between it and the one before first. With `[ofxr] extrapolate=1`, OFXR shows
+each real frame as soon as it is ready, at its own display time, and then
+predicts the next display period from it, as Meta's Application SpaceWarp
+does: a display period less latency, for the quality of a prediction. It
+follows the game's DLSS vectors and depth where the game has them, and
+FidelityFX's optical flow where it does not, as Meta's Asynchronous SpaceWarp
+does.
 
 - Each pixel of the prediction is the point of the real frame whose motion -
   the game's vectors less the head's turn, which the runtime's own
@@ -254,7 +256,10 @@ for the quality of a prediction.
   stretched over it, as Meta's mesh warp stretches.
 - Predicting a whole frame ahead from recorded frames, a harder test than the
   half frame a headset needs, it erred 12.7 where the scene moved, against
-  20.6 for showing the last frame again, with SSIM 0.679 against 0.489.
+  20.6 for showing the last frame again, with SSIM 0.679 against 0.489. From
+  FidelityFX's flow instead it erred 12.4 (12.1 at full resolution), with
+  SSIM 0.651: the flow follows a shadow the vectors move with the ground, but
+  leaves more structure out of place.
 - It costs 0.43 ms a pair offline, and a median 1.1-1.25 ms live in Galactic
   Racer, less than native generation at 67%.
 - Content its vectors do not describe, such as a shadow on ground rushing
@@ -267,8 +272,9 @@ for the quality of a prediction.
 | A directly loaded layer (`ofxr_bridge.ini`) | `[ofxr] dlss_flow_hybrid=1` | `[ofxr] extrapolate=1` |
 | For tests, the game's environment | `XRFG_TEST_DLSS_FLOW_HYBRID=1` | `XRFG_TEST_EXTRAPOLATE=1` |
 
-Both apply to OFXR's own algorithm with the game's DLSS vectors, and are read
-when the game starts its OpenXR session. Extrapolation wins if both are set.
+Both apply to OFXR's own algorithm and take the FidelityFX backend; the
+hybrid needs the game's DLSS vectors. Both are read when the game starts its
+OpenXR session, and extrapolation wins if both are set.
 
 ## Other changes in this fork
 

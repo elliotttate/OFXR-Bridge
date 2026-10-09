@@ -499,8 +499,9 @@ void replay_held_out(const std::filesystem::path& directory) {
                                                    : xrfg::D3D12OpticalFlowInputScale::half,
                      parts[0] == "vectors" || parts[0] == "hybrid"};
             m.hybrid = parts[0] == "hybrid";
-            m.extrapolate = parts[0] == "extrapolate";
-            m.guides = m.guides || m.extrapolate;
+            // extrapolate_flow extrapolates from FidelityFX's flow, without guides.
+            m.extrapolate = parts[0] == "extrapolate" || parts[0] == "extrapolate_flow";
+            m.guides = m.guides || parts[0] == "extrapolate";
             m.preset = parts[1] == "slow"   ? xrfg::D3D12NvidiaPerformancePreset::slow
                        : parts[1] == "fast" ? xrfg::D3D12NvidiaPerformancePreset::fast
                                             : xrfg::D3D12NvidiaPerformancePreset::medium;

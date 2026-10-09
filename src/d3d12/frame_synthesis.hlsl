@@ -1074,19 +1074,24 @@ bool nearer(float a, float b) {
     return (SynthesisFlags & 4u) != 0 ? a > b : a < b;
 }
 
-float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
-    hybrid_layout = true;
-    uint2 integer_pixel = uint2(input.position.xy);
-    float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
-    if (integer_pixel.x >= Width || integer_pixel.y >= Height || Slice >= ArraySize) {
-        return output_color;
+// Extrapolation from FidelityFX's optical flow, as Asynchronous SpaceWarp
+// does, for games without DLSS vectors: the flow's B-to-A offset, less the
+// head's turn, stands in for the game's motion, and with no depth the
+// surfaces are ordered by their motion.
+static bool extrapolate_flow = false;
+float2 extrapolation_displacement(float2 q) {
+    if (extrapolate_flow) {
+        float2 raw = flow_for_pixel(q, Slice, ViewIndex, 1.0, false);
+        return raw - (map_target_to_source(q, PreviousMappings[ViewIndex]).coordinate - q);
     }
-    float2 pixel = float2(integer_pixel);
-    CameraSample here = sample_current_target(pixel, Slice, ViewIndex);
-    output_color = saturate(here.color);
-    if (repeated_capture_flag() != 0) {
-        return output_color;
-    }
+    return game_displacement(q);
+}
+float2 extrapolation_motion_texel(float2 q) {
+    return extrapolate_flow ? flow_for_pixel(q, Slice, ViewIndex, 1.0, false) : game_motion_texel(q);
+}
+
+float4 extrapolate_pixel(float2 pixel, CameraSample here) {
+    float4 output_color = saturate(here.color);
     float s = 2.0 * synthesis_fraction();
     bool depth = extrapolation_depth();
     // The surface each candidate settles on is ranked by B's depth there,
@@ -1101,13 +1106,13 @@ float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
     // within 48 pixels either way - no other surface can move in over it,
     // and its own solve is the answer: the search runs near motion edges
     // only. A smooth gradient, such as ground rushing past, is not a step.
-    float2 here_motion = game_motion_texel(pixel);
+    float2 here_motion = extrapolation_motion_texel(pixel);
     bool smooth_motion = true;
     [unroll] for (uint probe = 0; probe < 4; ++probe) {
         float radius = (probe & 2) != 0 ? 48.0 : 16.0;
         float2 offset = (probe & 1) != 0 ? float2(0, radius) : float2(radius, 0);
-        smooth_motion = smooth_motion && length(game_motion_texel(pixel + offset) +
-                                  game_motion_texel(pixel - offset) - 2.0 * here_motion) < 1.0;
+        smooth_motion = smooth_motion && length(extrapolation_motion_texel(pixel + offset) +
+                                  extrapolation_motion_texel(pixel - offset) - 2.0 * here_motion) < 1.0;
     }
     uint candidates = smooth_motion ? 1 : 9;
     [loop] for (uint candidate = 0; candidate < candidates; ++candidate) {
@@ -1118,14 +1123,14 @@ float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
             uint direction = (candidate - 1) % 4;
             float2 offset = direction == 0 ? float2(radius, 0) : direction == 1 ? float2(-radius, 0)
                           : direction == 2 ? float2(0, radius) : float2(0, -radius);
-            start = pixel + s * game_displacement(pixel + offset);
+            start = pixel + s * extrapolation_displacement(pixel + offset);
         }
         float2 q = start;
         bool converged = false;
         float motion = 0.0;
         float2 settled = q;
         [unroll] for (uint step = 0; step < 3; ++step) {
-            float2 d = game_displacement(q);
+            float2 d = extrapolation_displacement(q);
             motion = length(d);
             // The farthest point visited fills a hole.
             float rank = depth ? game_depth(q) : -motion;
@@ -1153,6 +1158,27 @@ float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
         output_color = saturate(b.color);
     }
     return output_color;
+}
+
+float4 extrapolate(FullscreenVertex input) {
+    uint2 integer_pixel = uint2(input.position.xy);
+    float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
+    if (integer_pixel.x < Width && integer_pixel.y < Height && Slice < ArraySize) {
+        CameraSample here = sample_current_target(float2(integer_pixel), Slice, ViewIndex);
+        output_color = repeated_capture_flag() != 0 ? saturate(here.color)
+                                                     : extrapolate_pixel(float2(integer_pixel), here);
+    }
+    return output_color;
+}
+
+float4 SynthesizeExtrapolatedPS(FullscreenVertex input) : SV_Target {
+    hybrid_layout = true;
+    return extrapolate(input);
+}
+
+float4 SynthesizeExtrapolatedFlowPS(FullscreenVertex input) : SV_Target {
+    extrapolate_flow = true;
+    return extrapolate(input);
 }
 
 // The game's vectors and FidelityFX's optical flow both: per pixel, whichever

@@ -122,11 +122,12 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_dlss_flow_hybrid(
     const std::filesystem::path& module_directory) noexcept;
 
-// `[ofxr] extrapolate`: in a game with DLSS vectors and depth, OFXR shows
-// each real frame at once and then predicts the next display period from it,
-// as Application SpaceWarp does, instead of interpolating before it: a
-// display period less latency, for the quality of a prediction. Off unless
-// set to 1, or with XRFG_TEST_EXTRAPOLATE=1. Read at xrCreateSession.
+// `[ofxr] extrapolate`: OFXR shows each real frame at once and then predicts
+// the next display period from it, as Application SpaceWarp does, instead of
+// interpolating before it: a display period less latency, for the quality of
+// a prediction. It follows the game's DLSS vectors and depth where it has
+// them, and FidelityFX's optical flow where it does not. Off unless set to 1,
+// or with XRFG_TEST_EXTRAPOLATE=1. Read at xrCreateSession.
 [[nodiscard]] bool read_extrapolate(
     const std::filesystem::path& module_directory) noexcept;
 

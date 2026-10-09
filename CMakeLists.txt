@@ -132,6 +132,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
     set(XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/game_motion_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/hybrid_synthesize_midpoint_pixel_shader.hpp")
     set(XRFG_EXTRAPOLATE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_pixel_shader.hpp")
+    set(XRFG_EXTRAPOLATE_FLOW_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/extrapolate_flow_pixel_shader.hpp")
     set(XRFG_NVIDIA_PACK_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_pack_flow_input_shader.hpp")
     set(XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_pack_luma_input_shader.hpp")
     set(XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER "${XRFG_GENERATED_SHADER_DIR}/nvidia_synthesize_midpoint_pixel_shader.hpp")
@@ -146,6 +147,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}"
             "${XRFG_EXTRAPOLATE_PIXEL_HEADER}"
+            "${XRFG_EXTRAPOLATE_FLOW_PIXEL_HEADER}"
             "${XRFG_NVIDIA_PACK_INPUT_HEADER}"
             "${XRFG_NVIDIA_PACK_LUMA_INPUT_HEADER}"
             "${XRFG_NVIDIA_SYNTHESIZE_PIXEL_HEADER}"
@@ -176,6 +178,10 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeExtrapolatedPS
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
             /Fh "${XRFG_EXTRAPOLATE_PIXEL_HEADER}" /Vn g_xrfg_extrapolate_pixel_shader
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T ps_5_1 /E SynthesizeExtrapolatedFlowPS
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
+            /Fh "${XRFG_EXTRAPOLATE_FLOW_PIXEL_HEADER}" /Vn g_xrfg_extrapolate_flow_pixel_shader
             "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/frame_synthesis.hlsl"
         COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E PackNvidiaFlowInput
             /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect
@@ -219,6 +225,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         "${XRFG_GAME_MOTION_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_HYBRID_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_EXTRAPOLATE_PIXEL_HEADER}"
+        "${XRFG_EXTRAPOLATE_FLOW_PIXEL_HEADER}"
         "${XRFG_FULLSCREEN_VERTEX_HEADER}"
         "${XRFG_SYNTHESIZE_PIXEL_HEADER}"
         "${XRFG_NVIDIA_PACK_INPUT_HEADER}"

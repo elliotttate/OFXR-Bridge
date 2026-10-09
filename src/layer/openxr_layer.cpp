@@ -4788,17 +4788,17 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
         xrfg::native_dlssg_max_generated_frames(state.d3d12_device.Get()) < 2U;
 }
 
-// The tray's synthesis modes for OFXR's own algorithm, which work from the
-// game's DLSS vectors: extrapolation first, else the hybrid with FidelityFX's
-// flow, which takes the FidelityFX backend.
+// The tray's synthesis modes for OFXR's own algorithm: extrapolation, from
+// the game's DLSS vectors and depth where it has them and from FidelityFX's
+// flow where it does not; else the hybrid of the game's vectors and
+// FidelityFX's flow. Both take the FidelityFX backend.
 void synthesis_modes(const SessionState& state, bool dlss_motion_vectors,
                      xrfg::D3D12NvidiaOpticalFlowOptions& options,
                      xrfg::D3D12OpticalFlowBackend& backend) noexcept {
-    const bool ofxr_vectors = dlss_motion_vectors &&
-        options.frame_generation == xrfg::D3D12FrameGeneration::ofxr;
-    options.extrapolate = state.extrapolate && ofxr_vectors;
-    options.hybrid = state.dlss_flow_hybrid && ofxr_vectors && !options.extrapolate;
-    if (options.hybrid) {
+    const bool ofxr = options.frame_generation == xrfg::D3D12FrameGeneration::ofxr;
+    options.extrapolate = state.extrapolate && ofxr;
+    options.hybrid = state.dlss_flow_hybrid && ofxr && dlss_motion_vectors && !options.extrapolate;
+    if (options.hybrid || options.extrapolate) {
         backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     }
 }

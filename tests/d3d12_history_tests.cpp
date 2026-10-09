@@ -5092,10 +5092,14 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorSc
 // detailed background moves 20 pixels a frame over it while the background
 // moves 6. Where the object will have gone, the background is unknown and
 // stretched; everywhere else the frame should be the scene half a frame on.
-void test_dlss_extrapolation(D3D12WarpFixture& fixture) {
+// flow: without guides, from FidelityFX's optical flow instead. That needs a
+// hardware adapter: on WARP FidelityFX finds no flow in this scene. Its flow
+// is coarse on this small striped scene, so it is held to beating a repeat.
+void test_dlss_extrapolation(D3D12WarpFixture& fixture, bool flow = false) {
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
-    constexpr int background_motion = 6, object_motion = 20;
+    // FidelityFX takes larger jumps of this small scene for a cut.
+    const int background_motion = flow ? 2 : 6, object_motion = flow ? 8 : 20;
     const auto in_object = [&](int x, int y, int shift) {
         const int ox = x - shift;
         return y >= object_top && y < object_bottom && ox >= object_left && ox < object_left + object_width;
@@ -5184,13 +5188,14 @@ void test_dlss_extrapolation(D3D12WarpFixture& fixture) {
     require(operation_succeeded(history->capture(0, &capture_a)) &&
                 operation_succeeded(history->commit(capture_a)), "extrapolation capture A failed");
     xrfg::D3D12FrameSynthesisTicket prime{}, pair{};
-    require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime, guides(1))),
+    require(operation_succeeded(synthesizer.submit_prime(capture_a, views, 0, &prime,
+                flow ? nullptr : guides(1))),
         "extrapolation prime failed");
     require_frame_start_gate(synthesizer, "extrapolation frame-start gate");
     require(operation_succeeded(history->capture(1, &capture_b)) &&
                 operation_succeeded(history->commit(capture_b)), "extrapolation capture B failed");
     require(operation_succeeded(synthesizer.submit_pair(capture_b, views, views, 0, 1, &pair,
-                std::nullopt, guides(2), false, 1.5F)), "extrapolation pair failed");
+                std::nullopt, flow ? nullptr : guides(2), false, 1.5F)), "extrapolation pair failed");
     fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
     const StereoPattern actual = readback_pattern(fixture, synthetic_destinations[0].Get(),
         D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -5216,10 +5221,10 @@ void test_dlss_extrapolation(D3D12WarpFixture& fixture) {
                 }
             }
         }
-        std::cout << "extrapolation eye=" << eye << " mae=" << error / double(count)
+        std::cout << (flow ? "flow " : "") << "extrapolation eye=" << eye << " mae=" << error / double(count)
                   << " repeat_mae=" << repeat / double(count)
                   << " uncovered_mae=" << uncovered / double(uncovered_count) << '\n';
-        require(error / double(count) < 2.0 && error < repeat * 0.1,
+        require(flow ? error < repeat : error / double(count) < 2.0 && error < repeat * 0.1,
             "extrapolation did not move the scene on for eye " + std::to_string(eye));
     }
     require(operation_succeeded(synthesizer.wait_for_idle()), "extrapolation final drain failed");
@@ -6280,6 +6285,7 @@ int main() {
             native_options.native_scale=100;
             test_rotation_aware_synthesis_beats_uncompensated_flow(native_fixture,
                 xrfg::D3D12OpticalFlowBackend::fidelity_fx,native_options);
+            test_dlss_extrapolation(native_fixture, true);
             native_fixture.require_no_debug_errors();
             std::cout << "Native DLSS FG stereo, real-copy, reset and missing-depth tests passed\n";
             return 0;
