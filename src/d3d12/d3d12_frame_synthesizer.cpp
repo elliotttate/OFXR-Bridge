@@ -4719,8 +4719,9 @@ struct D3D12FrameSynthesizer::Impl {
                 return E_INVALIDARG;
             }
             extra_synthetic_destination = extra_synthetic->destination_index;
-            extra_synthetic_fraction =
-                usable_fraction(extra_synthetic->interpolation_fraction);
+            extra_synthetic_fraction = nvidia_options.extrapolate
+                ? std::clamp(extra_synthetic->interpolation_fraction, 1.0F, 3.0F)
+                : usable_fraction(extra_synthetic->interpolation_fraction);
         }
         const bool repeated_capture =
             previous.active() && current.serial == previous.ticket.serial &&

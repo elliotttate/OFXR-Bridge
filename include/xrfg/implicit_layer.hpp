@@ -115,6 +115,21 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_triple_frame_gen(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] dlss_flow_hybrid`: in a game with DLSS vectors, OFXR runs
+// FidelityFX's optical flow as well and composes each pixel from whichever
+// explains both frames better. Off unless set to 1, or with the environment
+// variable XRFG_TEST_DLSS_FLOW_HYBRID=1. Read at xrCreateSession.
+[[nodiscard]] bool read_dlss_flow_hybrid(
+    const std::filesystem::path& module_directory) noexcept;
+
+// `[ofxr] extrapolate`: in a game with DLSS vectors and depth, OFXR shows
+// each real frame at once and then predicts the next display period from it,
+// as Application SpaceWarp does, instead of interpolating before it: a
+// display period less latency, for the quality of a prediction. Off unless
+// set to 1, or with XRFG_TEST_EXTRAPOLATE=1. Read at xrCreateSession.
+[[nodiscard]] bool read_extrapolate(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] vulkan_session_bridge`: a Vulkan game's session is handed to the
 // runtime as a D3D12 one on the layer's device, the game rendering into
 // Vulkan imports of the layer's shared textures, so every path downstream is

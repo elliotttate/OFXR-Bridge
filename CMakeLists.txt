@@ -814,6 +814,21 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
             set_tests_properties(xrfg_layer_shallow_${mode} PROPERTIES TIMEOUT 60)
         endforeach()
+        # Extrapolation, as Application SpaceWarp does: the real frame goes
+        # down first and the synthetic a display period after it, inline, on
+        # the presenter and pipelined.
+        foreach(mode default steamvr-presenter flight-simulator uevr-pipelined-time)
+            add_test(
+                NAME xrfg_layer_extrapolate_${mode}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                    "-DEXTRAPOLATE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_extrapolate.ini"
+                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/extrapolate-${mode}"
+                    "-DMODE=${mode}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_extrapolation.cmake")
+            set_tests_properties(xrfg_layer_extrapolate_${mode} PROPERTIES TIMEOUT 60)
+        endforeach()
         # "3X Frame Gen": two synthetics per application frame. The bridged
         # D3D11 scenario runs it inline and its own assertions hold whatever
         # the multiplier; the SteamVR one runs it on the presenter and is

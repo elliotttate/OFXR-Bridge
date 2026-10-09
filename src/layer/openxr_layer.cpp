@@ -990,6 +990,12 @@ struct SessionState {
     // the session move between them without making a swapchain. Cleared
     // with the ring by fall_back_to_shallow_pipeline.
     bool two_slot_synthetic_ring{};
+    // `[ofxr] dlss_flow_hybrid` and `[ofxr] extrapolate`, read at
+    // xrCreateSession; see nvidia_options_for.
+    bool dlss_flow_hybrid{};
+    // Extrapolation shows the real frame first and the synthetics after it,
+    // each predicted from it, instead of interpolating before it.
+    bool extrapolate{};
     // One private swapchain per output with staging textures, where the
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
@@ -2325,6 +2331,22 @@ void enter_generation_quarantine(
 [[nodiscard]] XrTime add_display_duration(
     XrTime time,
     XrDuration duration) noexcept;
+
+// How far past the runtime's prediction the application's frame is anchored:
+// a virtual period when it is the last of its group, as interpolation shows
+// it, and that less the group's other display periods when extrapolation
+// shows it first.
+[[nodiscard]] XrDuration extrapolation_shown_sooner(
+    const SessionState& state,
+    XrDuration virtual_period,
+    XrDuration period) noexcept {
+    if (!state.nvidia_options.extrapolate || period <= 0 || virtual_period <= period) {
+        return virtual_period;
+    }
+    const XrDuration sooner =
+        period * (static_cast<XrDuration>(state.frames_per_application_frame.load()) - 1);
+    return virtual_period > sooner ? virtual_period - sooner : virtual_period;
+}
 
 void drain_swapchain_gpu(const std::shared_ptr<SwapchainState>& state) noexcept {
     const auto flight_token = xrfg::bridge_flight_logger().begin(
@@ -4766,6 +4788,21 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
         xrfg::native_dlssg_max_generated_frames(state.d3d12_device.Get()) < 2U;
 }
 
+// The tray's synthesis modes for OFXR's own algorithm, which work from the
+// game's DLSS vectors: extrapolation first, else the hybrid with FidelityFX's
+// flow, which takes the FidelityFX backend.
+void synthesis_modes(const SessionState& state, bool dlss_motion_vectors,
+                     xrfg::D3D12NvidiaOpticalFlowOptions& options,
+                     xrfg::D3D12OpticalFlowBackend& backend) noexcept {
+    const bool ofxr_vectors = dlss_motion_vectors &&
+        options.frame_generation == xrfg::D3D12FrameGeneration::ofxr;
+    options.extrapolate = state.extrapolate && ofxr_vectors;
+    options.hybrid = state.dlss_flow_hybrid && ofxr_vectors && !options.extrapolate;
+    if (options.hybrid) {
+        backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
+    }
+}
+
 XrResult layer_create_session_impl(
     XrInstance instance,
     const XrSessionCreateInfo* create_info,
@@ -4796,6 +4833,16 @@ XrResult layer_create_session_impl(
     // the private swapchain rings and the admission bounds.
     state->deep_pipeline =
         xrfg::implicit_layer::read_deep_pipeline(current_layer_directory());
+    state->dlss_flow_hybrid =
+        xrfg::implicit_layer::read_dlss_flow_hybrid(current_layer_directory());
+    state->extrapolate =
+        xrfg::implicit_layer::read_extrapolate(current_layer_directory());
+    if (state->extrapolate) {
+        // Extrapolation is there for latency, and its synthetics already
+        // trail the real frame by a period: the deeper pipeline's held
+        // period would only add latency back.
+        state->deep_pipeline = false;
+    }
     const bool triple_requested =
         xrfg::implicit_layer::read_triple_frame_gen(current_layer_directory());
     state->single_swapchain_rings =
@@ -4808,6 +4855,8 @@ XrResult layer_create_session_impl(
     state->recorder_applied = xrfg::bridge_flight_logger().enabled();
     state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1 || initial_control.desired.frame_generation == 1;
+    synthesis_modes(*state, state->dlss_motion_vectors, state->nvidia_options,
+                    state->optical_flow_backend);
     state->control_revision = initial_control.revision;
     xrfg::embedded::applied(state->control_id, state->control_revision, state->menu_enabled, 0);
     XrStructureType binding_structure_type = XR_TYPE_UNKNOWN;
@@ -5039,8 +5088,11 @@ XrResult layer_create_session_impl(
         state->frames_per_application_frame = 3;
         state->deep_pipeline = false;
     }
+    // Extrapolation's synthetic is shown after the real frame, so it can
+    // still be queued when the next pair composes: it needs the second slot.
     state->two_slot_synthetic_ring =
-        state->deep_pipeline || state->frames_per_application_frame > 2 || triple_limited;
+        state->deep_pipeline || state->frames_per_application_frame > 2 || triple_limited ||
+        state->extrapolate;
     state->triple_switchable =
         triple_binding && state->two_slot_synthetic_ring;
     if (triple_binding && !state->triple_switchable) {
@@ -5455,10 +5507,13 @@ XrResult layer_wait_frame_impl(
                 state->frames_per_application_frame);
         // The application's timeline is anchored to the runtime's own
         // prediction, one virtual period ahead of the frame the presenter is
-        // about to submit.
+        // about to submit. Extrapolating, the real frame is the first of its
+        // group rather than the last, so it is shown the group's other
+        // periods sooner.
         const XrTime anchor = add_display_duration(
             state->presenter_frame_state.predictedDisplayTime,
-            virtual_period);
+            extrapolation_shown_sooner(*state, virtual_period,
+                state->presenter_frame_state.predictedDisplayPeriod));
         // A second wait inside one presenter frame has to come back later than
         // the first, so the guard below steps off the last time served. That
         // step invents time the runtime never advanced, and the ceiling is
@@ -5530,7 +5585,8 @@ XrResult layer_wait_frame_impl(
                 state->frames_per_application_frame);
         const XrTime anchor = add_display_duration(
             state->last_inline_frame_state.predictedDisplayTime,
-            virtual_period);
+            extrapolation_shown_sooner(*state, virtual_period,
+                state->last_inline_frame_state.predictedDisplayPeriod));
         // Same ceiling as the presenter path above, for the same reason: this
         // branch repeats for as long as the promotion takes, and each repeat
         // would otherwise push the application's timeline a period further
@@ -10663,8 +10719,11 @@ struct PreparedProjectionFrame {
         // then have to cross a queue boundary to reach the runtime. Submitted
         // inline both halves are written and signalled together, and the
         // consumer-queue join for the current image is not needed at all.
+        // Extrapolation hands the real frame over first, so its copy must
+        // already be on the queue.
         const bool defer_current_copy = generation->interop == nullptr &&
             !state->session->deep_pipeline &&
+            !state->session->nvidia_options.extrapolate &&
             state->session->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::ofxr;
         xrfg::D3D12FrameSynthesisTicket ticket{};
         const auto debug_marker = request_pair && xrfg::bridge_flight_logger().enabled() &&
@@ -10972,6 +11031,33 @@ struct PreparedProjectionFrame {
     return 1.0F - static_cast<float>(period * periods_before_current) /
                       static_cast<float>(interval);
 }
+// Extrapolation shows the real frame first, so a synthetic `periods` display
+// periods after it shows the scene that much past the current capture, in
+// spans from the previous one: 1 + periods / frames at the exact cadence.
+[[nodiscard]] float synthetic_extrapolation_fraction(
+    const std::shared_ptr<SessionState>& state,
+    const std::optional<ProjectionSnapshot>& previous_snapshot,
+    const ProjectionSnapshot& current_snapshot,
+    std::uint32_t frames,
+    std::uint32_t periods) noexcept {
+    const float fixed = 1.0F + static_cast<float>(periods) / static_cast<float>(frames);
+    if (!state || !previous_snapshot) {
+        return fixed;
+    }
+    XrDuration period = 0;
+    {
+        std::scoped_lock lock(state->mutex);
+        period = state->minimum_runtime_display_period;
+    }
+    const XrTime interval = current_snapshot.display_time - previous_snapshot->display_time;
+    if (period <= 0 || interval <= period * (static_cast<XrDuration>(frames) - 1) ||
+        interval > period * static_cast<XrDuration>(frames) * 2) {
+        return fixed;
+    }
+    return 1.0F + static_cast<float>(period * static_cast<XrDuration>(periods)) /
+                      static_cast<float>(interval);
+}
+
 [[nodiscard]] PreparedProjectionFrame prepare_projection_frame(
     const ProjectionSnapshot& snapshot,
     std::span<const ProjectionResourceMapping> mappings,
@@ -11562,22 +11648,27 @@ void apply_embedded_control(
         state->nvidia_backend_unavailable) {
         backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
     }
-    const xrfg::D3D12NvidiaOpticalFlowOptions options{
+    xrfg::D3D12NvidiaOpticalFlowOptions options{
         static_cast<xrfg::D3D12NvidiaPerformancePreset>(control.desired.preset),
         static_cast<xrfg::D3D12NvidiaInputScale>(control.desired.scale), control.desired.backward,
         static_cast<xrfg::D3D12FrameGeneration>(control.desired.frame_generation),
         static_cast<std::uint32_t>(control.desired.native_scale)};
+    const bool dlss_motion_vectors =
+        control.desired.motion_vectors == 1 || control.desired.frame_generation == 1;
+    synthesis_modes(*state, dlss_motion_vectors, options, backend);
     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||
         options.input_scale != state->nvidia_options.input_scale ||
         options.bidirectional != state->nvidia_options.bidirectional ||
         options.frame_generation != state->nvidia_options.frame_generation ||
-        options.native_scale != state->nvidia_options.native_scale;
+        options.native_scale != state->nvidia_options.native_scale ||
+        options.hybrid != state->nvidia_options.hybrid ||
+        options.extrapolate != state->nvidia_options.extrapolate;
     // Enumeration is excluded by frame_call_mutex, so newly created contexts
     // also see this tuple. A partial failure remains bypass, never mixed flow.
     state->optical_flow_backend = backend;
     state->nvidia_options = options;
-    state->dlss_motion_vectors = control.desired.motion_vectors == 1 || control.desired.frame_generation == 1;
+    state->dlss_motion_vectors = dlss_motion_vectors;
     for (const auto& chain : swapchains) {
         std::unique_lock lock(chain->mutex);
         // The same gates the enumeration path applies, and for the same reason.
@@ -12376,7 +12467,14 @@ XrResult layer_end_frame_impl(
     // reads as judder.
     const std::uint32_t frames_per_frame = state->frames_per_application_frame;
     const bool native_dlss = state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss;
-    const float interpolation_fraction = native_dlss ? 1.0F / static_cast<float>(frames_per_frame) : synthetic_interpolation_fraction(
+    // Extrapolating, the real frame goes first: the synthetic is shown last,
+    // frames - 1 periods after it, and a 3X second synthetic one period
+    // after it.
+    const bool extrapolating = !native_dlss && state->nvidia_options.extrapolate;
+    const float interpolation_fraction = native_dlss ? 1.0F / static_cast<float>(frames_per_frame)
+        : extrapolating ? synthetic_extrapolation_fraction(
+              state, previous_snapshot, current_snapshot, frames_per_frame, frames_per_frame - 1)
+        : synthetic_interpolation_fraction(
         state,
         previous_snapshot,
         current_snapshot,
@@ -12386,7 +12484,10 @@ XrResult layer_end_frame_impl(
     // the real frame.
     const std::optional<float> extra_interpolation_fraction =
         frames_per_frame > 2
-            ? std::optional<float>(native_dlss ? 2.0F / static_cast<float>(frames_per_frame) : synthetic_interpolation_fraction(
+            ? std::optional<float>(native_dlss ? 2.0F / static_cast<float>(frames_per_frame)
+                  : extrapolating ? synthetic_extrapolation_fraction(
+                        state, previous_snapshot, current_snapshot, frames_per_frame, 1)
+                  : synthetic_interpolation_fraction(
                   state,
                   previous_snapshot,
                   current_snapshot,
@@ -12558,6 +12659,21 @@ XrResult layer_end_frame_impl(
                          resource.generation.ready_value});
                 }
             }
+            if (extrapolating) {
+                // The real frame goes down first, at the application's own
+                // display time, and the synthetic after it, where the
+                // interpolating order puts the real frame. Everything below
+                // hands over first_generated first, so the two change
+                // places, the deferred copies and readiness going with the
+                // first. A 3X second synthetic then goes between them, which
+                // is why its fraction is the nearer one.
+                std::swap(first_generated, current_generated);
+                std::swap(first_generated.pending_current_copies,
+                          current_generated.pending_current_copies);
+                std::swap(first_generated.synthetic_ready,
+                          current_generated.synthetic_ready);
+                std::swap(synthetic_releases.releases, current_releases.releases);
+            }
             submitted_end_info = &first_generated.info;
             pair_ready = true;
         } else {
@@ -12572,8 +12688,11 @@ XrResult layer_end_frame_impl(
     }
 
     std::shared_ptr<GeneratedFrameEndInfo> presenter_first_frame;
-    first_generated.synthetic = pair_ready;
+    first_generated.synthetic = pair_ready && !extrapolating;
     first_generated.leads_frame = pair_ready;
+    if (pair_ready && extrapolating) {
+        current_generated.synthetic = true;
+    }
     extra_ready = extra_ready && pair_ready;
     extra_generated.synthetic = extra_ready;
     std::shared_ptr<GeneratedFrameEndInfo> presenter_extra_frame;
