@@ -380,7 +380,7 @@ scale several times over. Against the true midpoint frame:
 | Native DLSS FG, 75% | 6.8 | 18.3 | 10.0 |
 | Native DLSS FG, 67% | 5.37 | 13.6 | 8.7 |
 | Native DLSS FG, 50% | 10.7 | 23.4 | 15.4 |
-| OFXR + DLSS vectors | 1.81 | 7.35 | |
+| OFXR + DLSS vectors | 1.74 | 7.55 | |
 | OFXR FidelityFX flow, half / full resolution | 15.8 / 13.7 | 45.2 / 45.6 | |
 | OFXR NVIDIA medium flow | 14.1 | 51.3 | |
 | A blend of the two frames | 28.8 | | |
@@ -390,7 +390,7 @@ bilinear: 7% less error at 67% for no measurable cost. The packed B it compares
 with stays bilinear, since filtering both alike measured worse.
 
 With the game's vectors exact, as here, OFXR + DLSS vectors now has less error
-than native generation everywhere, at the moving edges too (7.35 against 8.7),
+than native generation everywhere, at the moving edges too (7.55 against 8.7),
 for about a sixth of the GPU time. Native generation at 67% errs more than
 both (13.6 at the edges), and at 50% far more (23.4), so the tray offers no
 step below 67%. Native generation needs the same DLSS guides as OFXR + DLSS
@@ -430,7 +430,7 @@ of A and B at the same pixel, which showed both frames' edges at once. Now:
   starts are 8 directions at 4, 8, 16 and 32 pixels, nearest first, with at
   most two solves. A solution whose own A and B samples agree within 0.05 is
   visible in both frames, so in front, and it wins: 1.81 and 7.35. The new
-  `test_dlss_motion_vector_occlusion_edges` checks this on exact integer
+  `test_dlss_motion_vector_occlusion_edges` checked this on exact integer
   motion: 0.16 at the edges, against 24.6 for the old same-pixel blend and
   16.5 before the search. Before the gate, triggers of 0.05 and 0.2 measured
   7.28 and 7.69 at the edges, and agreement thresholds of 0.025 and 0.1
@@ -445,7 +445,23 @@ of A and B at the same pixel, which showed both frames' edges at once. Now:
   (the vector's A sample differs by more than 0.1), is kept as it is: 6.5.
   Correct vectors explain a moving surface however flat or striped it is, so
   this never fires on the benchmark scene, whose figures are unchanged.
-  `test_dlss_motion_vector_occlusion_edges` checks both cases.
+- All of that first treated every disagreement as an occlusion. A fade or a
+  flash is not one: the warped samples are one surface whose shading
+  changed, and their motion-compensated blend is the frame between. On a
+  moving scene that darkens to 60%, B's sample made the fade step at half
+  the rate: 22.5, against 45.7 for the old same-pixel blend, which does not
+  follow the motion. Occlusions happen only at motion edges, so the
+  occlusion handling now runs only where a vector 16 pixels away differs by
+  more than a pixel, and only above a disagreement of 0.1 (0.02 and 0.05
+  measured 7.61 and 7.60 at the edges, against 7.55). Elsewhere the
+  motion-compensated blend is shown: 0.08 on the fade, and 1.74 overall and
+  7.55 at the edges on the benchmark scene; 3X, 1.38 and 1.37. The overlay
+  check then had to ask the vector across its 5-pixel patch, not only at
+  the centre, because a repeating HUD pattern can match its own shift at one
+  pixel and no longer has B's sample to fall back on: 6.9. It samples the
+  patch's predictions only when the centre is explained and the patch is not
+  flat, which kept its cost. `test_dlss_motion_vector_occlusion_edges` checks
+  the occlusion (0.68), the overlay and the fade.
 
 Rejected: keeping the same-pixel blend wherever the pixel, or a 5-point patch
 around it, is unchanged between the frames, without asking the vector. Flat
@@ -461,14 +477,14 @@ there. In Hubris, whose menu scene is mostly still, two rounds measured 0.325
 and 0.326 ms with the search, against 0.323 before. The overlay check took
 that to 0.397 ms when it read a filtered vector and sampled A at every pixel
 unchanged on screen. It now asks the guide texel's vector first, and samples
-A only where that vector moves the pixel: 0.365 ms. Checking after the solve's
-first step instead, whose vector it could reuse, measured 0.58-0.63 ms on the
-moving benchmark.
+A only where that vector moves the pixel: 0.365 ms, and 0.374 ms with the
+fade handling. Checking after the solve's first step instead, whose vector it
+could reuse, measured 0.58-0.63 ms on the moving benchmark.
 
 At 3X, against the true frames a third and two thirds of the way from A, 67%
 errs 4.9 and 4.6 where full resolution errs 3.4 and 3.0: each generated frame
 restores detail from its own point along the motion. OFXR + DLSS vectors errs
-1.50 and 1.39 at 3X, against 4.88 and 2.96 before its occlusion handling.
+1.38 and 1.37 at 3X, against 4.88 and 2.96 before its occlusion handling.
 
 67% beats 70% and 75% because it puts the feature on the game's two-thirds
 guide grid; 70%, 64% and 60% measured 7.4, 6.3 and 8.4 with a quarter

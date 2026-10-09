@@ -342,22 +342,28 @@ Changes kept, with their measured effect:
   preliminary current-frame copy, and the real-frame copy can be deferred
   until after the generated image is submitted.
 - **Occlusion handling for OFXR + DLSS vectors.** It used to show a blend
-  of both frames at the same pixel wherever the two warped frames disagreed,
-  so both frames' edges at once. Now background a moving edge uncovers comes
-  from the new frame, background it is covering comes from the previous one,
-  and near a motion edge a short search finds the surface in front. Content
-  that stays put on screen although its vectors say it moved, such as a HUD
-  drawn after DLSS, is kept. On the
-  benchmark scene of a striped square sliding over a detailed background, the
-  error fell from 3.95 to 1.81, and at the square's edges from 25.9 to 7.35.
-  Native generation measures 4.25 and 8.7 there. At 3X, the frames a third
-  and two thirds of the way err 1.50 and 1.39 (native: 3.38 and 2.99; before:
-  4.88 and 2.96). With the game's vectors
-  exact, OFXR + DLSS vectors is now the more accurate method at about a sixth
-  of the GPU time. Native generation still handles content the vectors do not
-  describe better. In Hubris a pair rose from 0.32 to 0.37 ms, nearly all
-  of it for the HUD check. On the offline benchmark, whose frames disagree
-  almost everywhere, it rose about 15%.
+  of both frames at the same pixel wherever the two warped frames disagreed:
+  both frames' edges at once, and ghosting through fades. Now:
+  - Away from a motion edge, a disagreement is one surface whose shading
+    changed, such as a fade or a flash, and the motion-compensated blend is
+    shown.
+  - Near a motion edge, background being uncovered comes from the new frame,
+    background being covered comes from the previous one, and a short search
+    finds the surface in front.
+  - Content that stays put on screen although its vectors say it moved, such
+    as a HUD drawn after DLSS, is kept.
+
+  On the benchmark scene of a striped square sliding over a detailed
+  background, the error fell from 3.95 to 1.74, and at the square's edges
+  from 25.9 to 7.55. Native generation measures 4.25 and 8.7 there. At 3X,
+  the frames a third and two thirds of the way err 1.38 and 1.37 (native:
+  3.38 and 2.99; before: 4.88 and 2.96). A moving scene that darkens errs
+  0.08, against 45.7 before. With the game's vectors exact, OFXR + DLSS
+  vectors is now the more accurate method, at about a sixth of the GPU time.
+  Native generation still handles content the vectors do not describe
+  better. In Hubris a pair rose from 0.32 to 0.37 ms, nearly all of it for
+  the HUD check. On the offline benchmark, whose frames disagree almost
+  everywhere, it rose about 15%.
 
 Tried and rejected:
 

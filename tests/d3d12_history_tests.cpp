@@ -4831,13 +4831,17 @@ void test_dlss_motion_vector_strafe_rejects_double_edges(
 // in B), the object itself over background B has already uncovered, and the
 // background its leading edge is covering (seen only in A) - not both frames'
 // edges at once. As an overlay, the object stays put with the background's
-// vectors over it, as a HUD drawn after DLSS does, and must stay put.
-void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, bool overlay) {
+// vectors over it, as a HUD drawn after DLSS does, and must stay put. In a
+// fade, everything moves together while B darkens, and the generated frame
+// must be the motion-compensated blend - a fade is no occlusion.
+enum class VectorScene { occlusion, overlay, fade };
+void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, VectorScene kind) {
     constexpr UINT width = 256, height = 128;
     constexpr int object_left = 72, object_width = 80, object_top = 32, object_bottom = 96;
     constexpr int background_motion = 6;
-    const int object_motion = overlay ? 0 : 20;
-    const auto make_scene = [&](int background_shift, int object_shift) {
+    const bool overlay = kind == VectorScene::overlay, fade = kind == VectorScene::fade;
+    const int object_motion = overlay ? 0 : fade ? background_motion : 20;
+    const auto make_scene = [&](int background_shift, int object_shift, float brightness = 1.0F) {
         StereoPattern pattern;
         for (UINT eye = 0; eye < kEyeCount; ++eye) {
             auto& bytes = pattern[eye];
@@ -4854,7 +4858,10 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, bool ove
                         : RgbaBytes{static_cast<std::uint8_t>(40 + (bx * 13 + static_cast<int>(y) * 5) % 160),
                                     static_cast<std::uint8_t>(60 + ((bx / 3) % 7) * 20 + eye * 9),
                                     static_cast<std::uint8_t>(90 + (bx * 7) % 120), 255};
-                    std::copy(color.begin(), color.end(), bytes.begin() +
+                    const RgbaBytes lit{static_cast<std::uint8_t>(std::lround(color[0] * brightness)),
+                                        static_cast<std::uint8_t>(std::lround(color[1] * brightness)),
+                                        static_cast<std::uint8_t>(std::lround(color[2] * brightness)), 255};
+                    std::copy(lit.begin(), lit.end(), bytes.begin() +
                         (static_cast<std::size_t>(y) * width + x) * kBytesPerPixel);
                 }
             }
@@ -4862,8 +4869,9 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, bool ove
         return pattern;
     };
     const StereoPattern previous = make_scene(0, 0);
-    const StereoPattern current = make_scene(background_motion, object_motion);
-    const StereoPattern expected = make_scene(background_motion / 2, object_motion / 2);
+    const StereoPattern current = make_scene(background_motion, object_motion, fade ? 0.6F : 1.0F);
+    const StereoPattern expected =
+        make_scene(background_motion / 2, object_motion / 2, fade ? 0.8F : 1.0F);
     auto game_motion = create_and_upload_game_motion_field(
         fixture, width, height, [&](UINT, UINT x, UINT y) {
             const int ox = static_cast<int>(x) - object_motion;
@@ -4940,9 +4948,10 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, bool ove
         std::size_t count = 0;
         for (int y = object_top + 2; y < object_bottom - 2; ++y) {
             for (int x = 0; x < static_cast<int>(width); ++x) {
-                // The overlay is measured whole.
-                if (overlay ? x < left - 2 || x >= right + 2
-                            : std::abs(x - left) >= 12 && std::abs(x - right) >= 12) continue;
+                // The overlay is measured whole, the fade everywhere.
+                if (fade ? x < 16 || x >= static_cast<int>(width) - 16
+                    : overlay ? x < left - 2 || x >= right + 2
+                              : std::abs(x - left) >= 12 && std::abs(x - right) >= 12) continue;
                 const std::size_t offset =
                     (static_cast<std::size_t>(y) * width + static_cast<UINT>(x)) * kBytesPerPixel;
                 for (UINT c = 0; c < 3; ++c, ++count) {
@@ -4952,11 +4961,11 @@ void test_dlss_motion_vector_occlusion_edges(D3D12WarpFixture& fixture, bool ove
             }
         }
         const double edge_error = total / static_cast<double>(count);
-        std::cout << "DLSS " << (overlay ? "overlay" : "occlusion") << " eye=" << eye
+        std::cout << "DLSS " << (fade ? "fade" : overlay ? "overlay" : "occlusion") << " eye=" << eye
                   << " edge_mae=" << edge_error << '\n';
-        // 0.16 and 6.5 here. The same-pixel blend this replaced measured 24.6
-        // and 31.6, and without the overlay check the overlay measured 100.8.
-        require(edge_error <= (overlay ? 12.0 : 2.0),
+        // 0.68, 6.9 and 0.08 here. The same-pixel blend this replaced
+        // measured 24.6, 31.6 and 45.7 (it does not follow the motion).
+        require(edge_error <= (fade ? 1.0 : overlay ? 12.0 : 2.0),
             "DLSS vectors showed the wrong frame around a moving edge for eye " +
                 std::to_string(eye) + ": " + std::to_string(edge_error));
     }
@@ -6029,8 +6038,9 @@ int main() {
         test_dlss_motion_vector_gpu_ingress(fixture);
         test_dlss_motion_vector_side_by_side(fixture);
         test_dlss_motion_vector_strafe_rejects_double_edges(fixture);
-        test_dlss_motion_vector_occlusion_edges(fixture, false);
-        test_dlss_motion_vector_occlusion_edges(fixture, true);
+        test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::occlusion);
+        test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::overlay);
+        test_dlss_motion_vector_occlusion_edges(fixture, VectorScene::fade);
         test_rotation_aware_synthesis_beats_uncompensated_flow(fixture);
         test_submission_backpressure_and_recovery(
             fixture,

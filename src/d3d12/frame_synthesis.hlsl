@@ -748,25 +748,40 @@ FullscreenVertex FullscreenTriangleVS(uint vertex_id : SV_VertexID) {
 bool game_motion_static_overlay(float2 pixel, float4 current) {
     int2 texel = int2(pixel);
     bool overlay = rgb_error(PreviousFrame.Load(int4(texel, int(Slice), 0)), current) <= 1.0 / 255.0;
+    MappedCoordinate moved = (MappedCoordinate)0;
     if (overlay) {
         // Content its vector holds still is explained without a sample, and in
         // a still scene that is nearly every pixel.
-        MappedCoordinate moved = map_source_to_target(pixel + game_motion_texel(pixel),
-            PreviousMappings[ViewIndex]);
+        moved = map_source_to_target(pixel + game_motion_texel(pixel), PreviousMappings[ViewIndex]);
         overlay = moved.valid >= 0.5 && length(moved.coordinate - pixel) >= 0.5;
-        if (overlay) {
-            CameraSample predicted = sample_previous_target(moved.coordinate, Slice, ViewIndex);
-            overlay = predicted.valid >= 0.5 && rgb_error(predicted.color, current) > 0.1;
-        }
     }
+    // Unchanged across the patch next: what moves fails that cheaply.
+    int2 offsets[4] = {int2(2, 0), int2(-2, 0), int2(0, 2), int2(0, -2)};
+    float4 around[4] = {current, current, current, current};
+    bool flat = true;
     if (overlay) {
         int2 limit = int2(int(Width) - 1, int(Height) - 1);
         [unroll] for (uint i = 0; i < 4; ++i) {
-            int2 neighbour = clamp(texel + (i == 0 ? int2(2, 0) : i == 1 ? int2(-2, 0)
-                : i == 2 ? int2(0, 2) : int2(0, -2)), int2(0, 0), limit);
+            int2 neighbour = clamp(texel + offsets[i], int2(0, 0), limit);
+            around[i] = CurrentFrame.Load(int4(neighbour, int(Slice), 0));
             overlay = overlay && rgb_error(PreviousFrame.Load(int4(neighbour, int(Slice), 0)),
-                CurrentFrame.Load(int4(neighbour, int(Slice), 0))) <= 1.0 / 255.0;
+                around[i]) <= 1.0 / 255.0;
+            flat = flat && rgb_error(around[i], current) <= 1.0 / 255.0;
         }
+    }
+    if (overlay) {
+        // Somewhere in it not what the vector predicts. A repeating pattern
+        // can match its own shift at one pixel; a flat patch cannot tell, and
+        // its centre has already been asked.
+        float unexplained = rgb_error(
+            sample_previous_target(moved.coordinate, Slice, ViewIndex).color, current);
+        if (unexplained <= 0.1 && !flat) {
+            [unroll] for (uint i = 0; i < 4; ++i) {
+                unexplained = max(unexplained, rgb_error(sample_previous_target(
+                    moved.coordinate + float2(offsets[i]), Slice, ViewIndex).color, around[i]));
+            }
+        }
+        overlay = unexplained > 0.1;
     }
     return overlay;
 }
@@ -990,39 +1005,28 @@ float4 synthesize_midpoint(
                             stable_midpoint,
                             flow_midpoint,
                             confidence));
-                    } else {
-                        // Where the game's warped samples disagree, A's is
-                        // usually hidden behind what B shows - background a
-                        // trailing edge uncovers - so B's warped sample stands
-                        // in. The same-pixel blend there showed both frames'
-                        // edges at once.
-                        output_color = saturate(lerp(
-                            use_game_motion_pipeline ? current_sample.color : stable_midpoint,
-                            flow_midpoint,
-                            confidence));
+                    } else if (use_game_motion_pipeline) {
+                        // The game's vectors are trusted: away from a motion
+                        // edge, warped samples that disagree are one surface
+                        // whose shading changed - a fade, a flash - and their
+                        // motion-compensated blend is the frame between.
+                        output_color = saturate(flow_midpoint);
                         // Background a leading edge is covering shows only in
                         // A. There the solve has no fixed point: B shows the
                         // occluder at the pixel, so it starts inside it and
                         // alternates outside and in. After its odd number of
                         // steps it ends outside, on the covered surface's
                         // displacement, which places A's sample.
-                        if (use_game_motion_pipeline && solve_residual >= 0.5) {
+                        if (solve_residual >= 0.5) {
                             CameraSample covered = sample_previous_target(
                                 pixel + synthesis_fraction() * last_displacement, Slice, ViewIndex);
                             if (covered.valid >= 0.5) output_color = saturate(covered.color);
-                        } else if (use_game_motion_pipeline && disagreement > 0.1 &&
-                                   repeated_capture_flag() == 0) {
-                            // B's sample may be background that B has already
-                            // uncovered but a faster surface in front still
-                            // covers at the generated instant. That surface is
-                            // another solution of the solve, and the one whose
-                            // own A and B samples agree is visible in both
-                            // frames, so in front. It is looked for only near
-                            // a motion edge - a vector 16 pixels away differs
-                            // by more than a pixel - and from at most two
-                            // starts on another surface, nearest first, so
-                            // shading changes the vectors do not describe stay
-                            // cheap.
+                        } else if (disagreement > 0.1 && repeated_capture_flag() == 0) {
+                            // Near a motion edge - a vector 16 pixels away
+                            // differs by more than a pixel - disagreeing
+                            // samples are two surfaces instead. A's is usually
+                            // hidden behind what B shows, background a trailing
+                            // edge uncovers, so B's warped sample stands in.
                             float2 here = game_motion_texel(
                                 pixel - (1.0 - synthesis_fraction()) * last_displacement);
                             bool motion_edge = false;
@@ -1032,6 +1036,17 @@ float4 synthesize_midpoint(
                                 motion_edge = motion_edge ||
                                     length(game_motion_texel(pixel + offset) - here) > 1.0;
                             }
+                            if (motion_edge) {
+                                output_color = saturate(lerp(
+                                    current_sample.color, flow_midpoint, confidence));
+                            }
+                            // B's sample may in turn be background that B has
+                            // already uncovered but a faster surface in front
+                            // still covers at the generated instant. That
+                            // surface is another solution of the solve, and the
+                            // one whose own A and B samples agree is visible in
+                            // both frames, so in front. It is looked for from at
+                            // most two starts on another surface, nearest first.
                             uint solves = 0;
                             bool done = !motion_edge;
                             [loop] for (uint radius_index = 0; radius_index < 4 && !done; ++radius_index) {
@@ -1053,6 +1068,11 @@ float4 synthesize_midpoint(
                                 }
                             }
                         }
+                    } else {
+                        output_color = saturate(lerp(
+                            stable_midpoint,
+                            flow_midpoint,
+                            confidence));
                     }
                     }
                 }
