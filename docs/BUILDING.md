@@ -1172,8 +1172,10 @@ title menu, where only the head moves, and ten of a Jakku race. Replayed
 The hybrid is best or level under head turns: in the menu the vectors are all
 it needs, and in the race its flow patches what they miss and it matches
 NVIDIA's flow, which costs several times as much live (4.7-5.6 ms a pair).
-Half-resolution flow gains 2% in the turning race and nothing with a still
-head (7.18 against 7.19 on the 42 triplets), so quarter stays. Native
+Half-resolution flow gains 2% in the turning race, nearly all of it in one
+of the ten runs (12.1 to 11.2; the rest within 2.5%), and nothing with a still
+head (7.18 against 7.19 on the 42 triplets), for 7% more GPU time (450 against
+482 us a pair at 1440x1584, replayed warm), so quarter stays. Native
 generation trails every OFXR method in both: its frame is softer, from the
 per-pair reset and the alignment's resampling. Since synthetics are now shown
 in their own midway camera, NGX was also tried without the alignment, given A
