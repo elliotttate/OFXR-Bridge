@@ -501,6 +501,8 @@ hybrid under a new key and ignores the old one.
   | Deep Rock Galactic: Rogue Core | UE5, UEVR Native Stereo | 45.1 + 45.0 | NVIDIA medium 1.7 ms (no DLSS in its menu) |
   | Reach | native OpenXR (`-d3d11`, the D3D11 bridge) | about 45 + 45 in play | NVIDIA medium 2.0 ms |
   | Deadzone: Rogue | UE5.6, UEVR Native Stereo, DLSS | 29.6 + 30.0 | the hybrid taken up 2.2 s in, 1924 pairs on the game's vectors, 0.47 ms |
+  | Stellar Blade | UE4, UEVR Native Stereo (fresh profile), DLSS | 29.6 + 30.0 | the hybrid taken up 9.7 s in, 1739 pairs on the game's vectors, 0.46 ms |
+  | Stellar Blade Demo | the same | 31.2 + 31.6 | 2069 pairs on the game's vectors, 0.46 ms (it had crashed under an older, customised profile) |
   | Black Myth: Wukong | UE5, UEVR Native Stereo, DLSS | (compiling shaders on its first start) | the hybrid taken up 12 s in, 566 pairs on the game's vectors, 0.18-0.29 ms |
 
   Skydance's BEHEMOTH quits on the simulator with or without the layer, UEVR
@@ -512,8 +514,9 @@ hybrid under a new key and ignores the old one.
   their instance at 1.0; FlatOut does the same. Not generating, and not
   because of the layer: The Riese Project - Prologue waits on a launcher that
   needs a mouse click; this Bulletstorm VR install (with UE4SS mods) never
-  starts an OpenXR session; the Stellar Blade demo crashes in its own code
-  under this UEVR build with or without the layer.
+  starts an OpenXR session; the Stellar Blade demo crashed in its own code
+  under an older customised UEVR profile, with or without the layer (with a
+  fresh Native Stereo profile it runs; see below).
 - **Extrapolation goes on by the game's own step.** The DLSS vectors span the
   game's step from the previous frame - the frame time it gives DLSS - and a
   frame extrapolated a display period on should show the scene a display
