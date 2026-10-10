@@ -1234,14 +1234,16 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         # others queued past its 30 s wait, so it runs on its own.
         set_tests_properties(xrfg_layer_cadence_fraction PROPERTIES RUN_SERIAL TRUE)
         # Ten seconds each: queued together behind that lock, the third
-        # waited past it.
+        # waited past it. They time frames against the wall clock, so each
+        # runs alone: beside a parallel run's other tests the promise tests
+        # failed now and then, and passed alone.
         set_tests_properties(
             xrfg_layer_promise_shown_time
             xrfg_layer_promise_shown_time_extrapolate
             xrfg_layer_promise_two_groups
             xrfg_layer_rephase
             xrfg_layer_inline_promise
-            PROPERTIES RESOURCE_LOCK xrfg_layer_long_call_chain)
+            PROPERTIES RESOURCE_LOCK xrfg_layer_long_call_chain RUN_SERIAL TRUE)
 
         add_test(
             NAME xrfg_layer_process_exclusion
