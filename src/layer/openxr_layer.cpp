@@ -512,6 +512,10 @@ struct Dispatch {
     // and never consumes one; it records session state transitions so a
     // capture can say whether the runtime stopped asking for frames, and why.
     PFN_xrPollEvent poll_event{};
+    // Best-effort, like the two above: the recorder's reprojection_angle
+    // locates a VIEW space of the layer's own. Without them it is not written.
+    PFN_xrCreateReferenceSpace create_reference_space{};
+    PFN_xrLocateSpace locate_space{};
     // Best-effort, like the two above: forwarded unchanged unless a Vulkan
     // session was bridged to D3D12, where the runtime's DXGI list is shown
     // to the application as Vulkan formats.
@@ -1052,9 +1056,17 @@ struct SessionState {
     // with the head's pose at the instant it is shown, rather than the newer
     // real frame's (synthetic_camera_snapshot). The application's xrEndFrame
     // thread reads it; it is set at xrCreateSession, at control changes and
-    // by follow_synthetic_pose, which run on that thread too.
-    bool synthetic_pose_interpolated{true};
+    // by follow_synthetic_pose, which run on that thread too. Atomic for the
+    // presenter's reprojection_angle record, which only reports it.
+    std::atomic<bool> synthetic_pose_interpolated{true};
     std::chrono::steady_clock::time_point synthetic_pose_poll_at{};
+    // The recorder's reprojection_angle: a VIEW space of the layer's own,
+    // made the first time a frame is handed over while the recorder runs, by
+    // the presenter or the application's thread, whichever hands frames over
+    // then; destroyed with the session.
+    std::mutex reprojection_space_mutex;
+    XrSpace reprojection_view_space{XR_NULL_HANDLE}; // reprojection_space_mutex
+    bool reprojection_space_attempted{}; // reprojection_space_mutex
     // One private swapchain per output with staging textures, where the
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
@@ -1764,6 +1776,106 @@ template <typename Call>
             ? nullptr
             : session.get(),
         std::forward<Call>(call));
+}
+
+// The recorder's reprojection_angle for a frame about to be handed to the
+// runtime (BridgeFlightOperation::reprojection_angle); kind is
+// presenter_submission's. Made before the hand-over rather than after it, so
+// the space the frame names cannot be destroyed under the locate: the layer
+// holds an application's xrDestroySpace until every frame naming that space
+// has gone down. Two xrLocateSpace calls a frame, and only while the
+// recorder runs.
+void log_reprojection_angle(
+    SessionState& state,
+    const XrFrameEndInfo& submitted,
+    std::uint32_t kind) noexcept {
+    try {
+        if (!xrfg::bridge_flight_logger().enabled() || submitted.layers == nullptr ||
+            state.dispatch->create_reference_space == nullptr ||
+            state.dispatch->locate_space == nullptr) {
+            return;
+        }
+        const XrCompositionLayerProjection* projection = nullptr;
+        for (std::uint32_t index = 0; index < submitted.layerCount && projection == nullptr; ++index) {
+            const XrCompositionLayerBaseHeader* layer = submitted.layers[index];
+            if (layer != nullptr && layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+            }
+        }
+        if (projection == nullptr || projection->viewCount == 0 || projection->views == nullptr) {
+            return;
+        }
+        XrSpace view_space = XR_NULL_HANDLE;
+        {
+            std::scoped_lock lock(state.reprojection_space_mutex);
+            if (!state.reprojection_space_attempted) {
+                state.reprojection_space_attempted = true;
+                XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+                info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+                info.poseInReferenceSpace.orientation.w = 1.0F;
+                XrSpace created = XR_NULL_HANDLE;
+                if (XR_SUCCEEDED(with_runtime_entry(&state, [&] {
+                        return state.dispatch->create_reference_space(state.handle, &info, &created);
+                    }))) {
+                    state.reprojection_view_space = created;
+                }
+            }
+            view_space = state.reprojection_view_space;
+        }
+        if (view_space == XR_NULL_HANDLE) {
+            return;
+        }
+        // The views' mean orientation: a headset that cants its eyes cants
+        // them symmetrically about the head, which this cancels, so a real
+        // frame shown when it was predicted for reads near zero.
+        const XrQuaternionf& first = projection->views[0].pose.orientation;
+        xrfg::Quaternion mean{0.0F, 0.0F, 0.0F, 0.0F};
+        for (std::uint32_t index = 0; index < projection->viewCount; ++index) {
+            const XrQuaternionf& view = projection->views[index].pose.orientation;
+            const float sign = view.x * first.x + view.y * first.y + view.z * first.z +
+                    view.w * first.w < 0.0F ? -1.0F : 1.0F;
+            mean.x += view.x * sign;
+            mean.y += view.y * sign;
+            mean.z += view.z * sign;
+            mean.w += view.w * sign;
+        }
+        const auto locate = [&](XrTime time, xrfg::Quaternion* orientation) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            const XrResult result = with_runtime_entry(&state, [&] {
+                return state.dispatch->locate_space(view_space, projection->space, time, &location);
+            });
+            if (XR_FAILED(result) ||
+                (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+                return false;
+            }
+            *orientation = {location.pose.orientation.x, location.pose.orientation.y,
+                            location.pose.orientation.z, location.pose.orientation.w};
+            return true;
+        };
+        xrfg::Quaternion head{};
+        if (!locate(submitted.displayTime, &head)) {
+            return;
+        }
+        XrDuration period = 0;
+        {
+            std::scoped_lock lock(state.mutex);
+            period = state.minimum_runtime_display_period;
+        }
+        xrfg::Quaternion earlier{};
+        const bool turn_known = period > 0 && locate(submitted.displayTime - period, &earlier);
+        constexpr float kMillidegreesPerRadian = 180000.0F / 3.14159265F;
+        const auto millidegrees = [&](const xrfg::Quaternion& from, const xrfg::Quaternion& to) {
+            return static_cast<std::uint64_t>(
+                xrfg::rotation_angle(from, to) * kMillidegreesPerRadian + 0.5F);
+        };
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::reprojection_angle,
+            kind,
+            millidegrees(xrfg::normalize(mean), head),
+            turn_known ? millidegrees(earlier, head) : 0,
+            state.synthetic_pose_interpolated.load(std::memory_order_relaxed) ? 1U : 0U);
+    } catch (...) {
+    }
 }
 
 enum class PrivateOwnershipPhase {
@@ -4945,6 +5057,18 @@ XrResult layer_create_api_layer_instance_impl(
              "xrEnumerateSwapchainFormats",
              dispatch->enumerate_swapchain_formats)),
          true) &&
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrCreateReferenceSpace",
+             dispatch->create_reference_space)),
+         true) &&
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrLocateSpace",
+             dispatch->locate_space)),
+         true) &&
         load_function(
             next_get_instance_proc_addr,
             created_instance,
@@ -5674,6 +5798,15 @@ XrResult layer_destroy_session_impl(XrSession session) {
             state->dispatch->destroy_space(grip);
         }
         grip = XR_NULL_HANDLE;
+    }
+    {
+        // The presenter, which also reads it, has stopped.
+        std::scoped_lock lock(state->reprojection_space_mutex);
+        if (state->reprojection_view_space != XR_NULL_HANDLE &&
+            state->dispatch->destroy_space != nullptr) {
+            state->dispatch->destroy_space(state->reprojection_view_space);
+        }
+        state->reprojection_view_space = XR_NULL_HANDLE;
     }
     for (const auto& swapchain_state : find_swapchains(state)) {
         std::scoped_lock call_lock(swapchain_state->call_mutex);
@@ -9086,6 +9219,8 @@ void continuous_presenter_main(
                     request ? request->sequence : 0,
                     fresh_synthetic ? 2u : (request ? 1u : 0u));
             }
+            log_reprojection_angle(
+                *state, submitted, request ? (fresh_synthetic ? 2U : 1U) : 0U);
             end_result = with_runtime_entry(state, [&] {
                 return state->fps_overlay
                     // No request is the presenter repeating what it already
@@ -11996,7 +12131,11 @@ struct InternalCycleResult {
     std::optional<XrFrameState> adopted_frame_state = std::nullopt,
     // The frame is a synthetic: 3X runs one cycle for its second synthetic
     // before the one for the real frame.
-    bool synthetic = false) {
+    bool synthetic = false,
+    // The frame is a synthetic for the recorder's reprojection_angle, where
+    // it differs from `synthetic`: extrapolating, this cycle carries the
+    // pair's synthetic, which the overlay has always counted as the real one.
+    std::optional<bool> recorded_synthetic = std::nullopt) {
     InternalCycleResult output{};
     if (state->dispatch->wait_frame == nullptr ||
         state->dispatch->begin_frame == nullptr ||
@@ -12071,6 +12210,7 @@ struct InternalCycleResult {
         submitted.layerCount);
     join_runtime_queue_to_application(
         state.get(), state->app_end_frame_release_value);
+    log_reprojection_angle(*state, submitted, recorded_synthetic.value_or(synthetic) ? 2U : 1U);
     const XrResult end_result = with_runtime_entry(state, [&] {
         return state->fps_overlay
             ? state->fps_overlay->end_frame(&submitted, synthetic)
@@ -13861,6 +14001,12 @@ XrResult layer_end_frame_impl(
             extra_ready = false;
             prepare_reason = GenerationPrepareReason::private_release_failed;
         }
+        if (submitted_end_info != nullptr) {
+            // Extrapolating, the first frame down is the real one.
+            log_reprojection_angle(*state, *submitted_end_info,
+                submitted_end_info == &first_generated.info && first_generated.synthetic
+                    ? 2U : 1U);
+        }
         result = with_runtime_entry(state, [&] {
             return state->fps_overlay
                 ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
@@ -14062,7 +14208,9 @@ XrResult layer_end_frame_impl(
         current_generated.info,
         adopt_outstanding_wait && !extra_ready
             ? std::optional<XrFrameState>(state->last_inline_frame_state)
-            : std::nullopt);
+            : std::nullopt,
+        false,
+        current_generated.synthetic);
     if (adopt_outstanding_wait) {
         // frame_call_mutex is held on the inline path, so these are seen in
         // order by the application's next begin.

@@ -63,4 +63,24 @@ foreach(required IN ITEMS
     endif()
 endforeach()
 
+# reprojection_angle, for every frame of a pair as it is handed over. The fake
+# runtime's head is where the application's poses put it at each time, so a
+# real frame handed over at its own display time reads zero, and the first
+# synthetic - submitted at the application's display time 400 with the pose
+# halfway from frame 300's to frame 400's - reads half that turn: 2.005
+# degrees, with synthetic_pose=interpolated (c=1).
+foreach(required IN ITEMS
+        "op=reprojection_angle result=1 dur_us=0 a=0 "
+        "op=reprojection_angle result=2 dur_us=0 a=2005 ")
+    string(FIND "${contents}" "${required}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "Flight log is missing: ${required}")
+    endif()
+endforeach()
+string(REGEX MATCHALL "op=reprojection_angle result=[0-9] dur_us=0 a=[0-9]+ b=[0-9]+ c=0"
+    real_pose_records "${contents}")
+if(real_pose_records)
+    message(FATAL_ERROR "reprojection_angle reports synthetic_pose=real: ${real_pose_records}")
+endif()
+
 message(STATUS "OFXR bridge flight logger call-chain contract verified")

@@ -1183,7 +1183,41 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
 
 std::vector<XrSpace> g_panel_grip_spaces_alive;
 
+// The head, for the layer's reprojection_angle record: a VIEW space whose
+// orientation at a time is the one the application submits for it, so a
+// frame submitted with its own display time's pose reads zero.
+const XrSpace g_fake_view_space = fake_handle<XrSpace>(0x7E1E);
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_create_reference_space(
+    XrSession,
+    const XrReferenceSpaceCreateInfo* create_info,
+    XrSpace* space) {
+    if (create_info == nullptr || space == nullptr ||
+        create_info->referenceSpaceType != XR_REFERENCE_SPACE_TYPE_VIEW) {
+        return XR_ERROR_REFERENCE_SPACE_UNSUPPORTED;
+    }
+    *space = g_fake_view_space;
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_locate_space(
+    XrSpace space,
+    XrSpace,
+    XrTime time,
+    XrSpaceLocation* location) {
+    if (space != g_fake_view_space || location == nullptr) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    location->pose = fake_submitted_view_for_time(time, 0).pose;
+    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+        XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    return XR_SUCCESS;
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_space(XrSpace space) {
+    if (space == g_fake_view_space) {
+        return XR_SUCCESS;
+    }
     // The status panel's grip spaces (panel-input).
     const auto grip = std::find(g_panel_grip_spaces_alive.begin(), g_panel_grip_spaces_alive.end(), space);
     if (grip != g_panel_grip_spaces_alive.end()) {
@@ -1574,6 +1608,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XRFG_FAKE_FUNCTION("xrCreateSwapchain", fake_create_swapchain)
     XRFG_FAKE_FUNCTION("xrDestroySwapchain", fake_destroy_swapchain)
     XRFG_FAKE_FUNCTION("xrDestroySpace", fake_destroy_space)
+    XRFG_FAKE_FUNCTION("xrCreateReferenceSpace", fake_create_reference_space)
+    XRFG_FAKE_FUNCTION("xrLocateSpace", fake_locate_space)
     XRFG_FAKE_FUNCTION("xrPollEvent", fake_poll_event)
     XRFG_FAKE_FUNCTION("xrEnumerateSwapchainImages", fake_enumerate_swapchain_images)
     XRFG_FAKE_FUNCTION("xrAcquireSwapchainImage", fake_acquire_swapchain_image)
