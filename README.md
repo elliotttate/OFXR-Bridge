@@ -328,6 +328,41 @@ hybrid under a new key and ignores the old one.
 
 ## Other changes in this fork
 
+- **Generated frames are made, and sent, from the head's pose when they are
+  shown.** Reported in Galactic Racer under UEVR on SteamVR: "laggy black
+  bars when moving my head". Every generated frame was made in the newer
+  real frame's camera and handed to SteamVR with that frame's pose, although
+  it is shown a display period earlier (two and one at 3X). The runtime turns
+  every frame from the pose it was sent with to the head's pose when it is
+  shown, so it turned each generated frame back by the head's motion over
+  those periods, and the edge it turned away from had no pixels: black
+  strips at the side of the view, flickering at the game's frame rate. At
+  3X, 144 Hz and 120 degrees a second they were 1.7 and 0.8 degrees wide.
+  Now each generated frame is made in, and sent with, the pose between the
+  two real frames' at its own share of the way - the midpoint, or thirds at
+  3X; extrapolating, carried on past the newer frame - so the runtime has
+  nothing to turn back. What the newer frame did not see on the side the head
+  turned from comes from the older frame, which did; extrapolating, the side
+  the head turns towards was seen by neither and takes the nearest edge of
+  the picture rather than black. Every method has it: FidelityFX and NVIDIA
+  optical flow, DLSS vectors, the hybrid, extrapolation, 3X and native DLSS
+  FG. It costs about 12 µs a generated frame at 2004x2004 per eye on an
+  RTX 5090. In the tests, with the head turned 12 degrees between two real
+  frames, each generated frame matched the scene seen from its own pose
+  within 0.12-0.33 (in 255) across the whole view, with no black pixel; made
+  the old way, 8-15% of the view was left without pixels once the runtime
+  had turned it.
+
+  `[ofxr] synthetic_pose=real` in `ofxr_bridge.ini` goes back to the old
+  behaviour, for comparison; `interpolated` is the default. A running game
+  follows an edit within half a second, and the tray keeps the line when it
+  rewrites the file. With the flight recorder on, every frame of a pair
+  gets a `reprojection_angle` record: how far the runtime will turn it to
+  show it, in thousandths of a degree (`a`), beside the head's turn over a
+  display period (`b`). While turning your head, a generated frame (`result=2`)
+  should now read about what a real one (`result=1`) does, where with `real`
+  it read about `b` (twice that for the first of the two at 3X). Details in
+  [BUILDING.md](docs/BUILDING.md#each-synthetic-in-its-own-camera).
 - **A status panel in the headset.** Turn a controller upside down, as with
   xrFPS, and a panel above it shows the method the tray asks for against the
   one running, why they differ when they do, and the frame rates, added
