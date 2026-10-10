@@ -400,7 +400,7 @@ OpenXR session, and extrapolation wins if both are set.
 
   | Game | How it runs | Placement error, fixed share / stamps | Per pair, live |
   |---|---|---|---|
-  | Subnautica 2 | UE5, UEVR Native Stereo, ships DLSS-G | 0.0224 / 0.0406 | vectors 0.38 ms, FidelityFX 1.02, native 67% 1.36, hybrid 1.47, native 100% 1.77, NVIDIA medium 8.5 |
+  | Subnautica 2 | UE5, UEVR Native Stereo, ships DLSS-G | 0.0224 / 0.0406 and 0.0244 / 0.0417 (two launches) | vectors 0.38 ms, FidelityFX 1.02, native 67% 1.35-1.36, hybrid 1.47, native 100% 1.77, NVIDIA medium 8.5 - the same to 0.02 ms in both launches |
   | Lies of P | UE4, UEVR Alternating/AFR | 0.0299 / 0.0450 | vectors 0.36 ms, FidelityFX 0.87, hybrid 1.31 (no native: the game ships no DLSS-G) |
   | Kayak VR: Mirage | UE4, native OpenXR (`-hmd=OpenXRHMD -dx12`) | 0.0011 / 0.0253 | FidelityFX 1.03 ms, NVIDIA medium 5.7 (DLSS off in its menu) |
   | RoboQuest VR | UE5, native OpenXR, no DLSS | 0.0016 / 0.0022 | FidelityFX 2.0-2.2 ms, NVIDIA medium 12 |
@@ -409,7 +409,8 @@ OpenXR session, and extrapolation wins if both are set.
   image, the shape every method was tuned on. Alternating/AFR gives each eye
   images of its own; it generates too since release 16 (Lies of P), but it
   costs more of SteamVR's sixteen swapchains. Bootstrap Island uses OpenVR and
-  is outside an OpenXR layer's reach.
+  is outside an OpenXR layer's reach; Hogwarts Legacy exits while this UEVR
+  build hooks D3D12, before any OpenXR session.
 - **Only the images a projection uses are armed.** Any change from the tray -
   and the first one, at the start of every session - armed every swapchain
   the game had made that was still eligible, not only the ones a projection
