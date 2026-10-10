@@ -89,8 +89,11 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   reseeded with the aligned previous frame before the new frame is evaluated.
   A still head, or a translation alone, keeps the history.
 - **2X and 3X.** NGX makes one frame at 1/2, or two frames at 1/3 and 2/3 with
-  OFXR's 3X Frame Gen setting. 3X needs NGX multi-frame generation. On
-  adapters without it, native mode stays at 2X.
+  OFXR's 3X Frame Gen setting. 3X needs NGX multi-frame generation (RTX 50
+  series). On other adapters, native mode stays at 2X, so the game has to
+  hold half the refresh rate rather than a third: on an RTX 40 card with a
+  game that only just holds half, OFXR's own 3X is the better choice. The
+  tray's 3X entry and the in-VR status panel say so.
 - **The real frame stays bit-exact.** Only the in-between frames are
   generated, and OFXR's bit-exact copy of the real frame is preserved. Colour
   reaches NGX display-encoded: sRGB is encoded in the pack and decoded on

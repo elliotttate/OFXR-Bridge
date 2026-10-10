@@ -1095,8 +1095,16 @@ void show_context_menu(AppState& state) {
         append_note(methods, L"Frames shown per game frame");
         append_entry(methods, frames_2x, L"2X: one generated frame per game frame", !triple, true, true,
                      method_note(method, {.triple = false}));
+        // NVIDIA's frame generation makes two frames a pair only where NGX
+        // offers multi-frame generation (RTX 50); elsewhere the layer stays at
+        // 2X, which needs the game at half the refresh rather than a third.
+        // Without a benchmark of this PC nothing else says so.
+        const std::wstring triple_note = method_note(method, {.triple = true});
         append_entry(methods, frames_3x, L"3X: two generated frames per game frame (switches live)",
-                     triple, true, true, method_note(method, {.triple = true}));
+                     triple, true, true,
+                     native && triple_note.empty()
+                         ? std::wstring(L"DLSS Frame Generation: RTX 50 series only, 2X on others")
+                         : triple_note);
         append_submenu(menu, methods, L"Frame generation method");
     }
 
