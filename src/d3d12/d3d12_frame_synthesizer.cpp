@@ -60,6 +60,10 @@ constexpr UINT kFidelityFxFlowBlockSize = 8;
 constexpr UINT kNvidiaFlowBlockSize = 4;
 constexpr UINT kEyeGapPixels = 64;
 constexpr UINT kMinimumFlowDimension = 64;
+// The tallest per-eye flow input any chosen scale may give; see the scale's
+// use in initialize. 75% of Galactic Racer's 3004-pixel eyes (2253) is below
+// it, so ordinary resolutions keep the scale they were given.
+constexpr UINT64 kMaxFlowInputHeight = 2304;
 // Keep only one complete OFXR transaction resident on the graphics queue.  A
 struct NvidiaInputScaleRatio {
     UINT numerator;
@@ -2263,8 +2267,23 @@ struct D3D12FrameSynthesizer::Impl {
         // One input scale for whichever backend is running. The FidelityFX
         // path packs both eyes into one texture, so its stride and packed
         // height come from the scaled per-eye height, not the source.
-        const NvidiaInputScaleRatio scale =
-            nvidia_input_scale_ratio(input_nvidia_options.input_scale);
+        //
+        // The chosen scale is stepped down until the flow's per-eye input is
+        // at most kMaxFlowInputHeight tall. Flow finer than that adds little
+        // for its cost, and supersampled eyes make it unaffordable: Trombone
+        // Champ asked SteamVR for 6514x6514 per eye, where NVIDIA's flow at
+        // 75% took 9.8 ms a pair beside an 8.2 ms composition, and half the
+        // generated frames missed their slots. The height is per eye in
+        // both layouts (side by side, or one array slice per eye).
+        D3D12NvidiaInputScale effective_scale = input_nvidia_options.input_scale;
+        NvidiaInputScaleRatio scale = nvidia_input_scale_ratio(effective_scale);
+        while (effective_scale != D3D12NvidiaInputScale::quarter &&
+               (static_cast<UINT64>(description.Height) * scale.numerator +
+                scale.denominator - 1U) / scale.denominator > kMaxFlowInputHeight) {
+            effective_scale = static_cast<D3D12NvidiaInputScale>(
+                static_cast<int>(effective_scale) + 1);
+            scale = nvidia_input_scale_ratio(effective_scale);
+        }
         const auto scaled = [&](UINT64 value) -> UINT64 {
             return (value * scale.numerator + scale.denominator - 1U) /
                 scale.denominator;

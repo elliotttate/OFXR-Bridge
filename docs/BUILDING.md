@@ -1007,6 +1007,16 @@ The quarter is kept where the flow only patches the vectors. Its packed input
 averages four bilinear taps, so each packed pixel stands for its 4x4 rather
 than a quarter of them.
 
+Whatever scale is chosen, the flow's per-eye input is held to at most 2304
+pixels tall: the scale steps down (75% to 50% to 25%) until it fits. Ordinary
+eyes keep their scale (75% of Galactic Racer's 3004 is 2253), but SteamVR can
+hand a supersampling game far larger ones. Trombone Champ: Unflattened asked
+for 6514x6514 per eye; NVIDIA's flow at 75% took 9.8 and 8.2 ms for the two
+eyes, a pair 19-21 ms, and only 28.6 of 59.7 game frames a second got their
+synthetic. Capped (a quarter, 1628 pixels), each eye's flow took 1.2 ms and
+the pair 3.8-4.7 ms, and every game frame got its synthetic (119.5 shown a
+second).
+
 #### On frames no tuning used
 
 The 42 triplets chose these settings, so they were checked on 17 that played
