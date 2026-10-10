@@ -65,6 +65,10 @@ struct D3D12FrameSynthesisTicket {
     // frame - a native DLSS FG pair NGX skipped - so its synthetics show B's
     // camera and go to the runtime with B's pose.
     bool synthetics_in_target_camera{};
+    // That case: the pair's synthetics are copies of the current frame. They
+    // go out to keep the cadence, but they show nothing the current frame
+    // does not, so the counter takes them for repeats, not generated frames.
+    bool synthetics_repeat_current{};
 };
 
 // Completed direct-queue GPU intervals for one NVIDIA Optical Flow pair.

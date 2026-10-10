@@ -5343,6 +5343,7 @@ struct D3D12FrameSynthesizer::Impl {
         output_ticket->current_destination_index = current_destination_index;
         // A skipped native pair copied B into its outputs.
         output_ticket->synthetics_in_target_camera = !native_dlss || native_pair_generated;
+        output_ticket->synthetics_repeat_current = native_dlss && !native_pair_generated;
         return S_OK;
     }
 

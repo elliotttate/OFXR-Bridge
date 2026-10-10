@@ -263,6 +263,51 @@ int main(int argc, char** argv) {
         input.vectors = {PanelVectorStatus::waiting_for_depth, 4000, 0, 0, 0};
         require(has_line(status_panel_text(input), "Waiting for the game's depth", PanelTone::warn), "depth wait");
 
+        // Every pair skipped for guides that do not fit (reported in Star Wars
+        // Jedi: Survivor under UEVR on Virtual Desktop at 90 Hz): the pairs
+        // still go out, a copy of each real frame before it, so the counter
+        // has them as repeats, and the real frames are held as long as when
+        // they are generated. The panel said "Waiting for the game's DLSS
+        // guides", 45 generated a second and no latency added.
+        asked = PanelMethod{};
+        asked.native = true;
+        asked.native_scale = 67;
+        asked.deep = true;
+        input = generating(asked, asked);
+        input.runtime = "VirtualDesktopXR";
+        input.rates = {45.0f, 45.0f, 0.0f, 45.0f, 90.0f, -1.0f, true};
+        input.vectors = {PanelVectorStatus::temporal_mismatch, 4000, 0, 0, 0};
+        text = status_panel_text(input);
+        require(text.state == "NOT GENERATING" && line_labelled(text, "Running").text == "Real frames only",
+                "native pairs with refused guides are not generating");
+        require(line_labelled(text, "Why").text == "The game's DLSS guides did not match the frames" &&
+                    line_labelled(text, "Why").tone == PanelTone::warn,
+                "refused native guides read as still awaited");
+        require(line_labelled(text, "Guides").text == "refused: they did not match the frames", "refused guides");
+        require(line_labelled(text, "Latency").text == "+2 frames (22 ms) added",
+                "skipped native pairs still hold the real frame");
+        require(line_labelled(text, "Frames").text == "45.0 repeats/s", "the copies are repeats");
+        input.vectors = {PanelVectorStatus::no_matching_output, 4000, 0, 0, 0};
+        text = status_panel_text(input);
+        require(line_labelled(text, "Why").text == "The game's DLSS output is not the eye images' size" &&
+                    line_labelled(text, "Guides").text == "unused: no DLSS output is the eye images' size",
+                "eye images no DLSS output fits");
+        input.vectors = {PanelVectorStatus::queue_mismatch, 4000, 0, 0, 0};
+        require(line_labelled(status_panel_text(input), "Why").text == "The game's DLSS ran on another queue",
+                "native guides on another queue");
+        input.vectors = {PanelVectorStatus::output_not_direct, 4000, 0, 0, 0};
+        require(line_labelled(status_panel_text(input), "Why").text == "Waiting for the game's DLSS guides",
+                "native guides not used yet");
+        // OFXR's own methods name the size mismatch too.
+        input = generating(tray_default(), tray_default());
+        input.running.hybrid = false;
+        input.session.hybrid = input.asked.hybrid = false;
+        input.running.game_vectors = true;
+        input.vectors = {PanelVectorStatus::no_matching_output, 4000, 0, 0, 0};
+        require(line_labelled(status_panel_text(input), "Why").text ==
+                    "DLSS vectors unused: no DLSS output is the eye images' size",
+                "OFXR vectors with no DLSS output of the eye images' size");
+
         // Extrapolation: no latency added, and FidelityFX flow without vectors.
         asked = tray_default();
         asked.extrapolate = 1;

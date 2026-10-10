@@ -54,6 +54,21 @@ int main(int argc, char** argv) {
                 std::abs(padded.submitted_fps - padded.generated_fps - 39) < 0.5f,
                 "generated and game frames must be told apart");
         require(std::abs(padded.repeated_fps - 66) < 0.5f, "repeats must be counted apart");
+        // A native DLSS FG pair NGX skipped: its synthetic is a copy of the
+        // real frame after it. The pairs still go out, so generation stays
+        // active, but a copy is a repeat and not a frame: 45 pairs a second
+        // at 90 Hz are 45 distinct images, none generated.
+        {
+            xrfg::FpsCounter copies;
+            for (int i = 0; i < 90; ++i) {
+                const auto t = 9'000'000'000 + static_cast<std::int64_t>(i) * 1'000'000'000 / 90;
+                copies.submitted(t, i % 2 == 0, i % 2 == 1);
+            }
+            const auto copied = copies.snapshot(9'999'999'999);
+            require(std::abs(copied.submitted_fps - 45) < 0.5f && copied.generated_fps < 0.5f &&
+                        std::abs(copied.repeated_fps - 45) < 0.5f && copied.active,
+                    "copies of the real frame must count as repeats while the pairs go out");
+        }
         // The compositor scans every one of those 144 submissions out on time,
         // so its delivered count is the refresh rate. What reaches the eye is
         // the new-content share of it.

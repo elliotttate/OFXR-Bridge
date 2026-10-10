@@ -523,6 +523,10 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     {stream.first_publication, stream.latest, stream.previous});
             }
         }
+        // The streams evaluated on this image's queue, before any is set aside
+        // for its size: what tells an image no evaluation fits from a game
+        // whose DLSS ran on another queue.
+        const std::size_t streams_on_queue = candidates.size();
 
         // An evaluation whose output is this very image belongs to it,
         // whatever else matches its size.
@@ -544,8 +548,10 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // Preserve both eye streams and remap their output coordinate systems
         // onto the packed XR image. Motion/depth stay in each NGX input's own
         // coordinates; the native pack shader applies this output mapping.
+        // An image that holds one eye alone - a swapchain per eye, some twice
+        // an eye's width - is never two eyes side by side.
         bool packed_stereo = false;
-        if (eye_count == 1 && description.Width % 2 == 0) {
+        if (eye_count == 1 && eye != 0 && eye != 1 && description.Width % 2 == 0) {
             std::vector<Candidate> packed;
             for (const auto& candidate : candidates) {
                 const auto& f = candidate.frame;
@@ -569,6 +575,27 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
                     c.frame->output_height != description.Height;
             });
         }
+        // Too few streams for the image's eyes. Where this queue evaluated
+        // enough of them, none has this image's shape - an eye image of
+        // another size than every DLSS output, for one. That is neither a
+        // queue mismatch nor a temporal one, which is what the panel used to
+        // say: a swapchain per eye said the vectors "did not match the
+        // frames" when no evaluation could ever fit the image.
+        const auto too_few_streams = [&]() -> std::shared_ptr<const DlssMotionVectorSet> {
+            if (streams_on_queue >= eye_count) {
+                ++state.statistics.resolve_missing_streams;
+                state.statistics.status = DlssMotionVectorStatus::no_matching_output;
+            } else if (streams_with_frames >= eye_count) {
+                ++state.statistics.resolve_queue_mismatches;
+                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
+            } else {
+                ++state.statistics.resolve_missing_streams;
+                state.statistics.status = state.statistics.published == 0
+                    ? DlssMotionVectorStatus::waiting_for_dlss
+                    : DlssMotionVectorStatus::output_not_direct;
+            }
+            return {};
+        };
 
         // A swapchain per eye, each the size of a DLSS output: every eye's
         // evaluation matches each eye's image by size, and the newest went to
@@ -584,6 +611,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         // stream by the order they were evaluated, left first.
         if (!packed_stereo && !direct_match && eye_count == 1 &&
             (eye == 0 || eye == 1)) {
+            if (candidates.empty()) return too_few_streams();
             // Streams no longer evaluated - Lies of P keeps one of the eyes'
             // size from start-up - are not an eye's.
             std::uint64_t newest_publication = 0;
@@ -687,18 +715,7 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             }
         }
 
-        if (candidates.size() < eye_count) {
-            if (streams_with_frames >= eye_count) {
-                ++state.statistics.resolve_queue_mismatches;
-                state.statistics.status = DlssMotionVectorStatus::queue_mismatch;
-            } else {
-                ++state.statistics.resolve_missing_streams;
-                state.statistics.status = state.statistics.published == 0
-                    ? DlssMotionVectorStatus::waiting_for_dlss
-                    : DlssMotionVectorStatus::output_not_direct;
-            }
-            return {};
-        }
+        if (candidates.size() < eye_count) return too_few_streams();
 
         std::sort(candidates.begin(), candidates.end(), [](const Candidate& a,
                                                            const Candidate& b) {

@@ -76,6 +76,7 @@ enum class PanelVectorStatus : std::uint32_t {
     waiting_for_depth,
     native_unavailable,
     multi_frame_unsupported,
+    no_matching_output,
 };
 
 enum class PanelFlow : std::uint8_t { fidelity_fx, nvidia };

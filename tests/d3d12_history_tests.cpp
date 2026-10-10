@@ -2896,6 +2896,40 @@ void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
         right_xr.Get(), fixture.queue(), 1, shared_both, shared_both);
     require(first && second && first->eyes[0]->serial == 6 && second->eyes[0]->serial == 7,
         "one shared DLSS stream evaluated before both releases did not go left first");
+
+    // An eye image no DLSS output has the shape of takes nothing, and says
+    // why. It was reported as a temporal mismatch - on the status panel,
+    // guides that "did not match the frames" - when no evaluation could ever
+    // fit the image: the per-eye path found no stream at all. An image twice
+    // an eye's width holding one eye (UEVR gave Lies of P's left eye one on
+    // some launches) also went to the side-by-side path, where the stale
+    // stream of the eyes' size made a "pair" with the live one.
+    // Without the spectator stream, which is that wide image's size.
+    xrfg::retire_dlss_motion_vector_stream(644);
+    const auto stale_before = xrfg::dlss_motion_vector_statistics().resolve_stale_pairs;
+    const auto wide_eye = create_texture(width * 2, height);
+    const auto small_eye = create_texture(width / 2, height);
+    for (const auto& image : {wide_eye, small_eye}) {
+        require(!xrfg::resolve_dlss_motion_vectors(
+                    image.Get(), fixture.queue(), 0, shared_both, shared_both),
+            "an eye image no DLSS output fits took guides");
+        const auto unmatched = xrfg::dlss_motion_vector_statistics();
+        require(unmatched.status == xrfg::DlssMotionVectorStatus::no_matching_output &&
+                    unmatched.resolve_stale_pairs == stale_before,
+            "an eye image no DLSS output fits was reported as a temporal mismatch");
+    }
+    // The game's DLSS on another queue is still told apart.
+    D3D12_COMMAND_QUEUE_DESC other_queue_description{};
+    other_queue_description.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    ComPtr<ID3D12CommandQueue> other_queue;
+    require_hresult(fixture.device()->CreateCommandQueue(
+        &other_queue_description, IID_PPV_ARGS(other_queue.GetAddressOf())),
+        "create another queue");
+    require(!xrfg::resolve_dlss_motion_vectors(
+                left_xr.Get(), other_queue.Get(), 0, shared_both, shared_both) &&
+                xrfg::dlss_motion_vector_statistics().status ==
+                    xrfg::DlssMotionVectorStatus::queue_mismatch,
+        "DLSS on another queue was not reported as such");
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::retire_dlss_motion_vector_stream(633);
     xrfg::retire_dlss_motion_vector_stream(644);
@@ -2987,6 +3021,9 @@ void test_dlss_motion_vector_stereo_stream_pairing(D3D12WarpFixture& fixture) {
     const auto unrelated_ui = create_texture(width/2,height/2,1);
     require(!xrfg::resolve_dlss_motion_vectors(unrelated_ui.Get(),fixture.queue()),
         "scene depth/motion were incorrectly associated with an unrelated UI swapchain");
+    require(xrfg::dlss_motion_vector_statistics().status ==
+                xrfg::DlssMotionVectorStatus::no_matching_output,
+        "an image no DLSS output fits was reported as DLSS on another queue");
     xrfg::report_dlss_motion_vector_use();
     const auto used = xrfg::dlss_motion_vector_statistics();
     require(used.status == xrfg::DlssMotionVectorStatus::used && used.used == 1 &&
@@ -3441,6 +3478,8 @@ void test_dlss_motion_vector_gpu_ingress(
         statistics_after.used == statistics_before.used + 1 &&
             statistics_after.status == xrfg::DlssMotionVectorStatus::used,
         "DLSS-motion path was not selected by the GPU synthesizer");
+    require(pair.synthetics_in_target_camera && !pair.synthetics_repeat_current,
+        "a generated pair said its synthetic is a copy of the current frame");
 
     const StereoPattern actual = readback_pattern(
         fixture, synthetic_destinations[0].Get(),
@@ -3560,6 +3599,9 @@ void test_dlss_motion_vector_gpu_ingress(
         fixture.execute_and_wait([](ID3D12GraphicsCommandList*){});
         require(readback_pattern(fixture,synthetic_destinations[0].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET)==current,
             "native explicit reset did not show the current frame");
+        // The copy is no generated frame: the layer counts it as a repeat.
+        require(!pair.synthetics_in_target_camera && pair.synthetics_repeat_current,
+            "a skipped native pair did not say its synthetic is the current frame");
         require_frame_start_gate(synthesizer,"native missing-depth gate");
         xrfg::D3D12HistoryCaptureTicket capture_d{};
         require_hresult(history->capture(1,&capture_d),"native missing-depth capture");

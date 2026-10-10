@@ -7979,6 +7979,12 @@ struct PendingPrivateRelease {
 
 struct GeneratedFrameEndInfo {
     bool synthetic{};
+    // A synthetic whose every image is a copy of the real frame that follows
+    // it - a native DLSS FG pair NGX skipped. It keeps the cadence, but the
+    // counter takes it for a repeat: 45 "generated" frames a second were
+    // reported beside "Real frames only", and the corner counter read the
+    // refresh rate while half the frames were copies.
+    bool repeats_current{};
     // The first of an application frame's submissions, when that is a
     // synthetic: the one the 3X release delay is judged on.
     bool leads_frame{};
@@ -9622,7 +9628,9 @@ void continuous_presenter_main(
                     // nothing. It is a submission and not a frame, so the
                     // overlay must not count it.
                     ? state->fps_overlay->end_frame(
-                          &submitted, fresh_synthetic, request != nullptr)
+                          &submitted, fresh_synthetic,
+                          request != nullptr &&
+                              !(fresh_synthetic && request->owned_frame->repeats_current))
                     : state->dispatch->end_frame(state->handle, &submitted);
             });
             state->presenter_last_end_returned_at =
@@ -11694,6 +11702,9 @@ struct PreparedGeneration {
     // The pair's synthetics were generated in the target cameras they were
     // given; see D3D12FrameSynthesisTicket::synthetics_in_target_camera.
     bool synthetics_in_target_camera{};
+    // They are copies of the current frame instead; see
+    // D3D12FrameSynthesisTicket::synthetics_repeat_current.
+    bool synthetics_repeat_current{};
     // Set only when the release to the runtime is left to whoever hands the
     // frame over; the images stay acquired until then.
     std::shared_ptr<FrameGenerationSwapchainState> deferred_generation;
@@ -12079,6 +12090,8 @@ struct PreparedProjectionFrame {
         output.anchor_is_current = true;
         output.synthetics_in_target_camera =
             request_pair && ticket.synthetics_in_target_camera;
+        output.synthetics_repeat_current =
+            request_pair && ticket.synthetics_repeat_current;
         output.current_handle = current_image.handle;
         output.synthetic_handle = synthetic_image.handle;
         if (request_extra) {
@@ -12530,7 +12543,10 @@ struct InternalCycleResult {
     // The frame is a synthetic for the recorder's reprojection_angle, where
     // it differs from `synthetic`: extrapolating, this cycle carries the
     // pair's synthetic, which the overlay has always counted as the real one.
-    std::optional<bool> recorded_synthetic = std::nullopt) {
+    std::optional<bool> recorded_synthetic = std::nullopt,
+    // The synthetic is a copy of the real frame; see
+    // GeneratedFrameEndInfo::repeats_current.
+    bool repeats_current = false) {
     InternalCycleResult output{};
     if (state->dispatch->wait_frame == nullptr ||
         state->dispatch->begin_frame == nullptr ||
@@ -12611,7 +12627,7 @@ struct InternalCycleResult {
     log_reprojection_angle(*state, submitted, recorded_synthetic.value_or(synthetic) ? 2U : 1U);
     const XrResult end_result = with_runtime_entry(state, [&] {
         return state->fps_overlay
-            ? state->fps_overlay->end_frame(&submitted, synthetic)
+            ? state->fps_overlay->end_frame(&submitted, synthetic, !repeats_current)
             : state->dispatch->end_frame(state->handle, &submitted);
     });
     xrfg::bridge_flight_logger().end(
@@ -13356,8 +13372,8 @@ void log_video_memory_periodically(SessionState& state) noexcept {
 // The panel reads DLSS guide statuses by value; both lists must stay in step.
 static_assert(static_cast<int>(xrfg::PanelVectorStatus::used) ==
               static_cast<int>(xrfg::DlssMotionVectorStatus::used));
-static_assert(static_cast<int>(xrfg::PanelVectorStatus::multi_frame_unsupported) ==
-              static_cast<int>(xrfg::DlssMotionVectorStatus::multi_frame_unsupported));
+static_assert(static_cast<int>(xrfg::PanelVectorStatus::no_matching_output) ==
+              static_cast<int>(xrfg::DlssMotionVectorStatus::no_matching_output));
 
 [[nodiscard]] int panel_scale_percent(int scale) noexcept {
     switch (scale) {
@@ -14242,6 +14258,15 @@ XrResult layer_end_frame_impl(
     }
     extra_ready = extra_ready && pair_ready;
     extra_generated.synthetic = extra_ready;
+    {
+        const bool repeats_current = pair_ready && !prepared.resources.empty() &&
+            std::all_of(prepared.resources.begin(), prepared.resources.end(),
+                [](const PreparedProjectionResource& resource) {
+                    return resource.generation.synthetics_repeat_current;
+                });
+        first_generated.repeats_current = first_generated.synthetic && repeats_current;
+        extra_generated.repeats_current = extra_generated.synthetic && repeats_current;
+    }
     std::shared_ptr<GeneratedFrameEndInfo> presenter_extra_frame;
     std::shared_ptr<GeneratedFrameEndInfo> presenter_current_frame;
     if (use_continuous_presenter &&
@@ -14448,7 +14473,9 @@ XrResult layer_end_frame_impl(
         }
         result = with_runtime_entry(state, [&] {
             return state->fps_overlay
-                ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
+                ? state->fps_overlay->end_frame(submitted_end_info, pair_ready,
+                      !(pair_ready && submitted_end_info == &first_generated.info &&
+                        first_generated.repeats_current))
                 : state->dispatch->end_frame(session, submitted_end_info);
         });
     }
@@ -14649,7 +14676,7 @@ XrResult layer_end_frame_impl(
             adopt_outstanding_wait
                 ? std::optional<XrFrameState>(state->last_inline_frame_state)
                 : std::nullopt,
-            true).completed;
+            true, std::nullopt, extra_generated.repeats_current).completed;
     }
     const auto current_cycle_started = std::chrono::steady_clock::now();
     run_private_releases(state.get(), current_generated.pending_releases);

@@ -211,6 +211,7 @@ enum class Engine {
     case PanelVectorStatus::waiting_for_depth: return "waiting for the game's depth";
     case PanelVectorStatus::native_unavailable: return "DLSS Frame Generation could not run";
     case PanelVectorStatus::multi_frame_unsupported: return "this GPU's DLSS FG makes one frame a pair";
+    case PanelVectorStatus::no_matching_output: return "unused: no DLSS output is the eye images' size";
     default:
         return vectors.published == 0 ? "none from this game yet" : "none in the last moment";
     }
@@ -224,6 +225,7 @@ enum class Engine {
     case PanelVectorStatus::invalid_input: return "The game's DLSS vectors were refused as invalid";
     case PanelVectorStatus::output_not_direct: return "DLSS vectors unused: DLSS output is not the eye image";
     case PanelVectorStatus::queue_mismatch: return "DLSS vectors unused: DLSS ran on another queue";
+    case PanelVectorStatus::no_matching_output: return "DLSS vectors unused: no DLSS output is the eye images' size";
     case PanelVectorStatus::waiting_for_depth: return "Waiting for the game's depth";
     default: return "The game's DLSS vectors stopped arriving";
     }
@@ -325,6 +327,17 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
                     break;
                 case PanelVectorStatus::invalid_input:
                     reason("The game's DLSS guides were refused as invalid", PanelTone::warn);
+                    break;
+                // Guides the game gives but that cannot be used, which this
+                // line once called still awaited.
+                case PanelVectorStatus::temporal_mismatch:
+                    reason("The game's DLSS guides did not match the frames", PanelTone::warn);
+                    break;
+                case PanelVectorStatus::no_matching_output:
+                    reason("The game's DLSS output is not the eye images' size", PanelTone::warn);
+                    break;
+                case PanelVectorStatus::queue_mismatch:
+                    reason("The game's DLSS ran on another queue", PanelTone::warn);
                     break;
                 default:
                     reason(input.vectors.published == 0 ? "No DLSS guides from this game yet"
@@ -436,7 +449,10 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
                      PanelTone::normal});
     {
         PanelLine line{"Latency", "none added", PanelTone::dim};
-        if (engine != Engine::none) {
+        // A native pair NGX skipped still goes out, the real frame's copy
+        // where the generated frame would be, so the real frame is held as
+        // long as when it is generated.
+        if (engine != Engine::none || (input.running.native && input.rates.generating)) {
             // The README's account: interpolation shows each real frame a
             // display frame later (two at 3X), the deeper pipeline one more,
             // extrapolation none.

@@ -124,6 +124,10 @@ enum class DlssMotionVectorStatus : std::uint32_t {
     native_unavailable,
     // 3X was requested from a native feature that generates one frame.
     multi_frame_unsupported,
+    // The game evaluates DLSS on the image's queue, but no evaluation's
+    // output has the image's shape: an eye image of another size than
+    // every DLSS output, say.
+    no_matching_output,
 };
 
 struct DlssMotionVectorStatistics {
