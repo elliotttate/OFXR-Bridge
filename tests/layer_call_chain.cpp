@@ -132,6 +132,11 @@ bool g_steamvr_presenter_mode = false;
 // that takes a period and a half to render each frame - long enough that its
 // real frames go down after the time first promised for them.
 bool g_promise_mode = false;
+// inline-promise: inline pairs on a runtime whose display time advances a
+// whole period per wait. The other scenarios pin the inline schedule as it
+// was before the layer promised the real frame's time, so they run with
+// XRFG_TEST_INLINE_PROMISE=0; this one checks the promise.
+bool g_inline_promise_mode = false;
 // Set while the application is inside xrEndFrame. The layer runs its inline
 // second wait/begin/end cycle from that call on this same thread, which is
 // exactly what a throttling SteamVR configuration slows down, so this tells
@@ -380,6 +385,11 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
     if (g_promise_mode) {
         // A still head: the scenario is about time, not motion.
         return 0;
+    }
+    if (g_inline_promise_mode) {
+        // Back and forth, so a long run keeps its field of view in bounds.
+        const XrTime step = (display_time / kFakeDisplayPeriod) % 400;
+        return (step < 200 ? step : 400 - step) * 100;
     }
     if (g_steamvr_presenter_mode || g_flight_simulator_mode) {
         return (display_time / kFakeDisplayPeriod) * 100;
@@ -685,6 +695,17 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
         }
         return XR_ERROR_RUNTIME_FAILURE;
     }
+    // inline-promise: paced a period apart, as a real runtime is. Unpaced,
+    // each pair's two frames go down within one period, and the layer
+    // promotes the presenter (inline_pair_lands_in_one_scanout).
+    if (g_inline_promise_mode) {
+        static std::chrono::steady_clock::time_point next_wait{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now < next_wait) {
+            std::this_thread::sleep_until(next_wait);
+        }
+        next_wait = std::max(now, next_wait) + std::chrono::nanoseconds(kFakeDisplayPeriod);
+    }
     // XRFG_TEST_THROTTLE_AFTER_WAITS=N (promise-shown-time): after N waits
     // the runtime halves the rate, as SteamVR does when it judges the caller
     // late - a doubled period, and display times twice as far apart.
@@ -705,6 +726,7 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_wait_frame(
     g_next_display_time += g_flight_simulator_mode
         ? kFakeDisplayPeriod * 3
         : g_promise_mode ? (throttled ? kFakeDisplayPeriod * 2 : kFakeDisplayPeriod)
+        : g_inline_promise_mode ? kFakeDisplayPeriod
         : 100;
     {
         std::scoped_lock lock(g_frame_loop_mutex);
@@ -2450,7 +2472,7 @@ int main(int argc, char** argv) {
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
             "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
-            "steamvr-own-time|promise-shown-time|panel-input]\n";
+            "steamvr-own-time|promise-shown-time|inline-promise|panel-input]\n";
         return EXIT_FAILURE;
     }
     g_panel_input_mode = argc == 4 && std::strcmp(argv[3], "panel-input") == 0;
@@ -2473,6 +2495,9 @@ int main(int argc, char** argv) {
         argc == 4 && std::strcmp(argv[3], "steamvr-own-time") == 0;
     g_promise_mode =
         argc == 4 && std::strcmp(argv[3], "promise-shown-time") == 0;
+    g_inline_promise_mode =
+        argc == 4 && std::strcmp(argv[3], "inline-promise") == 0;
+    SetEnvironmentVariableA("XRFG_TEST_INLINE_PROMISE", g_inline_promise_mode ? "1" : "0");
     g_steamvr_presenter_mode = g_destroy_pending_space || g_dcs_mode ||
         g_refuse_layer_mode || g_own_display_time_mode || g_promise_mode ||
         (argc == 4 && std::strcmp(argv[3], "steamvr-presenter") == 0);
@@ -2538,7 +2563,7 @@ int main(int argc, char** argv) {
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
         !g_inverted_vertical_fov && !g_vulkan_mode && !g_vulkan_bridge_mode &&
-        !g_swapchain_budget_mode && !g_panel_input_mode) {
+        !g_swapchain_budget_mode && !g_panel_input_mode && !g_inline_promise_mode) {
         std::cerr << "unknown test mode\n";
         return EXIT_FAILURE;
     }
@@ -4120,6 +4145,83 @@ int main(int argc, char** argv) {
             return EXIT_FAILURE;
         }
         std::cout << "OpenXR SteamVR own-display-time pairing test passed\n";
+        return EXIT_SUCCESS;
+    }
+
+    if (g_inline_promise_mode) {
+        // Inline pairs: once the layer has measured where they go down
+        // (two windows of 64 real frames), every real frame (the layer's own
+        // cycle, target=current) must go down at a display time the
+        // application was promised, and every synthetic (its own frame,
+        // target=synthetic) a period before one. Before the layer promised
+        // the real frame's time, the real frame went down a period after its
+        // promise and the synthetic at it. The second half of the run is
+        // judged.
+        std::vector<XrTime> promised;
+        bool frame_sequence_succeeded = true;
+        XrTime last_predicted = 0;
+        for (int index = 0; index < 360 && frame_sequence_succeeded; ++index) {
+            XrFrameState frame{XR_TYPE_FRAME_STATE};
+            frame_sequence_succeeded =
+                XR_SUCCEEDED(wait_frame(session, &frame_wait_info, &frame)) &&
+                frame.predictedDisplayTime > last_predicted &&
+                XR_SUCCEEDED(begin_frame(session, &frame_begin_info)) &&
+                capture_fresh_application_image() &&
+                submit_frame(frame.predictedDisplayTime);
+            last_predicted = frame.predictedDisplayTime;
+            promised.push_back(frame.predictedDisplayTime);
+        }
+        const bool teardown_succeeded =
+            XR_SUCCEEDED(end_session(session)) &&
+            XR_SUCCEEDED(destroy_swapchain(swapchain)) &&
+            XR_SUCCEEDED(destroy_session(session)) &&
+            XR_SUCCEEDED(destroy_instance(instance));
+        FreeLibrary(module);
+        std::ifstream log_stream(argv[2]);
+        const auto was_promised = [&](XrTime time) {
+            return std::find(promised.begin(), promised.end(), time) != promised.end();
+        };
+        int reals = 0, reals_on_time = 0, synthetics = 0, synthetics_on_time = 0;
+        for (std::string line; std::getline(log_stream, line);) {
+            const auto at = line.find("downstream end frame target=");
+            const auto time_at = line.find(" time=");
+            if (at == std::string::npos || time_at == std::string::npos) continue;
+            const XrTime time = std::stoll(line.substr(time_at + 6));
+            if (promised.size() < 360 || time < promised[180]) continue;
+            if (line.find("target=current ", at) != std::string::npos) {
+                ++reals;
+                if (was_promised(time)) {
+                    ++reals_on_time;
+                } else {
+                    std::cerr << "real frame off its promise at " << time << '\n';
+                }
+            } else if (line.find("target=synthetic ", at) != std::string::npos) {
+                ++synthetics;
+                if (was_promised(time + kFakeDisplayPeriod)) {
+                    ++synthetics_on_time;
+                } else {
+                    std::cerr << "synthetic not a period before a promise at " << time << '\n';
+                }
+            }
+        }
+        // A frame synthesis misses goes down unpaired, and the pair after it
+        // can land a period late; nine in ten is the bar.
+        const bool valid = frame_sequence_succeeded && teardown_succeeded &&
+            reals >= 150 && synthetics >= 150 && reals_on_time * 20 >= reals * 19 &&
+            synthetics_on_time * 20 >= synthetics * 19;
+        if (!valid) {
+            std::cerr << "promised:";
+            for (const XrTime time : promised) std::cerr << ' ' << time;
+            std::cerr << '\n';
+            std::cerr << "inline-promise validation failed: frames="
+                      << frame_sequence_succeeded << " teardown=" << teardown_succeeded
+                      << " real=" << reals_on_time << '/' << reals
+                      << " synthetic=" << synthetics_on_time << '/' << synthetics << '\n';
+            return EXIT_FAILURE;
+        }
+        std::cout << "OpenXR inline-promise test passed: real frames on time "
+                  << reals_on_time << '/' << reals << ", synthetics a period before "
+                  << synthetics_on_time << '/' << synthetics << "\n";
         return EXIT_SUCCESS;
     }
 

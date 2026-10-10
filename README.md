@@ -566,6 +566,22 @@ hybrid under a new key and ignores the old one.
   When frames go down is unchanged; only the promise follows it.
   `xrfg_layer_promise_shown_time` checks it on the presenter, interpolating
   and extrapolating.
+- **Inline games are promised it too.** Where the bridge runs without its
+  presenter thread (single-threaded D3D11 games, DCS, many titles on Virtual
+  Desktop and Pimax), a pair goes down in the game's own frame - the generated
+  frame - and its real frame a display period later. The game was promised
+  the earlier time, so every real frame was shown a period after the pose it
+  was rendered for, and the runtime turned it back: on the Meta XR Simulator,
+  with the head made to turn up to 42 degrees a second, every real frame
+  needed 0.32-0.46 degrees of turning, which a runtime fills with black at the
+  edge; a generated frame, whose pose lies halfway between the real frames',
+  was by the same arithmetic shown a period after its pose too. The promise
+  is now measured inline as on the presenter
+  (`[ofxr] inline_promise=1`, the default): there, the correction followed
+  within 64 frames and real frames then needed none (median 0). In the fake
+  runtime every real frame then went down at its promise and every generated
+  frame a period before it, halfway between the real frames' poses
+  (`xrfg_layer_inline_promise`).
 - **The promise follows games whose frames go down in two groups.** It moved
   only when nine in ten of a window agreed. Kayak VR's real frames go down in
   two groups a frame apart (about 72% and 27%, as Unreal Engine 4 ends a frame

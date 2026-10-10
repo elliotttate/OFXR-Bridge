@@ -519,6 +519,12 @@ struct Dispatch {
     // Best-effort as well: the application's xrLocateViews is only recorded
     // (app_locate_views), never changed.
     PFN_xrLocateViews locate_views{};
+    // Test only (drive_test_runtime_devices): XR_EXT_conformance_automation,
+    // which the layer enables itself when a test asks for it.
+    XrInstance test_instance{};
+    PFN_xrStringToPath test_string_to_path{};
+    PFN_xrSetInputDeviceLocationEXT test_set_input_device_location{};
+    PFN_xrSetInputDeviceActiveEXT test_set_input_device_active{};
     // Best-effort, like the two above: forwarded unchanged unless a Vulkan
     // session was bridged to D3D12, where the runtime's DXGI list is shown
     // to the application as Vulkan formats.
@@ -655,6 +661,23 @@ enum class SessionGraphicsBinding : std::int64_t {
     d3d12 = 2,
     vulkan = 3,
     opengl = 4,
+};
+
+// A promise's measured lateness (observe_promise_lateness): the whole
+// display periods the promise to the application is moved later by, so it
+// names the time its real frames are actually shown at, and the window of
+// measurements behind that, in periods late against the uncorrected promise.
+// The correction is read at waits; the rest belongs to the one thread that
+// hands real frames over (the presenter, or the application's own inline).
+struct PromiseLateness {
+    std::atomic<std::int32_t> correction_periods{};
+    std::array<std::int8_t, 64> samples{};
+    std::uint32_t sample_count{};
+    std::uint32_t settle{};
+    // The correction the last window named, waiting for the next to agree;
+    // -1 for none.
+    std::int32_t candidate{-1};
+    bool runtime_slowed{};
 };
 
 struct PendingApplicationFrame {
@@ -980,6 +1003,19 @@ struct SessionState {
     DWORD application_end_thread_id{};
     XrFrameState last_inline_frame_state{XR_TYPE_FRAME_STATE};
     bool last_inline_frame_state_valid{};
+    // Inline interpolation's promise (inline_promise_shift), under mutex: how
+    // much later than the runtime's time the latest forwarded wait promised
+    // the application; whether inline pairs are running - set by a pair, and
+    // cleared by three frames in a row that went down unpaired or by a
+    // cooldown, so that one frame synthesis missed does not move the promise
+    // and back (each move puts a period more or less between two of the
+    // application's frames, which keeps the next one from pairing); and the
+    // runtime's own time for the frame the application's xrBeginFrame began,
+    // which its xrEndFrame fills.
+    XrDuration inline_promise_shift{};
+    bool inline_pairs_running{};
+    std::uint32_t inline_unpaired_frames{};
+    XrTime inline_slot_display_time{};
     std::mutex mutex;
     std::mutex gpu_mutex;
     std::deque<PendingApplicationFrame> pending_frames;
@@ -1389,20 +1425,14 @@ struct SessionState {
     XrDuration presenter_display_period{};
     XrFrameState presenter_frame_state{XR_TYPE_FRAME_STATE};
     XrTime last_virtual_display_time{};
-    // Whole display periods the promise to the application is moved later
-    // by, so it names the time its real frames are actually shown at (see
-    // observe_promise_lateness). Written by the presenter, read at waits.
+    // `[ofxr] promise_shown_time`: the promise to the application follows
+    // the time its real frames are shown at (observe_promise_lateness): the
+    // presenter's, and inline's (inline_promise_shift) under `[ofxr]
+    // inline_promise`.
     bool promise_shown_time{true};
-    std::atomic<std::int32_t> promise_correction_periods{};
-    // The presenter's window of measurements, in periods late against the
-    // uncorrected promise; its thread alone touches these.
-    std::array<std::int8_t, 64> promise_samples{};
-    std::uint32_t promise_sample_count{};
-    std::uint32_t promise_settle{};
-    // The correction the last window named, waiting for the next to agree;
-    // -1 for none.
-    std::int32_t promise_candidate{-1};
-    bool promise_runtime_slowed{};
+    bool inline_promise{true};
+    PromiseLateness presenter_promise;
+    PromiseLateness inline_promise_lateness;
     // Whether the runtime's last frame was at a multiple of the display
     // period, written by the presenter for the application's thread.
     std::atomic<bool> runtime_slowed{};
@@ -1781,6 +1811,207 @@ template <typename Call>
         std::forward<Call>(call));
 }
 
+// Test only: a runtime whose head and controllers move with no one wearing
+// the headset, for measuring what the runtime does with frame generation's
+// frames under a head turn (reprojection_angle) and for the status panel's
+// gesture. Where the runtime lists XR_EXT_conformance_automation (the Meta XR
+// Simulator does), the layer enables it and moves the runtime's own devices,
+// so its compositor sees them, unlike the application-side head_sway:
+// XRFG_TEST_RUNTIME_HEAD_SWAY_DEG=<amplitude> (XRFG_TEST_RUNTIME_HEAD_SWAY_
+// PERIOD_S, default 4) turns the head about the vertical by amplitude *
+// sin(2 pi t / period) at each runtime frame's predicted display time, as
+// the runtime's xrWaitFrame returns it (so it moves every displayed frame, as
+// a head does, and the frame's reprojection_angle sees where it is then), and
+// XRFG_TEST_RUNTIME_FLIP_S=<period> holds the right controller
+// upside down for the first half of each period and upright for the second.
+struct TestRuntimeDevices {
+    float sway{};  // radians
+    double sway_period_ns{4.0e9};
+    double flip_period_ns{};
+};
+
+[[nodiscard]] const TestRuntimeDevices& test_runtime_devices() noexcept {
+    static const TestRuntimeDevices devices = [] {
+        TestRuntimeDevices value;
+        const auto read = [](const wchar_t* name, double* out) {
+            wchar_t text[32]{};
+            const DWORD n = GetEnvironmentVariableW(name, text, 32);
+            if (n != 0 && n < 32) *out = std::wcstod(text, nullptr);
+            return n != 0 && n < 32;
+        };
+        double number = 0.0;
+        if (read(L"XRFG_TEST_RUNTIME_HEAD_SWAY_DEG", &number)) {
+            value.sway = static_cast<float>(number * 3.14159265358979 / 180.0);
+        }
+        if (read(L"XRFG_TEST_RUNTIME_HEAD_SWAY_PERIOD_S", &number) && number > 0.1) {
+            value.sway_period_ns = number * 1.0e9;
+        }
+        if (read(L"XRFG_TEST_RUNTIME_FLIP_S", &number) && number > 0.1) {
+            value.flip_period_ns = number * 1.0e9;
+        }
+        return value;
+    }();
+    return devices;
+}
+
+[[nodiscard]] bool test_runtime_devices_wanted() noexcept {
+    return test_runtime_devices().sway != 0.0F || test_runtime_devices().flip_period_ns > 0.0;
+}
+
+struct TestRuntimeDeviceSession {
+    XrSpace local{XR_NULL_HANDLE}, view{XR_NULL_HANDLE};
+    bool started{}, failed{};
+    XrPosef base{};
+    XrTime first{};
+    XrPath head{}, head_input{}, right{}, right_grip{};
+    bool head_found{}, head_failed{}, right_active{};
+    std::size_t head_candidate{};
+    int head_tries{};
+    int flipped{-1};
+};
+std::mutex g_test_runtime_devices_mutex;
+std::unordered_map<XrSession, TestRuntimeDeviceSession> g_test_runtime_device_sessions;
+
+void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexcept {
+    try {
+        const Dispatch& d = *state.dispatch;
+        if (!test_runtime_devices_wanted() || d.test_set_input_device_location == nullptr ||
+            d.test_string_to_path == nullptr || d.create_reference_space == nullptr ||
+            d.locate_space == nullptr) {
+            return;
+        }
+        const auto& wanted = test_runtime_devices();
+        const auto event = [](std::int64_t result, std::uint64_t a, std::uint64_t b, std::uint64_t c) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::test_runtime_device, result, a, b, c);
+        };
+        std::scoped_lock lock(g_test_runtime_devices_mutex);
+        auto& s = g_test_runtime_device_sessions[state.handle];
+        if (s.failed) return;
+        const auto locate_head = [&](XrTime time, XrPosef* pose) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            if (XR_FAILED(d.locate_space(s.view, s.local, time, &location)) ||
+                (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+                return false;
+            }
+            *pose = location.pose;
+            return true;
+        };
+        if (!s.started) {
+            XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+            info.poseInReferenceSpace.orientation.w = 1.0F;
+            info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+            const bool local = XR_SUCCEEDED(d.create_reference_space(state.handle, &info, &s.local));
+            info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+            const bool view = local && XR_SUCCEEDED(d.create_reference_space(state.handle, &info, &s.view));
+            if (!view || XR_FAILED(d.test_string_to_path(d.test_instance, "/user/head", &s.head)) ||
+                XR_FAILED(d.test_string_to_path(d.test_instance, "/user/hand/right", &s.right)) ||
+                XR_FAILED(d.test_string_to_path(d.test_instance, "/user/hand/right/input/grip/pose",
+                                                &s.right_grip)) ||
+                !locate_head(display_time, &s.base)) {
+                s.failed = true;
+                event(-1, 0, 0, 0);
+                return;
+            }
+            s.first = display_time;
+            s.started = true;
+        }
+        if (wanted.sway != 0.0F && !s.head_failed) {
+            const double phase = std::fmod(static_cast<double>(display_time), wanted.sway_period_ns) /
+                wanted.sway_period_ns;
+            const float yaw = wanted.sway * static_cast<float>(std::sin(phase * 2.0 * 3.14159265358979));
+            const float sy = std::sin(yaw * 0.5F), cy = std::cos(yaw * 0.5F);
+            const XrQuaternionf& q = s.base.orientation;
+            XrPosef pose = s.base;
+            // (0, sin, 0, cos) * q: turned about the vertical of LOCAL.
+            pose.orientation = {cy * q.x + sy * q.z, cy * q.y + sy * q.w, cy * q.z - sy * q.x,
+                                cy * q.w - sy * q.y};
+            // Which pose input the runtime takes for the head is not specified,
+            // and a move shows a frame later: each candidate is tried for 20
+            // frames, and the first under which the head leaves where it
+            // stood wins (b the candidate, c the frames it took).
+            constexpr std::array<const char*, 3> kInputs{
+                "/user/head/input/view_meta/pose", "", "/user/head/input/pose"};
+            if (!s.head_found && s.head_tries == 0) {
+                // The runtime's own tracking keeps the head until it is
+                // handed to automation (a 4: result per profile tried, b 0
+                // none, 1 Touch Plus).
+                if (s.head_candidate == 0 && d.test_set_input_device_active != nullptr) {
+                    XrPath plus = XR_NULL_PATH;
+                    const XrResult none = d.test_set_input_device_active(
+                        state.handle, XR_NULL_PATH, s.head, XR_TRUE);
+                    event(none, 4, 0, 0);
+                    if (XR_FAILED(none) &&
+                        XR_SUCCEEDED(d.test_string_to_path(d.test_instance,
+                            "/interaction_profiles/meta/touch_controller_plus", &plus))) {
+                        event(d.test_set_input_device_active(state.handle, plus, s.head, XR_TRUE), 4, 1, 0);
+                    }
+                }
+                s.head_input = XR_NULL_PATH;
+                if (kInputs[s.head_candidate][0] != '\0') {
+                    static_cast<void>(d.test_string_to_path(
+                        d.test_instance, kInputs[s.head_candidate], &s.head_input));
+                }
+            }
+            const XrResult result = d.test_set_input_device_location(
+                state.handle, s.head, s.head_input, s.local, pose);
+            if (!s.head_found) {
+                XrPosef found{};
+                const bool moved = locate_head(display_time, &found) &&
+                    std::abs(found.orientation.x * s.base.orientation.x +
+                             found.orientation.y * s.base.orientation.y +
+                             found.orientation.z * s.base.orientation.z +
+                             found.orientation.w * s.base.orientation.w) < 0.999999F;
+                ++s.head_tries;
+                if (moved) {
+                    s.head_found = true;
+                    event(result, 1, s.head_candidate, static_cast<std::uint64_t>(s.head_tries));
+                } else if (s.head_tries >= 20) {
+                    event(result, 1, s.head_candidate, 0);
+                    s.head_tries = 0;
+                    s.head_failed = ++s.head_candidate >= kInputs.size();
+                }
+            }
+        }
+        if (wanted.flip_period_ns > 0.0) {
+            if (!s.right_active && d.test_set_input_device_active != nullptr) {
+                s.right_active = true;
+                constexpr std::array<const char*, 2> kProfiles{
+                    "/interaction_profiles/meta/touch_controller_plus",
+                    "/interaction_profiles/oculus/touch_controller"};
+                for (std::size_t index = 0; index < kProfiles.size(); ++index) {
+                    XrPath profile = XR_NULL_PATH;
+                    if (XR_FAILED(d.test_string_to_path(d.test_instance, kProfiles[index], &profile))) continue;
+                    const XrResult result =
+                        d.test_set_input_device_active(state.handle, profile, s.right, XR_TRUE);
+                    event(result, 2, index, 0);
+                    if (XR_SUCCEEDED(result)) break;
+                }
+            }
+            const double since = static_cast<double>(display_time - s.first);
+            const int flipped = std::fmod(since, wanted.flip_period_ns) < wanted.flip_period_ns * 0.5 ? 1 : 0;
+            XrPosef pose{};
+            // In front of the head, low and to the right, its grip's up axis
+            // pointing down when turned over: half a turn about its forward
+            // axis.
+            pose.position = {s.base.position.x + 0.2F, s.base.position.y - 0.3F,
+                             s.base.position.z - 0.35F};
+            pose.orientation = flipped ? XrQuaternionf{0.0F, 0.0F, 1.0F, 0.0F}
+                                       : XrQuaternionf{0.0F, 0.0F, 0.0F, 1.0F};
+            const XrResult result = d.test_set_input_device_location(
+                state.handle, s.right, s.right_grip, s.local, pose);
+            if (flipped != s.flipped) {
+                s.flipped = flipped;
+                event(result, 3, static_cast<std::uint64_t>(flipped), 0);
+            }
+        }
+    } catch (...) {
+    }
+}
+
+[[nodiscard]] bool head_sway_enabled() noexcept;
+[[nodiscard]] float head_sway_yaw(XrTime time) noexcept;
+
 // The recorder's reprojection_angle for a frame about to be handed to the
 // runtime (BridgeFlightOperation::reprojection_angle); kind is
 // presenter_submission's. Made before the hand-over rather than after it, so
@@ -1851,8 +2082,17 @@ void log_reprojection_angle(
                 (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
                 return false;
             }
-            *orientation = {location.pose.orientation.x, location.pose.orientation.y,
-                            location.pose.orientation.z, location.pose.orientation.w};
+            XrQuaternionf q = location.pose.orientation;
+            // Under the test head sway the head the application is given is
+            // the swayed one, exactly where it is at each display time: a
+            // runtime that predicts perfectly. The angle is measured against
+            // it, so the sway's frames say what such a runtime would turn.
+            if (head_sway_enabled()) {
+                const float yaw = head_sway_yaw(time);
+                const float s = std::sin(yaw * 0.5F), c = std::cos(yaw * 0.5F);
+                q = {c * q.x + s * q.z, c * q.y + s * q.w, c * q.z - s * q.x, c * q.w - s * q.y};
+            }
+            *orientation = {q.x, q.y, q.z, q.w};
             return true;
         };
         xrfg::Quaternion head{};
@@ -2591,7 +2831,40 @@ void enter_generation_quarantine(
     }
     return anchor +
         period * static_cast<XrDuration>(
-            state.promise_correction_periods.load(std::memory_order_relaxed));
+            state.presenter_promise.correction_periods.load(std::memory_order_relaxed));
+}
+
+// Inline, a pair goes down in the application's frame and the frames after
+// it: the synthetic (at 3X the first of the two) in the frame the
+// application's wait returned, and the real frame the group's other periods
+// later, in the layer's own cycles (submit_current_cycle). The application
+// rendered for the time its wait returned, so each real frame was shown that
+// much after the pose it was rendered for and the runtime turned it back by
+// the head's motion since - under a fast turn, a band at the edge of every
+// real frame with no pixels in it, and the content a period late. Measured on
+// the Meta XR Simulator with the test head sway (reprojection_angle), every
+// real frame needed one period of the turn. So while inline pairs run, the
+// application is promised the time its real frame goes down - measured, as
+// the presenter's promise is (observe_promise_lateness, inline_promise_
+// lateness, fed by submit_current_cycle), since a replacement wait at the
+// application's begin puts its frame a period later still - and its own
+// frame, the synthetic's, is handed to the runtime under the runtime's time
+// (layer_end_frame_impl). A synthetic then lies halfway between the real
+// frames' poses and times, where synthetic_camera_snapshot puts its camera;
+// without the promise it was placed a period early. Extrapolating, the real
+// frame goes down first, at the time the wait returned, and needs nothing.
+[[nodiscard]] XrDuration inline_promise_shift(
+    const SessionState& state,
+    XrDuration period) noexcept {
+    const std::uint32_t frames = state.frames_per_application_frame.load();
+    if (!state.promise_shown_time || !state.inline_promise || !state.inline_pairs_running ||
+        period <= 0 ||
+        frames < 2 || state.nvidia_options.extrapolate || !state.menu_enabled ||
+        state.manual_control.stop_requested()) {
+        return 0;
+    }
+    return period * static_cast<XrDuration>(std::max(
+        state.inline_promise_lateness.correction_periods.load(std::memory_order_relaxed), 0));
 }
 
 // The anchor assumes the application hands its frame over within a display
@@ -2619,7 +2892,8 @@ void enter_generation_quarantine(
 // after its next wait - so no window ever agreed, and with FidelityFX flow 71%
 // of its frames went down a period after the time they were promised.
 void observe_promise_lateness(
-    SessionState& state,
+    const SessionState& state,
+    PromiseLateness& promise,
     XrDuration late,
     XrDuration period,
     XrDuration runtime_period) noexcept {
@@ -2633,34 +2907,34 @@ void observe_promise_lateness(
     // that lasted. The correction found at the true rate is kept, and the
     // window starts again once the rate is back.
     const bool slowed = runtime_period > period + period / 2;
-    if (slowed != state.promise_runtime_slowed) {
-        state.promise_runtime_slowed = slowed;
-        state.promise_sample_count = 0;
-        state.promise_settle = 8;
-        state.promise_candidate = -1;
+    if (slowed != promise.runtime_slowed) {
+        promise.runtime_slowed = slowed;
+        promise.sample_count = 0;
+        promise.settle = 8;
+        promise.candidate = -1;
     }
     if (slowed) {
         return;
     }
-    if (state.promise_settle > 0) {
-        --state.promise_settle;
+    if (promise.settle > 0) {
+        --promise.settle;
         return;
     }
     constexpr std::int32_t kMaximumCorrection = 3;
     const std::int32_t current =
-        state.promise_correction_periods.load(std::memory_order_relaxed);
+        promise.correction_periods.load(std::memory_order_relaxed);
     const double periods =
         static_cast<double>(late) / static_cast<double>(period) + current;
     const auto rounded = static_cast<std::int32_t>(
         std::clamp(periods < 0.0 ? periods - 0.5 : periods + 0.5, -8.0, 8.0));
-    state.promise_samples[state.promise_sample_count++] =
+    promise.samples[promise.sample_count++] =
         static_cast<std::int8_t>(rounded);
-    if (state.promise_sample_count < state.promise_samples.size()) {
+    if (promise.sample_count < promise.samples.size()) {
         return;
     }
-    state.promise_sample_count = 0;
+    promise.sample_count = 0;
     std::array<std::uint32_t, 17> counts{};
-    for (const std::int8_t sample : state.promise_samples) {
+    for (const std::int8_t sample : promise.samples) {
         ++counts[static_cast<std::size_t>(sample + 8)];
     }
     // The summed distance, in periods, of the window's frames from a
@@ -2685,22 +2959,22 @@ void observe_promise_lateness(
     // At least a quarter of a period a frame over the window (about a second
     // of frames at 60 a second), and the same answer from the window before.
     const std::uint64_t saving = cost(current) - target_cost;
-    if (target == current || saving * 4 < state.promise_samples.size()) {
-        state.promise_candidate = -1;
+    if (target == current || saving * 4 < promise.samples.size()) {
+        promise.candidate = -1;
         return;
     }
-    if (state.promise_candidate != target) {
-        state.promise_candidate = target;
+    if (promise.candidate != target) {
+        promise.candidate = target;
         return;
     }
-    state.promise_candidate = -1;
+    promise.candidate = -1;
     const auto agreeing = counts[static_cast<std::size_t>(target + 8)];
-    state.promise_correction_periods.store(target, std::memory_order_relaxed);
+    promise.correction_periods.store(target, std::memory_order_relaxed);
     // The frames already promised under the old correction.
-    state.promise_settle = 8;
+    promise.settle = 8;
     xrfg::bridge_flight_logger().event(
         xrfg::BridgeFlightOperation::promise_correction,
-        0,
+        &promise == &state.inline_promise_lateness ? 1 : 0,
         static_cast<std::uint64_t>(target),
         static_cast<std::uint64_t>(current),
         agreeing);
@@ -5037,6 +5311,53 @@ XrResult layer_create_api_layer_instance_impl(
         bridge_extension_added = false;
     }
 
+    // Test only: XR_EXT_conformance_automation for drive_test_runtime_devices,
+    // added when a test asks for it and the runtime lists it.
+    bool conformance_automation = false;
+    try {
+        if (test_runtime_devices_wanted()) {
+            for (std::uint32_t index = 0; index < create_info->enabledExtensionCount; ++index) {
+                const char* const extension = create_info->enabledExtensionNames[index];
+                if (extension != nullptr &&
+                    std::string_view(extension) == "XR_EXT_conformance_automation") {
+                    conformance_automation = true;
+                }
+            }
+            PFN_xrEnumerateInstanceExtensionProperties enumerate_extensions = nullptr;
+            std::uint32_t count = 0;
+            if (!conformance_automation &&
+                XR_SUCCEEDED(next_get_instance_proc_addr(
+                    XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties",
+                    reinterpret_cast<PFN_xrVoidFunction*>(&enumerate_extensions))) &&
+                enumerate_extensions != nullptr &&
+                XR_SUCCEEDED(enumerate_extensions(nullptr, 0, &count, nullptr)) && count > 0) {
+                std::vector<XrExtensionProperties> properties(
+                    count, XrExtensionProperties{XR_TYPE_EXTENSION_PROPERTIES});
+                if (XR_SUCCEEDED(enumerate_extensions(nullptr, count, &count, properties.data()))) {
+                    for (std::uint32_t index = 0; index < count; ++index) {
+                        if (std::string_view(properties[index].extensionName) ==
+                            "XR_EXT_conformance_automation") {
+                            if (forwarded_create_info != &bridged_create_info) {
+                                bridged_extensions.assign(
+                                    create_info->enabledExtensionNames,
+                                    create_info->enabledExtensionNames + create_info->enabledExtensionCount);
+                                bridged_create_info = *create_info;
+                            }
+                            bridged_extensions.push_back("XR_EXT_conformance_automation");
+                            bridged_create_info.enabledExtensionNames = bridged_extensions.data();
+                            bridged_create_info.enabledExtensionCount =
+                                static_cast<std::uint32_t>(bridged_extensions.size());
+                            forwarded_create_info = &bridged_create_info;
+                            conformance_automation = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (...) {
+    }
+
     XrInstance created_instance = XR_NULL_HANDLE;
     const XrResult result = next_create_api_layer_instance(
         forwarded_create_info,
@@ -5209,6 +5530,15 @@ XrResult layer_create_api_layer_instance_impl(
         // for the bridge, c whether the extension was added. result 0 with
         // c=1 is the bridge armed; -1 is an added extension whose
         // requirements call the runtime then failed to hand out.
+        if (conformance_automation) {
+            dispatch->test_instance = created_instance;
+            static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+                "xrStringToPath", dispatch->test_string_to_path));
+            static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+                "xrSetInputDeviceLocationEXT", dispatch->test_set_input_device_location));
+            static_cast<void>(load_function(next_get_instance_proc_addr, created_instance,
+                "xrSetInputDeviceActiveEXT", dispatch->test_set_input_device_active));
+        }
         const bool d3d12_on_instance = bridge_extension_added || asked_d3d12;
         if (bridge_requested_by_ini && asked_d3d11 && d3d12_on_instance) {
             dispatch->d3d11_bridge = load_function(
@@ -5380,6 +5710,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_dlss_flow_hybrid(current_layer_directory());
     state->promise_shown_time =
         xrfg::implicit_layer::read_promise_shown_time(current_layer_directory());
+    state->inline_promise =
+        xrfg::implicit_layer::read_inline_promise(current_layer_directory());
     state->extrapolate =
         xrfg::implicit_layer::read_extrapolate(current_layer_directory());
     state->extrapolate_mesh =
@@ -6207,6 +6539,9 @@ XrResult layer_wait_frame_impl(
         result = with_runtime_entry_for_wait(state, [&] {
             return state->dispatch->wait_frame(session, wait_info, frame_state);
         });
+        if (XR_SUCCEEDED(result) && frame_state != nullptr) {
+            drive_test_runtime_devices(*state, frame_state->predictedDisplayTime);
+        }
         const auto application_wait_elapsed =
             std::chrono::steady_clock::now() - application_wait_started;
         if (XR_SUCCEEDED(result) && frame_state != nullptr) {
@@ -6216,6 +6551,16 @@ XrResult layer_wait_frame_impl(
             state->last_application_wait_elapsed = application_wait_elapsed;
             forwarded_application_wait = true;
             state->runtime_frame_waited_unbegun = true;
+            XrDuration shift = 0;
+            {
+                std::scoped_lock lock(state->mutex);
+                shift = inline_promise_shift(*state, frame_state->predictedDisplayPeriod);
+                state->inline_promise_shift = shift;
+            }
+            if (shift > 0) {
+                frame_state->predictedDisplayTime =
+                    add_display_duration(frame_state->predictedDisplayTime, shift);
+            }
         }
     }
     if (XR_SUCCEEDED(result) && frame_state != nullptr) {
@@ -6314,6 +6659,9 @@ XrResult layer_begin_frame_impl(
                     return state->dispatch->wait_frame(
                         session, &wait_info, &replacement);
                 });
+                if (XR_SUCCEEDED(replacement_wait)) {
+                    drive_test_runtime_devices(*state, replacement.predictedDisplayTime);
+                }
                 xrfg::bridge_flight_logger().end(
                     wait_token,
                     xrfg::BridgeFlightOperation::internal_wait_frame,
@@ -6334,6 +6682,9 @@ XrResult layer_begin_frame_impl(
                   });
             if (XR_SUCCEEDED(result)) {
                 state->runtime_frame_waited_unbegun = false;
+                std::scoped_lock lock(state->mutex);
+                state->inline_slot_display_time =
+                    state->last_inline_frame_state.predictedDisplayTime;
             }
         }
     } catch (...) {
@@ -8633,6 +8984,9 @@ void continuous_presenter_main(
                 return state->dispatch->wait_frame(
                     state->handle, &wait_info, &frame_state);
             });
+            if (XR_SUCCEEDED(wait_result)) {
+                drive_test_runtime_devices(*state, frame_state.predictedDisplayTime);
+            }
             xrfg::bridge_flight_logger().end(
                 wait_token,
                 xrfg::BridgeFlightOperation::internal_wait_frame,
@@ -9824,6 +10178,7 @@ void continuous_presenter_main(
             frame_state.shouldRender != XR_FALSE) {
             observe_promise_lateness(
                 *state,
+                state->presenter_promise,
                 frame_state.predictedDisplayTime - submitted_content_time,
                 static_cast<XrDuration>(state->presenter_display_period),
                 frame_state.predictedDisplayPeriod);
@@ -12204,6 +12559,9 @@ struct InternalCycleResult {
             return state->dispatch->wait_frame(
                 state->handle, &wait_info, &frame_state);
         });
+        if (XR_SUCCEEDED(wait_result)) {
+            drive_test_runtime_devices(*state, frame_state.predictedDisplayTime);
+        }
         output.wait_elapsed = std::chrono::steady_clock::now() - wait_started;
         output.predicted_display_period = frame_state.predictedDisplayPeriod;
         xrfg::bridge_flight_logger().end(
@@ -12266,6 +12624,27 @@ struct InternalCycleResult {
     if (XR_FAILED(end_result)) {
         output.result = end_result;
         return output;
+    }
+    // An inline pair's real frame: how late it went down against the time
+    // the application's wait returned, before any shift (inline_promise_shift).
+    // A replacement wait at the application's begin puts its frame, and so
+    // its real frame, a period later still; that is measured too.
+    if (!synthetic && !recorded_synthetic.value_or(false) &&
+        !state->nvidia_options.extrapolate && frame_state.shouldRender != XR_FALSE &&
+        current_end_info.displayTime != 0) {
+        XrDuration period = 0;
+        XrDuration applied = 0;
+        {
+            std::scoped_lock lock(state->mutex);
+            period = state->minimum_runtime_display_period;
+            applied = state->inline_promise_shift;
+        }
+        const XrDuration uncorrected = frame_state.predictedDisplayTime -
+            (current_end_info.displayTime - applied);
+        const auto correction = static_cast<XrDuration>(
+            state->inline_promise_lateness.correction_periods.load(std::memory_order_relaxed));
+        observe_promise_lateness(*state, state->inline_promise_lateness,
+            uncorrected - period * correction, period, frame_state.predictedDisplayPeriod);
     }
 
     output.completed = true;
@@ -13135,7 +13514,7 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::multi_frame_unsupported)
     input.presenter = use_continuous_presenter;
     input.promise_periods = state->promise_shown_time
         ? static_cast<std::uint32_t>(std::max(
-              state->promise_correction_periods.load(std::memory_order_relaxed), 0))
+              state->presenter_promise.correction_periods.load(std::memory_order_relaxed), 0))
         : 0U;
     switch (state->graphics_binding) {
     case SessionGraphicsBinding::d3d12:
@@ -14050,11 +14429,22 @@ XrResult layer_end_frame_impl(
             extra_ready = false;
             prepare_reason = GenerationPrepareReason::private_release_failed;
         }
+        // Extrapolating, the first frame down is the real one.
+        const bool first_is_synthetic =
+            submitted_end_info == &first_generated.info && first_generated.synthetic;
+        // Promised a later time (inline_promise_shift), the frame the
+        // application began goes down under the runtime's own time for it.
+        XrFrameEndInfo slot_end_info{};
         if (submitted_end_info != nullptr) {
-            // Extrapolating, the first frame down is the real one.
-            log_reprojection_angle(*state, *submitted_end_info,
-                submitted_end_info == &first_generated.info && first_generated.synthetic
-                    ? 2U : 1U);
+            std::scoped_lock lock(state->mutex);
+            if (state->inline_promise_shift > 0 && state->inline_slot_display_time != 0) {
+                slot_end_info = *submitted_end_info;
+                slot_end_info.displayTime = state->inline_slot_display_time;
+                submitted_end_info = &slot_end_info;
+            }
+        }
+        if (submitted_end_info != nullptr) {
+            log_reprojection_angle(*state, *submitted_end_info, first_is_synthetic ? 2U : 1U);
         }
         result = with_runtime_entry(state, [&] {
             return state->fps_overlay
@@ -14102,6 +14492,15 @@ XrResult layer_end_frame_impl(
     }
     if (pair_ready) {
         state->generation_steady_state_established = true;
+    }
+    if (!use_continuous_presenter) {
+        std::scoped_lock lock(state->mutex);
+        if (pair_ready && !pipelined_presenter_mode) {
+            state->inline_pairs_running = true;
+            state->inline_unpaired_frames = 0;
+        } else if (pipelined_presenter_mode || ++state->inline_unpaired_frames >= 3) {
+            state->inline_pairs_running = false;
+        }
     }
     if (use_continuous_presenter && !pipelined_presenter_mode) {
         // A frame the layer could not generate from is already handled: it was
@@ -14158,6 +14557,8 @@ XrResult layer_end_frame_impl(
             std::scoped_lock lock(state->mutex);
             state->generation_resume_display_time =
                 generation_resume_time(current_snapshot.display_time);
+            // Its real frame does not go down after it.
+            state->inline_pairs_running = false;
         }
         clear_generation_continuity(state);
         return result;

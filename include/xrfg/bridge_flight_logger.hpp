@@ -281,6 +281,14 @@ enum class BridgeFlightOperation : std::uint32_t {
     // whether that moves frame to frame (UEVR adds a period when its game
     // thread runs ahead of the frame wait).
     app_locate_views,
+    // Test only (XRFG_TEST_RUNTIME_HEAD_SWAY_DEG, XRFG_TEST_RUNTIME_FLIP_S):
+    // the layer moving the runtime's own devices through
+    // XR_EXT_conformance_automation. result the runtime's, a what: 1 the
+    // head's first move (b which input path, c 1 when locating the head
+    // afterwards found it there), 2 the right controller made active (b the
+    // interaction profile tried), 3 the right controller turned over (b 1) or
+    // back upright (b 0).
+    test_runtime_device,
 };
 
 struct BridgeFlightToken {

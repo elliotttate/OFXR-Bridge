@@ -152,6 +152,14 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_promise_shown_time(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] inline_promise`: while inline pairs run, the game is promised the
+// time its real frame goes down - the group's other display periods after
+// the frame its wait returned, which carries the synthetic - and that frame
+// is handed to the runtime under the runtime's own time. On unless set to 0,
+// or with XRFG_TEST_INLINE_PROMISE=0. Read at xrCreateSession.
+[[nodiscard]] bool read_inline_promise(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] extrapolate`: OFXR shows each real frame at once and then predicts
 // the next display period from it, as Application SpaceWarp does, instead of
 // interpolating before it: a display period less latency, for the quality of

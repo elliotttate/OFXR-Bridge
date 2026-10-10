@@ -912,6 +912,15 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-steamvr-inline-test.log"
                 steamvr-inline)
 
+        # Inline pairs: the game is promised the time its real frame goes
+        # down, and its own frame - the synthetic - goes down a period before.
+        add_test(
+            NAME xrfg_layer_inline_promise
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-inline-promise-test.log"
+                inline-promise)
+
         add_test(
             NAME xrfg_layer_steamvr_presenter_transition
             COMMAND xrfg_layer_call_chain

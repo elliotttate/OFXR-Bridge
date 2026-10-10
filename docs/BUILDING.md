@@ -926,6 +926,47 @@ handed over at its display time reads 0, and the first synthetic, submitted
 at B's time with the pose halfway from A's, 2.005 degrees - half its pair's
 turn (`layer_flight_logging.cmake`).
 
+Inline (no presenter thread), a pair goes down in the application's own
+frame - the synthetic, or at 3X the first of the two - and its real frame the
+group's other display periods later, in the layer's own cycles
+(`submit_current_cycle`). The application rendered for the time its wait
+returned, so each real frame was shown that much after the pose it was
+rendered for. On the Meta XR Simulator, with `XRFG_TEST_HEAD_SWAY_DEG=20` and
+`_PERIOD_S=3` (now also applied to the head `reprojection_angle` measures
+against, so a swaying run reads what a perfectly predicting runtime would
+turn), hello_xr's real frames read a median of 0.32 degrees, one period of
+the turn, frame after frame. `[ofxr] inline_promise=1` (the default;
+`XRFG_TEST_INLINE_PROMISE` overrides) measures inline as the presenter does
+(`observe_promise_lateness`, with a `PromiseLateness` of its own; a
+`promise_correction` record with result 1): each real frame's display time
+against the time the application's wait returned, before any shift; while
+inline pairs run (set by a pair, cleared by three unpaired frames in a row or
+a cooldown), the wait returns that much later and the application's own frame
+goes down under the runtime's time for it. A replacement wait at the
+application's begin, which puts its frame a period later still, is measured
+the same way. On the simulator the correction followed 64 frames in and real
+frames then read 0. A synthetic in its own camera is then halfway between
+the real frames' poses and times; without the promise, inline, it was placed
+a period early. `xrfg_layer_inline_promise` runs 360 paired frames on a fake
+runtime that paces its waits a period apart (unpaced, the bunched-pair
+detector promotes the presenter): in the second half every real frame goes
+down at a promised time and every synthetic a period before one. The other
+call-chain scenarios pin the inline schedule as it was and run with the
+promise off.
+
+Two more test hooks move the runtime's own devices where it lists
+`XR_EXT_conformance_automation` (the Meta XR Simulator does), so that its
+compositor sees them: `XRFG_TEST_RUNTIME_FLIP_S=<period>` holds the right
+controller upside down for the first half of each period, and
+`XRFG_TEST_RUNTIME_HEAD_SWAY_DEG` / `_PERIOD_S` sways the head (records:
+`test_runtime_device`). With the flip, hello_xr on the simulator showed the
+status panel 0.29 s after the controller turned over and hid it 0.51 s after
+it came upright, every cycle: the gesture's input path, end to end. The
+simulator accepted the head moves but did not move its head for any of the
+input paths tried, though Meta XR Operator's `openxr_set_head_pose` moves it
+on the same simulator; that tool, driven at the display rate below the layer,
+is how a runtime head turn was made there.
+
 `app_locate_views` records the application's own xrLocateViews, forwarded
 unchanged: the display time it asks poses for (a) and the view configuration
 (b). Against app_wait_frame's predicted time and the frames'

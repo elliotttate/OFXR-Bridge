@@ -373,6 +373,23 @@ bool read_promise_shown_time(const std::filesystem::path& module_directory) noex
     }
 }
 
+bool read_inline_promise(const std::filesystem::path& module_directory) noexcept {
+    try {
+        wchar_t value[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"XRFG_TEST_INLINE_PROMISE", value, 8);
+        if (n && n < 8) {
+            return std::wcstol(value, nullptr, 10) != 0;
+        }
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(L"ofxr", L"inline_promise", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
+}
+
 int read_extrapolate(const std::filesystem::path& module_directory) noexcept {
     try {
         wchar_t value[8]{};
