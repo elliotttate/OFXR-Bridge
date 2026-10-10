@@ -96,6 +96,11 @@ enum MenuCommand : UINT {
     frames_2x = 168,
     frames_3x = 169,
     show_benchmark = 170,
+    // The status panel, in the FPS overlay menu: on a controller turned
+    // upside down, always in the view, or off.
+    panel_gesture = 171,
+    panel_always = 172,
+    panel_off = 173,
 };
 
 struct AppState {
@@ -1181,6 +1186,20 @@ void show_context_menu(AppState& state) {
             append_entry(overlay_menu, entry.command, entry.text,
                          settings.overlay_position == entry.position, true, true);
         }
+        // The status panel: what is asked against what runs, why they
+        // differ, and the frame rates. It stands in for the counter while it
+        // shows.
+        append_separator(overlay_menu);
+        append_note(overlay_menu, L"Status panel in the headset");
+        const struct { UINT command; xrfg::StatusPanelMode mode; const wchar_t* text; } panels[]{
+            {panel_gesture, xrfg::StatusPanelMode::gesture,
+             L"On a controller turned upside down (default)"},
+            {panel_always, xrfg::StatusPanelMode::always, L"Always, low in the view"},
+            {panel_off, xrfg::StatusPanelMode::off, L"Off"}};
+        for (const auto& entry : panels) {
+            append_entry(overlay_menu, entry.command, entry.text,
+                         settings.status_panel == entry.mode, true, true);
+        }
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(overlay_menu), L"FPS overlay");
     }
     if (HMENU diagnostics = CreatePopupMenu()) {
@@ -1399,6 +1418,25 @@ void handle_command(AppState& state, UINT command) {
             : xrfg::FpsOverlayPosition::upper_right;
         update_runtime_options(
             state, L"The FPS overlay position updates in running applications.");
+        break;
+    case panel_gesture:
+    case panel_always:
+    case panel_off:
+        state.settings.status_panel = command == panel_gesture ? xrfg::StatusPanelMode::gesture
+            : command == panel_always ? xrfg::StatusPanelMode::always
+                                      : xrfg::StatusPanelMode::off;
+        // The gesture needs the game's input set up with the layer's grip
+        // action, which happens as a game starts; the other two are followed
+        // live.
+        update_runtime_options(
+            state,
+            state.settings.status_panel == xrfg::StatusPanelMode::gesture
+                ? L"Turn a controller upside down in a game to see what frame "
+                  L"generation is doing. A game started while the panel was "
+                  L"always on or off needs a restart for the gesture."
+            : state.settings.status_panel == xrfg::StatusPanelMode::always
+                ? L"The status panel shows low in the view, in running games too."
+                : L"The status panel is off, in running games too.");
         break;
     case toggle_diagnostics:
         state.settings.diagnostics = !state.settings.diagnostics;

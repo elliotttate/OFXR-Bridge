@@ -1,5 +1,6 @@
 #pragma once
 #include "xrfg/fps_overlay_model.hpp"
+#include "xrfg/status_panel_model.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -97,6 +98,11 @@ struct LauncherSettings {
     bool capture_at_end_frame{true};
     bool diagnostics{};
     FpsOverlayPosition overlay_position{FpsOverlayPosition::upper_right};
+    // The status panel in the headset (the layer's [overlay] panel): on a
+    // controller turned upside down by default, always in the view, or off.
+    // The gesture adds a grip action to the game's input, decided when the
+    // game starts; the other two follow the menu in a running game.
+    StatusPanelMode status_panel{StatusPanelMode::gesture};
     // The system-wide key for "Pause frame generation" while armed, in
     // parse_hotkey's form. No menu entry; edit tray.ini. Empty, "off" or
     // anything parse_hotkey refuses means no key.

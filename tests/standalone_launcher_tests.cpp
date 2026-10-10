@@ -76,6 +76,24 @@ int main() {
     }
     if (release_defaults.overlay_position != xrfg::FpsOverlayPosition::upper_right ||
         !contains(default_runtime_ini, "[overlay]\r\nposition=upper_right")) return 1;
+    // The status panel: the flip gesture by default, written beside the
+    // counter's position; a tray.ini from before it has the default.
+    if (release_defaults.status_panel != xrfg::StatusPanelMode::gesture ||
+        !contains(default_runtime_ini, "\r\nposition=upper_right\r\npanel=gesture\r\n") ||
+        parse_settings("[tray]\r\noverlay_position=off\r\n").status_panel != xrfg::StatusPanelMode::gesture) {
+        std::cerr << "status panel default failed\n";
+        return 1;
+    }
+    for (auto mode : {xrfg::StatusPanelMode::off, xrfg::StatusPanelMode::gesture, xrfg::StatusPanelMode::always}) {
+        LauncherSettings option;
+        option.status_panel = mode;
+        if (parse_settings(serialize_settings(option)).status_panel != mode ||
+            !contains(build_runtime_ini(option), std::string("\r\npanel=") +
+                xrfg::status_panel_mode_name(mode) + "\r\n")) {
+            std::cerr << "status panel round trip failed\n";
+            return 1;
+        }
+    }
     for (auto position : {xrfg::FpsOverlayPosition::off, xrfg::FpsOverlayPosition::upper_left,
         xrfg::FpsOverlayPosition::upper_right, xrfg::FpsOverlayPosition::lower_left, xrfg::FpsOverlayPosition::lower_right}) {
         LauncherSettings option;

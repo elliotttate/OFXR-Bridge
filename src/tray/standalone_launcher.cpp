@@ -250,6 +250,8 @@ LauncherSettings parse_settings(std::string_view text) {
                         lower_ascii(value) == "true";
                 } else if (key == "overlay_position") {
                     settings.overlay_position = parse_overlay_position(lower_ascii(value));
+                } else if (key == "overlay_panel") {
+                    settings.status_panel = parse_status_panel_mode(lower_ascii(value));
                 } else if (key == "diagnostics") {
                     settings.diagnostics = value == "1" ||
                                            lower_ascii(value) == "true";
@@ -288,6 +290,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            "\r\ncapture_at_end_frame=" + (settings.capture_at_end_frame ? "1" : "0") +
            "\r\ndiagnostics=" + (settings.diagnostics ? "1" : "0") +
            "\r\noverlay_position=" + overlay_position_name(settings.overlay_position) +
+           "\r\noverlay_panel=" + status_panel_mode_name(settings.status_panel) +
            "\r\npause_hotkey=" + settings.pause_hotkey +
            "\r\n";
 }
@@ -530,7 +533,8 @@ std::string build_runtime_ini(
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +
            "\r\nflush_each_event=" + (flush_each_event ? "1" : "0") + "\r\n"
-           "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) + "\r\n";
+           "\r\n[overlay]\r\nposition=" + overlay_position_name(settings.overlay_position) +
+           "\r\npanel=" + status_panel_mode_name(settings.status_panel) + "\r\n";
 }
 
 std::filesystem::path runtime_version_directory(
