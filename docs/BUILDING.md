@@ -773,9 +773,12 @@ came near. Live on the final build, in Galactic Racer on the Steam Frame at
 | Extrapolate (against the last pair's motion continued) | 0.0126 | 0.0205 | 4.9% / 5.9% |
 
 A second race on the final build, every method switched in turn: the cadence
-0.0087, the stamps 0.0165. In Hubris the cadence erred 0.0010 against 0.0124. Extrapolating, against the
-next frame's motion in hindsight (its hand-over interval spread over the
-display until it is shown), the cadence erred 0.0404 and the stamps 0.0451.
+0.0087, the stamps 0.0165. In Hubris the cadence erred 0.0010 against 0.0124 (0.0016 against 0.0108 on
+release 14), at 3X a second race 0.0056 against 0.0187. Extrapolating, against
+the next frame's motion in hindsight (its hand-over interval spread over the
+display until it is shown), the cadence erred 0.0404 and the stamps 0.0451; a
+second race gave 0.0066 against 0.0091 against the last pair's motion and a
+tie against the next frame's (0.0335 against 0.0329).
 `synthesis_fraction` records each pair's fraction and stamp gap in the flight
 log, and `xrfg_layer_cadence_fraction` checks on the fake runtime, with
 repeated stamps and the rate halved part way (`XRFG_TEST_REPEAT_STAMP_EVERY`,
