@@ -497,6 +497,8 @@ hybrid under a new key and ignores the old one.
   | Into the Radius 2 | UE5, native OpenXR (`-dx12`) | 45.0 + 45.1 | NVIDIA medium 1.8 ms |
   | The 7th Guest VR | UE5, native OpenXR | 45 + 45 | NVIDIA medium 2.0 ms |
   | Hellblade II | UE5, UEVR Native Stereo | 26.6 + 27.0 | NVIDIA medium 1.6 ms (no DLSS in its menu) |
+  | Metro Awakening | UE5, native OpenXR | 45 + 45 | NVIDIA medium 1.6 ms |
+  | Deep Rock Galactic: Rogue Core | UE5, UEVR Native Stereo | 45.1 + 45.0 | NVIDIA medium 1.7 ms (no DLSS in its menu) |
   | Black Myth: Wukong | UE5, UEVR Native Stereo, DLSS | (compiling shaders on its first start) | the hybrid taken up 12 s in, 566 pairs on the game's vectors, 0.18-0.29 ms |
 
   Skydance's BEHEMOTH quits on the simulator with or without the layer, UEVR
