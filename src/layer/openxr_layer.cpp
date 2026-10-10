@@ -14145,10 +14145,12 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_suggest_interaction_profile_bindings(
             return XR_ERROR_HANDLE_INVALID;
         }
         const auto& gesture = dispatch->panel_gesture;
+        // A call the runtime should refuse is passed on as it came, so the
+        // layer's additions never make an invalid one valid.
         if (suggested_bindings == nullptr ||
             suggested_bindings->type != XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING ||
-            (suggested_bindings->countSuggestedBindings != 0 &&
-             suggested_bindings->suggestedBindings == nullptr)) {
+            suggested_bindings->countSuggestedBindings == 0 ||
+            suggested_bindings->suggestedBindings == nullptr) {
             return gesture.suggest_bindings(instance, suggested_bindings);
         }
         std::vector<XrActionSuggestedBinding> bindings(
@@ -14187,7 +14189,7 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_attach_session_action_sets(
         const auto& gesture = state->dispatch->panel_gesture;
         if (attach_info == nullptr ||
             attach_info->type != XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO ||
-            (attach_info->countActionSets != 0 && attach_info->actionSets == nullptr)) {
+            attach_info->countActionSets == 0 || attach_info->actionSets == nullptr) {
             return gesture.attach_action_sets(session, attach_info);
         }
         std::vector<XrActionSet> action_sets(

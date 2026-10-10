@@ -1332,7 +1332,6 @@ std::vector<XrActionSuggestedBinding> g_suggested;
 std::vector<XrActionSet> g_attached;
 std::vector<XrActiveActionSet> g_synced;
 std::vector<XrSpace> g_panel_spaces;
-
 bool g_refuse_panel_sync = false;
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_string_to_path(
