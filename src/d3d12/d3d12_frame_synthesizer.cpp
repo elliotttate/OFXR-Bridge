@@ -721,6 +721,11 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
 
 }  // namespace
 
+std::array<float, 4> synthetic_camera_to_current(
+    const D3D12ReprojectionView& current, const D3D12ReprojectionView& target) noexcept {
+    return target_to_current_rotation(current, target);
+}
+
 D3D12OpticalFlowInputScale capped_flow_input_scale(
     D3D12OpticalFlowInputScale scale, unsigned long long eye_height) noexcept {
     for (;;) {

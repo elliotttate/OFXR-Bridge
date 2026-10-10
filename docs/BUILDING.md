@@ -1144,6 +1144,40 @@ synthetic. Capped (a quarter, 1628 pixels), each eye's flow took 1.2 ms and
 the pair 3.8-4.7 ms, and every game frame got its synthetic (119.5 shown a
 second).
 
+#### Under head turns
+
+Every recording above was made with the headset still. Users of Galactic
+Racer reported native DLSS FG juddering and "fighting the camera" when they
+turned their heads, most of all in menus, where the game's camera stands
+still and only the head moves. `XRFG_TEST_HEAD_SWAY_DEG=<degrees>` (and
+`XRFG_TEST_HEAD_SWAY_PERIOD_S`, default 4) in the game's environment turns
+every head pose the game is given about the vertical by that amplitude times
+a sine of the display time, so the game renders head turns with no one in the
+headset; only then does the layer intercept xrCreateReferenceSpace and
+xrLocateSpace. Eight runs of Galactic Racer's title menu under UEVR on the
+Meta XR Simulator, with a 20-degree sway every 3 s (up to 42 degrees a
+second), replayed (`sway_replay.py`), error where the scene moved:
+
+| Method | Error | SSIM | Gradient error |
+|---|---|---|---|
+| OFXR FidelityFX half / NVIDIA medium flow | 2.20 / 2.20 | 0.985 / 0.989 | 5.10 / 4.86 |
+| OFXR hybrid, quarter / half flow | 2.57 / 2.52 | 0.984 / 0.985 | 5.82 / 5.71 |
+| OFXR DLSS vectors | 2.90 | 0.976 | 6.62 |
+| Native DLSS FG 100% / 67% | 3.20 / 3.93 | 0.979 / 0.970 | 7.03 / 8.48 |
+| A blend / repeating the frame | 19.9 / 24.4 | 0.555 / 0.494 | 30.6 / 36.1 |
+
+Native generation interpolates under head turns, but less well than any of
+OFXR's methods, and least at its default 67%; where the head turns, the
+game's vectors explain the image less well than optical flow does. The
+replay had generated native frames in the newer real frame's camera while
+scoring them against the middle frame's, which under a head turn read as
+bad as repeating a frame (24-27); native now gets the middle frame's camera
+through `synthetic_camera_to_current`, as OFXR's methods do
+(`XRFG_TEST_REPLAY_NATIVE_B_CAMERA=1` restores the old scoring). Giving the
+hybrid's flow more of the ties (selection bias 0.5 rather than 1.0) helped
+the turning menu 4% (2.47) but cost the 42 race triplets SSIM (0.809 against
+0.815) and gradient error (7.69 against 7.57), so the bias stays.
+
 #### On frames no tuning used
 
 The 42 triplets chose these settings, so they were checked on 17 that played

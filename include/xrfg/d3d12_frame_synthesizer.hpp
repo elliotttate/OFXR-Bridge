@@ -117,6 +117,13 @@ using D3D12NvidiaInputScale = D3D12OpticalFlowInputScale;
 [[nodiscard]] D3D12OpticalFlowInputScale capped_flow_input_scale(
     D3D12OpticalFlowInputScale scale, unsigned long long eye_height) noexcept;
 
+struct D3D12ReprojectionView;
+// The rotation (x, y, z, w) that takes a ray of a synthetic's own camera
+// (target) into the newer real frame's (current), as the synthesizer gives
+// native generation's D3D12NativeDlssG::Output::camera_to_current.
+[[nodiscard]] std::array<float, 4> synthetic_camera_to_current(
+    const D3D12ReprojectionView& current, const D3D12ReprojectionView& target) noexcept;
+
 enum class D3D12FrameGeneration { ofxr, native_dlss };
 
 struct D3D12NvidiaOpticalFlowOptions {

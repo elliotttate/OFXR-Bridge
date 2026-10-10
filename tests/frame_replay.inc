@@ -627,7 +627,19 @@ void replay_held_out(const std::filesystem::path& directory) {
         auto b = upload_dumped(fixture, f2.colour, colour_flags, D3D12_RESOURCE_STATE_RENDER_TARGET);
         auto output = create_source_texture(fixture, width, height, D3D12_RESOURCE_STATE_RENDER_TARGET,
                                             static_cast<UINT16>(slices), static_cast<DXGI_FORMAT>(f0.colour.format));
-        const std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+        // Generated in frame 1's camera, as OFXR's methods are above, so a head
+        // turn between the frames is not scored against native as error.
+        // XRFG_TEST_REPLAY_NATIVE_B_CAMERA=1 keeps B's camera instead.
+        std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+        if (!std::getenv("XRFG_TEST_REPLAY_NATIVE_B_CAMERA") && views1.size() == views2.size() &&
+            !views1.empty()) {
+            std::array<std::array<float, 4>, 2> rotations{};
+            for (std::size_t view = 0; view < rotations.size(); ++view) {
+                const std::size_t index = std::min(view, views1.size() - 1);
+                rotations[view] = xrfg::synthetic_camera_to_current(views2[index], views1[index]);
+            }
+            outputs[0].camera_to_current = rotations;
+        }
         xrfg::D3D12NativeDlssG native;
         require_hresult(native.initialize(fixture.device(), fixture.queue(), a->GetDesc(), f0.view_format),
                         "replay native initialization");

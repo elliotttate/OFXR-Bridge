@@ -4305,6 +4305,16 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
     std::uint32_t view_capacity_input,
     std::uint32_t* view_count_output,
     XrView* views);
+XRAPI_ATTR XrResult XRAPI_CALL layer_create_reference_space(
+    XrSession session,
+    const XrReferenceSpaceCreateInfo* create_info,
+    XrSpace* space);
+XRAPI_ATTR XrResult XRAPI_CALL layer_locate_space(
+    XrSpace space,
+    XrSpace base_space,
+    XrTime time,
+    XrSpaceLocation* location);
+[[nodiscard]] bool head_sway_enabled() noexcept;
 XRAPI_ATTR XrResult XRAPI_CALL layer_suggest_interaction_profile_bindings(
     XrInstance instance,
     const XrInteractionProfileSuggestedBinding* suggested_bindings);
@@ -4723,6 +4733,16 @@ XrResult layer_get_instance_proc_addr_impl(
     if (std::strcmp(name, "xrLocateViews") == 0) {
         return expose_intercept(
             dispatch, dispatch->locate_views, layer_locate_views, function);
+    }
+    // Test only: the head sway's other two calls, intercepted only when it is
+    // on (see head_sway).
+    if (head_sway_enabled() && std::strcmp(name, "xrCreateReferenceSpace") == 0) {
+        return expose_intercept(
+            dispatch, dispatch->create_reference_space, layer_create_reference_space, function);
+    }
+    if (head_sway_enabled() && std::strcmp(name, "xrLocateSpace") == 0) {
+        return expose_intercept(
+            dispatch, dispatch->locate_space, layer_locate_space, function);
     }
     if (std::strcmp(name, "xrPollEvent") == 0) {
         return expose_intercept(
@@ -14444,6 +14464,123 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
 //
 // Upstream never needed this because the application waited for the queue to
 // empty inside xrEndFrame; it does not any more.
+// Test only: a head that sways from side to side, for measuring frame
+// generation under head turns where no one wears the headset (the Meta XR
+// Simulator, an idle Steam Frame). XRFG_TEST_HEAD_SWAY_DEG=<amplitude>, with
+// XRFG_TEST_HEAD_SWAY_PERIOD_S=<seconds, default 4>, in the game's
+// environment turns every pose the application is given about the vertical
+// through the head by amplitude * sin(2 pi t / period) at the time it asks
+// for: the VIEW space located in another space, and views located in a space
+// that is not VIEW (views in VIEW space are the eyes about the head, which a
+// turn does not move). The game renders the turn and submits those poses, so
+// its frames, the layer's generated frames and their captures carry it; the
+// runtime still reprojects to the real, still head, so what is shown swings.
+// Without the variable none of this is intercepted.
+struct HeadSway {
+    float amplitude{};  // radians
+    double period_ns{4.0e9};
+};
+
+[[nodiscard]] const HeadSway& head_sway() noexcept {
+    static const HeadSway sway = [] {
+        HeadSway value;
+        wchar_t text[32]{};
+        DWORD n = GetEnvironmentVariableW(L"XRFG_TEST_HEAD_SWAY_DEG", text, 32);
+        if (n != 0 && n < 32) {
+            value.amplitude = static_cast<float>(std::wcstod(text, nullptr) * 3.14159265358979 / 180.0);
+        }
+        n = GetEnvironmentVariableW(L"XRFG_TEST_HEAD_SWAY_PERIOD_S", text, 32);
+        if (n != 0 && n < 32) {
+            const double seconds = std::wcstod(text, nullptr);
+            if (seconds > 0.1) value.period_ns = seconds * 1.0e9;
+        }
+        return value;
+    }();
+    return sway;
+}
+
+[[nodiscard]] bool head_sway_enabled() noexcept {
+    return head_sway().amplitude != 0.0F;
+}
+
+std::mutex g_view_spaces_mutex;
+std::vector<XrSpace> g_view_spaces;  // under g_view_spaces_mutex
+
+[[nodiscard]] bool is_view_space(XrSpace space) {
+    std::scoped_lock lock(g_view_spaces_mutex);
+    return std::find(g_view_spaces.begin(), g_view_spaces.end(), space) != g_view_spaces.end();
+}
+
+// The yaw at a display time, and a turn by it about +Y applied to an
+// orientation (in the space it is expressed in) and to a vector.
+[[nodiscard]] float head_sway_yaw(XrTime time) noexcept {
+    const auto& sway = head_sway();
+    const double phase = std::fmod(static_cast<double>(time), sway.period_ns) / sway.period_ns;
+    return sway.amplitude * static_cast<float>(std::sin(phase * 2.0 * 3.14159265358979));
+}
+
+[[nodiscard]] XrQuaternionf yaw_then(float yaw, const XrQuaternionf& q) noexcept {
+    const float s = std::sin(yaw * 0.5F);
+    const float c = std::cos(yaw * 0.5F);
+    // (0, s, 0, c) * q
+    return {c * q.x + s * q.z, c * q.y + s * q.w, c * q.z - s * q.x, c * q.w - s * q.y};
+}
+
+[[nodiscard]] XrVector3f yaw_vector(float yaw, const XrVector3f& v) noexcept {
+    const float s = std::sin(yaw);
+    const float c = std::cos(yaw);
+    return {c * v.x + s * v.z, v.y, -s * v.x + c * v.z};
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_create_reference_space(
+    XrSession session,
+    const XrReferenceSpaceCreateInfo* create_info,
+    XrSpace* space) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto state = find_session(session);
+        if (!state || state->dispatch->create_reference_space == nullptr) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        const XrResult result = state->dispatch->create_reference_space(session, create_info, space);
+        if (XR_SUCCEEDED(result) && create_info != nullptr && space != nullptr &&
+            create_info->referenceSpaceType == XR_REFERENCE_SPACE_TYPE_VIEW) {
+            std::scoped_lock lock(g_view_spaces_mutex);
+            g_view_spaces.push_back(*space);
+        }
+        return result;
+    });
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL layer_locate_space(
+    XrSpace space,
+    XrSpace base_space,
+    XrTime time,
+    XrSpaceLocation* location) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        PFN_xrLocateSpace next = nullptr;
+        {
+            std::scoped_lock lock(g_state_mutex);
+            for (const auto& [handle, dispatch] : g_instances) {
+                static_cast<void>(handle);
+                if (dispatch && dispatch->locate_space != nullptr) {
+                    next = dispatch->locate_space;
+                    break;
+                }
+            }
+        }
+        if (next == nullptr) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        const XrResult result = next(space, base_space, time, location);
+        if (XR_SUCCEEDED(result) && location != nullptr &&
+            (location->locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) != 0 &&
+            is_view_space(space) && !is_view_space(base_space)) {
+            location->pose.orientation = yaw_then(head_sway_yaw(time), location->pose.orientation);
+        }
+        return result;
+    });
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
     XrSession session,
     const XrViewLocateInfo* locate_info,
@@ -14472,6 +14609,26 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
         }
         const XrResult result = next(
             session, locate_info, view_state, view_capacity_input, view_count_output, views);
+        if (head_sway_enabled() && XR_SUCCEEDED(result) && locate_info != nullptr &&
+            views != nullptr && view_count_output != nullptr && view_capacity_input != 0 &&
+            *view_count_output != 0 && !is_view_space(locate_info->space)) {
+            const std::uint32_t count = std::min(*view_count_output, view_capacity_input);
+            XrVector3f centre{};
+            for (std::uint32_t i = 0; i < count; ++i) {
+                centre.x += views[i].pose.position.x / static_cast<float>(count);
+                centre.y += views[i].pose.position.y / static_cast<float>(count);
+                centre.z += views[i].pose.position.z / static_cast<float>(count);
+            }
+            const float yaw = head_sway_yaw(locate_info->displayTime);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const XrVector3f offset{views[i].pose.position.x - centre.x,
+                                        views[i].pose.position.y - centre.y,
+                                        views[i].pose.position.z - centre.z};
+                const XrVector3f turned = yaw_vector(yaw, offset);
+                views[i].pose.position = {centre.x + turned.x, centre.y + turned.y, centre.z + turned.z};
+                views[i].pose.orientation = yaw_then(yaw, views[i].pose.orientation);
+            }
+        }
         if (locate_info != nullptr && xrfg::bridge_flight_logger().enabled()) {
             xrfg::bridge_flight_logger().event(
                 xrfg::BridgeFlightOperation::app_locate_views,
