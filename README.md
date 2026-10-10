@@ -492,6 +492,11 @@ hybrid under a new key and ignores the old one.
   | Deep Rock Galactic | UE4, UEVR Native Stereo (`-dx12`) | about 41 + 41 (82 real without) | NVIDIA medium 1.55 ms, FidelityFX 0.29 |
   | Atomic Heart | UE4, UEVR Native Stereo | about 26 + 26 (32-37 real without) | NVIDIA medium 1.6 ms; FidelityFX 0.30 kept 29 real |
   | Metal Eden | UE5, UEVR Native Stereo | 30 + 30 | its menu ran DLSS for 15 frames, enough to take up the hybrid, then stopped; FidelityFX alone 0.29 ms |
+  | RoboCop: Rogue City | UE5, UEVR Native Stereo | 30 + 30 | NVIDIA medium 1.9 ms (DLSS not on by default) |
+
+  Skydance's BEHEMOTH quits on the simulator with or without the layer, and
+  UEVR cannot find Trepang2's back buffer on D3D11 or D3D12, so neither was
+  measured there.
 
   Unity games ask for OpenXR 1.1 first, which SteamVR refuses, and then make
   their instance at 1.0; FlatOut does the same. Not generating, and not
