@@ -132,6 +132,19 @@ under MIT; its notice is preserved in the header and `licenses/UEVR-API-MIT.txt`
 The bridge uses the exported SDK to read renderer projection metadata. No UEVR
 implementation source or OptiScaler source is incorporated into this capture.
 
+## font8x8
+
+The status panel's text is drawn from `include/xrfg/third_party/font8x8_basic.h`,
+the basic Latin table of Daniel Hepper's font8x8
+(<https://github.com/dhepper/font8x8>), itself derived from the public-domain
+IBM VGA fonts. It is in the public domain, as its header states, and is
+copied unmodified from the copy xrFPS carries; the panel enlarges the glyphs
+at run time and nothing else of the project is used.
+
+| File | SHA-256 |
+| --- | --- |
+| `font8x8_basic.h` | `77F7EECDF7BC8144A318B94D3C3B04512356814D41CD86B505D1B360437D752F` |
+
 ## Candidate: Khronos OpenXR-SDK-Source API layer scaffold
 
 Not copied. `XRFG-V001` through `XRFG-V003` follow the public loader/API-layer

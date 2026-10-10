@@ -50,7 +50,8 @@ add_library(xrfg_core STATIC
     src/core/fps_overlay_model.cpp
     src/core/image.cpp
     src/core/optical_flow.cpp
-    src/core/pose.cpp)
+    src/core/pose.cpp
+    src/core/status_panel_model.cpp)
 target_include_directories(xrfg_core PUBLIC include)
 target_compile_features(xrfg_core PUBLIC cxx_std_20)
 
@@ -76,6 +77,14 @@ if(XRFG_BUILD_TESTS)
     add_executable(xrfg_fps_overlay_tests tests/fps_overlay_tests.cpp)
     target_link_libraries(xrfg_fps_overlay_tests PRIVATE xrfg_core)
     add_test(NAME xrfg_fps_overlay_tests COMMAND xrfg_fps_overlay_tests)
+    # The status panel: the flip gesture's hysteresis, its placement on the
+    # controller, the asked-against-running text and its pixels. No headset.
+    add_executable(xrfg_status_panel_tests tests/status_panel_tests.cpp)
+    target_link_libraries(xrfg_status_panel_tests PRIVATE xrfg_core)
+    if(MSVC)
+        target_compile_options(xrfg_status_panel_tests PRIVATE /W4 /permissive- /EHsc)
+    endif()
+    add_test(NAME xrfg_status_panel_tests COMMAND xrfg_status_panel_tests)
 
     add_executable(xrfg_optical_flow_tests tests/optical_flow_tests.cpp)
     target_link_libraries(xrfg_optical_flow_tests PRIVATE xrfg_core)
