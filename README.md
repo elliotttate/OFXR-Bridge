@@ -494,6 +494,8 @@ hybrid under a new key and ignores the old one.
   | Metal Eden | UE5, UEVR Native Stereo | 30 + 30 | its menu ran DLSS for 15 frames, enough to take up the hybrid, then stopped; FidelityFX alone 0.29 ms |
   | RoboCop: Rogue City | UE5, UEVR Native Stereo | 30 + 30 | NVIDIA medium 1.9 ms (DLSS not on by default) |
   | Alien: Rogue Incursion | UE5, native OpenXR (`-vr`) | 45.1 + 45.0 | NVIDIA medium 1.5 ms |
+  | Into the Radius 2 | UE5, native OpenXR (`-dx12`) | 45.0 + 45.1 | NVIDIA medium 1.8 ms |
+  | Black Myth: Wukong | UE5, UEVR Native Stereo, DLSS | (compiling shaders on its first start) | the hybrid taken up 12 s in, 566 pairs on the game's vectors, 0.18-0.29 ms |
 
   Skydance's BEHEMOTH quits on the simulator with or without the layer, UEVR
   cannot find Trepang2's back buffer on D3D11 or D3D12, and Clair Obscur:
