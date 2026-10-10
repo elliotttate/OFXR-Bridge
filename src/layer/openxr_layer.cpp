@@ -1051,9 +1051,10 @@ struct SessionState {
     // `[ofxr] synthetic_pose`: each synthetic is generated in and submitted
     // with the head's pose at the instant it is shown, rather than the newer
     // real frame's (synthetic_camera_snapshot). The application's xrEndFrame
-    // thread reads it; it is set at xrCreateSession and at control changes,
-    // which run on that thread too.
+    // thread reads it; it is set at xrCreateSession, at control changes and
+    // by follow_synthetic_pose, which run on that thread too.
     bool synthetic_pose_interpolated{true};
+    std::chrono::steady_clock::time_point synthetic_pose_poll_at{};
     // One private swapchain per output with staging textures, where the
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
@@ -12653,6 +12654,21 @@ struct PrivateDepthStrip {
     return &storage.info;
 }
 
+// Follows `[ofxr] synthetic_pose` while the session runs, so the two can be
+// compared under the same head turn by editing the ini. Nothing has to be
+// drained: each pair takes its synthetics' cameras and the poses it submits
+// them with from one snapshot at its own xrEndFrame, so a pair already queued
+// keeps the setting it was made with. Read at most twice a second.
+void follow_synthetic_pose(SessionState& state) noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < state.synthetic_pose_poll_at) {
+        return;
+    }
+    state.synthetic_pose_poll_at = now + std::chrono::milliseconds(500);
+    state.synthetic_pose_interpolated =
+        xrfg::implicit_layer::read_synthetic_pose_interpolated(current_layer_directory());
+}
+
 // Follows the tray's "3X Frame Gen" switch while the session runs. Called at
 // the top of the application's xrEndFrame, under frame_call_mutex, before
 // this frame is prepared.
@@ -13069,6 +13085,7 @@ XrResult layer_end_frame_impl(
     };
 
     apply_live_frame_multiplier(state, use_continuous_presenter);
+    follow_synthetic_pose(*state);
     log_video_memory_periodically(*state);
     apply_embedded_control(state, use_continuous_presenter);
     const bool manually_disarmed = state->manual_control.stop_requested();

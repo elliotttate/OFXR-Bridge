@@ -159,10 +159,15 @@ inline constexpr char kDefaultPauseHotkey[] = "ctrl+alt+f7";
 // early records raises this by hand, which now survives arming.
 constexpr unsigned kDefaultMaxFileMb = 32;
 
+// synthetic_pose_real is `[ofxr] synthetic_pose=real`, carried the same way: it
+// has no menu entry either, and is set by hand to compare the generated
+// frames' poses while a game runs, so an option changed from the tray must not
+// reset it. The default, interpolated, is not written.
 [[nodiscard]] std::string build_runtime_ini(
     const LauncherSettings& settings,
     unsigned max_file_mb = kDefaultMaxFileMb,
-    bool flush_each_event = false);
+    bool flush_each_event = false,
+    bool synthetic_pose_real = false);
 
 [[nodiscard]] std::filesystem::path runtime_version_directory(
     const std::filesystem::path& local_directory,

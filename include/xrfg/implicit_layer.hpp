@@ -130,7 +130,9 @@ struct ConfiguredNvidiaOptions {
 // back by the head's motion and show the edge it turns away from black. real
 // gives it the newer real frame's pose and camera, as before. True for
 // interpolated. The environment variable XRFG_TEST_SYNTHETIC_POSE overrides
-// either way. Read at xrCreateSession and again at each live control change.
+// either way. Read at xrCreateSession, at each live control change, and
+// twice a second while the session runs, so the two can be compared under
+// the same head turn; the tray carries it through its rewrites of the ini.
 [[nodiscard]] bool read_synthetic_pose_interpolated(
     const std::filesystem::path& module_directory) noexcept;
 

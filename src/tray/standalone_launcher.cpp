@@ -508,7 +508,8 @@ std::string build_implicit_layer_manifest(
 std::string build_runtime_ini(
     const LauncherSettings& settings,
     unsigned max_file_mb,
-    bool flush_each_event) {
+    bool flush_each_event,
+    bool synthetic_pose_real) {
     return "[ofxr]\r\nbackend=" + backend_ini_value(settings.backend) +
            "\r\nframe_generation=" + (settings.frame_generation == FrameGeneration::native_dlss ? "dlss" : "ofxr") +
            "\r\ndlssg_resolution=" + std::to_string(settings.native_scale) +
@@ -529,6 +530,7 @@ std::string build_runtime_ini(
            "\r\nvulkan_bridge=" + (settings.vulkan_support ? "1" : "0") +
            "\r\nd3d11_bridge=" + (settings.d3d11_bridge ? "1" : "0") +
            "\r\ncapture_at_end_frame=" + (settings.capture_at_end_frame ? "1" : "0") +
+           (synthetic_pose_real ? "\r\nsynthetic_pose=real" : "") +
            "\r\n\r\n[diagnostics]\r\nlogging_enabled=" +
            (settings.diagnostics ? "1" : "0") +
            "\r\nmax_file_mb=" + std::to_string(max_file_mb) +
