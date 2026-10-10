@@ -48,6 +48,12 @@ int main(int argc, char** argv) {
         require(std::abs(padded.submitted_fps - 78) < 0.5f,
                 "repeats must not be counted as frames");
         require(padded.active, "synthetics still mark the overlay active");
+        // The status panel's breakdown of the same second: 39 generated, 39
+        // the game's own, 66 repeats.
+        require(std::abs(padded.generated_fps - 39) < 0.5f &&
+                std::abs(padded.submitted_fps - padded.generated_fps - 39) < 0.5f,
+                "generated and game frames must be told apart");
+        require(std::abs(padded.repeated_fps - 66) < 0.5f, "repeats must be counted apart");
         // The compositor scans every one of those 144 submissions out on time,
         // so its delivered count is the refresh rate. What reaches the eye is
         // the new-content share of it.

@@ -124,6 +124,7 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::promise_correction: return "promise_correction";
     case BridgeFlightOperation::synthesis_fraction: return "synthesis_fraction";
     case BridgeFlightOperation::dlss_evaluation: return "dlss_evaluation";
+    case BridgeFlightOperation::status_panel: return "status_panel";
     }
     return "unknown";
 }
@@ -164,6 +165,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
         return true;
     case BridgeFlightOperation::presenter_transition:
         return result == 600 || (result >= 700 && result < 800);
+    case BridgeFlightOperation::status_panel:
+        return result >= 1 && result <= 3;
     default:
         return false;
     }

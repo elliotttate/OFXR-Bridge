@@ -249,6 +249,18 @@ enum class BridgeFlightOperation : std::uint32_t {
     // none, a the DLSS handle, b how many evaluations were captured to then, c
     // its output rectangle's x offset.
     dlss_evaluation,
+    // The status panel's flip gesture. result is a selector:
+    //   1  the layer's grip-pose action set was made: a= 1, or 0 when the
+    //      runtime refused it and the game's input is left alone
+    //   2  bindings suggested for an interaction profile: a= 1 with the
+    //      layer's two grip bindings, 0 when the runtime refused them and the
+    //      game's own were passed on alone
+    //   3  action sets attached: a= 1 with the layer's, 0 without, b= how
+    //      many grip spaces were made
+    //   4  the panel shown on a turned-over controller: a= the hand, 1 left,
+    //      2 right
+    //   5  the panel hidden again
+    status_panel,
 };
 
 struct BridgeFlightToken {

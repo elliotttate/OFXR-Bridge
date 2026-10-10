@@ -1,6 +1,7 @@
 #pragma once
 
 #include "xrfg/fps_overlay_model.hpp"
+#include "xrfg/status_panel_model.hpp"
 #include "xrfg/steamvr_delivery.hpp"
 #include <d3d11_4.h>
 #include <d3d12.h>
@@ -11,8 +12,9 @@
 
 namespace xrfg {
 
-// Owns only its VIEW space and small color swapchain. Never modifies a game
-// image, temporal history, game space, optical-flow job, or frame schedule.
+// Owns only its VIEW and LOCAL spaces and small color swapchains: the FPS
+// counter's and the status panel's. Never modifies a game image, temporal
+// history, game space, optical-flow job, or frame schedule.
 class OpenXrFpsOverlay final {
 public:
     OpenXrFpsOverlay(XrInstance instance, XrSession session, XrSystemId system,
@@ -25,7 +27,18 @@ public:
     ~OpenXrFpsOverlay();
     // Called on the application's end-frame thread, not the presenter thread.
     // Uploads at most 4 Hz; no explicit GPU fence wait, image-wait timeout zero.
-    void application_frame(const XrFrameEndInfo* info) noexcept;
+    // `status` is what the status panel shows, given whenever status_wanted()
+    // said it was due; the panel keeps its last image otherwise.
+    void application_frame(const XrFrameEndInfo* info,
+                           const StatusPanelInput* status = nullptr) noexcept;
+    // Whether the status panel is up, or about to be, and its next repaint
+    // is due: the caller gathers a StatusPanelInput for application_frame
+    // only then, a few times a second at most. Any thread.
+    [[nodiscard]] bool status_wanted() noexcept;
+    // The status panel's flip gesture reads these: grip-pose spaces of the
+    // layer's own action on the application's input. Borrowed, destroyed by
+    // the layer after this object. Either may be null.
+    void set_grip_spaces(XrSpace left, XrSpace right) noexcept;
     // `new_content` is false for a repeat - the presenter handing the runtime
     // a frame it already submitted, to keep the cadence when the application
     // produced nothing. The quad still goes on, but it is not a frame and the

@@ -20,6 +20,11 @@ struct FpsSnapshot {
     // Generation paused from the tray: drawn as a pause symbol before the
     // number.
     bool paused{};
+    // The status panel's breakdown of the window: generated images, and
+    // submissions that repeated an image already shown, a second. The game's
+    // own frames are submitted_fps less generated_fps.
+    float generated_fps{};
+    float repeated_fps{};
 };
 
 // The compositor's delivered rate, less the share of it that was repeats.
@@ -71,6 +76,7 @@ private:
         std::int64_t epoch{-1};
         std::uint32_t output{};
         std::uint32_t submissions{};
+        std::uint32_t synthetic{};
     };
     Bucket& bucket(std::int64_t now_ns) noexcept;
     std::array<Bucket, 12> buckets_{};
