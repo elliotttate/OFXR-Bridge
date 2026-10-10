@@ -742,12 +742,28 @@ void replay_held_out(const std::filesystem::path& directory) {
         // turn between the frames is not scored against native as error.
         // XRFG_TEST_REPLAY_NATIVE_B_CAMERA=1 keeps B's camera instead.
         std::array<xrfg::D3D12NativeDlssG::Output, 1> outputs{{{output.Get()}}};
+        // XRFG_TEST_REPLAY_NATIVE_UNALIGNED=1 hands NGX A as it is and the
+        // game's whole vectors, head turn included, with B's views for both:
+        // nothing is aligned or reseeded, and NGX's frame lies midway between
+        // the two cameras, from where it is turned into frame 1's.
+        const bool unaligned = std::getenv("XRFG_TEST_REPLAY_NATIVE_UNALIGNED") != nullptr;
+        std::vector<xrfg::D3D12ReprojectionView> midpoint(views2.begin(), views2.end());
+        for (std::size_t i = 0; unaligned && i < midpoint.size() && i < views0.size(); ++i) {
+            const auto& q0 = views0[i].pose.orientation;
+            auto& q = midpoint[i].pose.orientation;
+            const float sign = q0.x * q.x + q0.y * q.y + q0.z * q.z + q0.w * q.w < 0 ? -1.0F : 1.0F;
+            q.x = q0.x + sign * q.x; q.y = q0.y + sign * q.y; q.z = q0.z + sign * q.z; q.w = q0.w + sign * q.w;
+            const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+            q.x /= n; q.y /= n; q.z /= n; q.w /= n;
+        }
+        const std::span<const xrfg::D3D12ReprojectionView> native_a = unaligned ? views2 : views0;
         if (!std::getenv("XRFG_TEST_REPLAY_NATIVE_B_CAMERA") && views1.size() == views2.size() &&
             !views1.empty()) {
             std::array<std::array<float, 4>, 2> rotations{};
             for (std::size_t view = 0; view < rotations.size(); ++view) {
                 const std::size_t index = std::min(view, views1.size() - 1);
-                rotations[view] = xrfg::synthetic_camera_to_current(views2[index], views1[index]);
+                rotations[view] = xrfg::synthetic_camera_to_current(
+                    unaligned ? midpoint[index] : views2[index], views1[index]);
             }
             outputs[0].camera_to_current = rotations;
         }
@@ -759,11 +775,11 @@ void replay_held_out(const std::filesystem::path& directory) {
         auto moved = make_guides(f2_guides, 3, vector_scale, &f0);
         HRESULT seeded = E_FAIL, generated = E_FAIL;
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
-            seeded = native.record(list, 0, a.Get(), a.Get(), views0, views0, seed_a.get(), seed_b.get(),
+            seeded = native.record(list, 0, a.Get(), a.Get(), native_a, native_a, seed_a.get(), seed_b.get(),
                                    outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
         });
         fixture.execute_and_wait([&](ID3D12GraphicsCommandList* list) {
-            generated = native.record(list, 0, a.Get(), b.Get(), views0, views2, seed_b.get(), moved.get(),
+            generated = native.record(list, 0, a.Get(), b.Get(), native_a, views2, seed_b.get(), moved.get(),
                                       outputs, D3D12_RESOURCE_STATE_RENDER_TARGET);
         });
         std::cout << "replay native " << scale << "% seeded=" << seeded << " generated=" << generated
