@@ -6440,7 +6440,10 @@ void bench_frame_generation_methods() {
         std::cout << "fg bench " << name << ": p10_us=" << samples[samples.size() / 10]
                   << " median_us=" << samples[samples.size() / 2] << note << '\n';
     };
-    for (const auto& method : methods) {
+    // Each method twice, back to back: generated in B's camera, and in the
+    // synthetic's own (synthetic_pose=interpolated), where every output pixel
+    // is first turned into B's camera.
+    for (const auto& method : methods) for (const bool own_camera : {false, true}) {
         std::array<ComPtr<ID3D12Resource>, 2> sources{
             create_source_texture(fixture, width, height), create_source_texture(fixture, width, height)};
         std::array<ComPtr<ID3D12Resource>, 2> currents{
@@ -6512,12 +6515,23 @@ void bench_frame_generation_methods() {
             require_hresult(history->capture(pair % 2, &capture), "bench capture");
             require_hresult(history->commit(capture), "bench commit");
             const auto views = make_reprojection_views(0.01F * float(pair));
+            const float fraction = method.extrapolate ? 1.5F : method.triple ? 1.0F / 3.0F : 0.5F;
+            // The synthetics' own cameras, as the layer derives them.
+            const auto previous_views = make_reprojection_views(0.01F * float(pair - 1));
+            std::array<ReprojectionViews, 2> cameras{views, views};
+            for (UINT output = 0; own_camera && output < 2; ++output) {
+                for (UINT view = 0; view < kEyeCount; ++view) {
+                    cameras[output][view].pose = xrfg::pose_at_fraction(previous_views[view].pose,
+                        views[view].pose, output == 0 ? fraction : 2.0F / 3.0F);
+                }
+            }
             const auto extra = method.triple
-                ? std::optional<xrfg::D3D12ExtraSynthetic>(xrfg::D3D12ExtraSynthetic{1, 2.0F / 3.0F})
+                ? std::optional<xrfg::D3D12ExtraSynthetic>(xrfg::D3D12ExtraSynthetic{
+                      1, 2.0F / 3.0F, std::span<const xrfg::D3D12ReprojectionView>(cameras[1])})
                 : std::nullopt;
-            require_hresult(synthesizer.submit_pair(capture, views, views, 0, pair % 2, &ticket,
+            require_hresult(synthesizer.submit_pair(capture, views, cameras[0], 0, pair % 2, &ticket,
                                                     std::nullopt, guides(pair + 1), false,
-                                                    method.extrapolate ? 1.5F : method.triple ? 1.0F / 3.0F : 0.5F, extra),
+                                                    fraction, extra),
                             "bench pair");
             fixture.execute_and_wait([](ID3D12GraphicsCommandList*) {});
             xrfg::D3D12NvidiaGpuTiming timing{};
@@ -6546,7 +6560,7 @@ void bench_frame_generation_methods() {
                 note += std::string(names[i]) + "_us=" + std::to_string(int(stages[i][stages[i].size() / 2]));
             }
         }
-        report(method.name, samples, note);
+        report((std::string(method.name) + (own_camera ? ", own camera" : "")).c_str(), samples, note);
     }
 
     // Game side: one DLSS evaluation per eye per game frame, each followed by
