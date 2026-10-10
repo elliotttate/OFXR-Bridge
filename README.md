@@ -499,6 +499,8 @@ hybrid under a new key and ignores the old one.
   | Hellblade II | UE5, UEVR Native Stereo | 26.6 + 27.0 | NVIDIA medium 1.6 ms (no DLSS in its menu) |
   | Metro Awakening | UE5, native OpenXR | 45 + 45 | NVIDIA medium 1.6 ms |
   | Deep Rock Galactic: Rogue Core | UE5, UEVR Native Stereo | 45.1 + 45.0 | NVIDIA medium 1.7 ms (no DLSS in its menu) |
+  | Reach | native OpenXR (`-d3d11`, the D3D11 bridge) | about 45 + 45 in play | NVIDIA medium 2.0 ms |
+  | Deadzone: Rogue | UE5.6, UEVR Native Stereo, DLSS | 29.6 + 30.0 | the hybrid taken up 2.2 s in, 1924 pairs on the game's vectors, 0.47 ms |
   | Black Myth: Wukong | UE5, UEVR Native Stereo, DLSS | (compiling shaders on its first start) | the hybrid taken up 12 s in, 566 pairs on the game's vectors, 0.18-0.29 ms |
 
   Skydance's BEHEMOTH quits on the simulator with or without the layer, UEVR
