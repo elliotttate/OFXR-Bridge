@@ -5766,7 +5766,8 @@ enum class SyntheticCameraPath {
 void test_synthetic_camera_follows_display_pose(
     D3D12WarpFixture& fixture,
     SyntheticCameraPath path,
-    bool triple) {
+    bool triple,
+    std::uint32_t native_scale = 100) {
     constexpr UINT kCameraWidth = 160;
     constexpr UINT kCameraHeight = 80;
     constexpr float kYawRadians = 0.2094395102393195F;
@@ -5786,7 +5787,9 @@ void test_synthetic_camera_follows_display_pose(
                   : std::array<float, 2>{0.5F, 0.5F});
     const UINT outputs = triple ? 2U : 1U;
     const std::string label = std::string("synthetic camera ") +
-        synthetic_camera_path_name(path) + (triple ? " 3X" : " 2X");
+        synthetic_camera_path_name(path) +
+        (path == SyntheticCameraPath::native ? " " + std::to_string(native_scale) + "%" : "") +
+        (triple ? " 3X" : " 2X");
 
     const ReprojectionViews views_a = make_reprojection_views(0.0F);
     const ReprojectionViews views_b = make_reprojection_views(kYawRadians);
@@ -5875,7 +5878,7 @@ void test_synthetic_camera_follows_display_pose(
     options.extrapolate_mesh = path == SyntheticCameraPath::extrapolate_mesh;
     if (path == SyntheticCameraPath::native) {
         options.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
-        options.native_scale = 100;
+        options.native_scale = native_scale;
     }
     xrfg::D3D12FrameSynthesizer synthesizer;
     require(operation_succeeded(synthesizer.initialize(fixture.device(), fixture.queue(), history,
@@ -5904,6 +5907,8 @@ void test_synthetic_camera_follows_display_pose(
     require(synthesizer.submit_pair(capture_b, views_b, views_c[0], 0, 1, &pair, std::nullopt,
                 motion_b, false, fractions[0], extra) == S_OK,
         label + " pair failed");
+    require(pair.synthetics_in_target_camera,
+        label + " did not generate its synthetics in their own cameras");
     require(operation_succeeded(synthesizer.wait_for_idle()), label + " drain failed");
     require(readback_pattern(fixture, current_destinations[1].Get(),
                 D3D12_RESOURCE_STATE_RENDER_TARGET) == current,
@@ -5967,13 +5972,11 @@ void test_synthetic_camera_follows_display_pose(
             // FidelityFX's flow is too coarse on this small turning scene to
             // extrapolate from at all: 32 against the scene from B's own
             // camera too, where the vectors are exact. It is held to having
-            // content. Native DLSS FG generates a frame of its own, which a
-            // scene this small and smooth does not reproduce texel for texel.
+            // content.
             if (path == SyntheticCameraPath::extrapolate_flow) {
                 continue;
             }
-            const double inside_limit = path == SyntheticCameraPath::native ? 4.0 : 1.5;
-            require(mean(inside, inside_count) <= inside_limit,
+            require(mean(inside, inside_count) <= 1.5,
                 label + " does not match the scene from its camera inside B's view for eye " +
                     std::to_string(eye) + ": " + std::to_string(mean(inside, inside_count)));
             require(mean(beyond_seen, seen_count) <= 1.5,
@@ -6684,6 +6687,12 @@ int main() {
             native_options.native_scale=100;
             test_rotation_aware_synthesis_beats_uncompensated_flow(native_fixture,
                 xrfg::D3D12OpticalFlowBackend::fidelity_fx,native_options);
+            for (const std::uint32_t scale : {100U, 67U}) {
+                test_synthetic_camera_follows_display_pose(
+                    native_fixture, SyntheticCameraPath::native, false, scale);
+                test_synthetic_camera_follows_display_pose(
+                    native_fixture, SyntheticCameraPath::native, true, scale);
+            }
             test_dlss_extrapolation(native_fixture, true);
             test_dlss_extrapolation(native_fixture, true, true);
             native_fixture.require_no_debug_errors();

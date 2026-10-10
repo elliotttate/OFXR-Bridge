@@ -67,7 +67,7 @@ constexpr UINT kSeam = 64;
 constexpr UINT kMaxFeatureSize = 8192;
 constexpr UINT kMinSeam = 16;
 // Root constants per dispatch or draw.
-constexpr UINT kParams = 48;
+constexpr UINT kParams = 52;
 // The motion and depth rectangle a reset evaluation reads.
 constexpr UINT kResetGuideSize = 64;
 // SeedNativeDlssG's group width; its groups are 8 high, like the pack's.
@@ -88,7 +88,10 @@ struct Params {
     UINT eye_x, cell_x, cell_width, cell_height;
     float motion_normal[2], guide_scale[2];
     float detail_falloff, towards_a;
-    UINT depth_inverted, padding;
+    // synthetic_camera: the compose's output is shown from a camera of its
+    // own, synthetic_rotation taking its rays into B's (Output).
+    UINT depth_inverted, synthetic_camera;
+    float synthetic_rotation[4];
 };
 static_assert(sizeof(Params) == kParams * sizeof(UINT));
 // Where an eye sits in its feature, and the columns its pack writes: the eye
@@ -1386,8 +1389,16 @@ HRESULT D3D12NativeDlssG::record(ID3D12GraphicsCommandList *list, UINT slot, ID3
                 const auto &gb = *bg->eyes[guide_index(i)];
                 auto params = eye_params[i];
                 params.towards_a = 1.0F - float(output + 1) / float(outputs.size() + 1);
+                // An output shown from a camera of its own samples NGX's
+                // frame along each pixel's ray, and A, which the compose has
+                // in the seed's fallback slot, beyond B's view.
+                if (outputs[output].camera_to_current) {
+                    const auto &rotation = (*outputs[output].camera_to_current)[std::min(i, 1U)];
+                    std::copy(rotation.begin(), rotation.end(), params.synthetic_rotation);
+                    params.synthetic_camera = 1;
+                }
                 const UINT outbase = i * kBlocksPerEye * kBlock + (output + 2) * kBlock;
-                p.descriptors(slot, outbase, feature, b, gb, output, b);
+                p.descriptors(slot, outbase, feature, b, gb, output, a);
                 list->SetGraphicsRootDescriptorTable(0, p.gpu(slot, outbase));
                 list->SetGraphicsRootDescriptorTable(1, p.gpu(slot, outbase + kSrvs));
                 list->SetGraphicsRoot32BitConstants(2, kParams, &params, 0);

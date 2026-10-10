@@ -3940,6 +3940,9 @@ struct D3D12FrameSynthesizer::Impl {
             for (UINT output=0; output<synthetic_output_count(); ++output) {
                 outputs[output].image = synthetic_destinations[
                     synthetic_output_destination(output, synthetic_destination_index)].resource.Get();
+                if (synthetic_camera_turned[output]) {
+                    outputs[output].camera_to_current = synthetic_camera_rotations[output];
+                }
                 if (!full_coverage) copy(slot.command_list.Get(), outputs[output].image);
             }
             const UINT work_slot = static_cast<UINT>(&slot - work_slots.data());
@@ -5181,6 +5184,7 @@ struct D3D12FrameSynthesizer::Impl {
             output_ticket->synthetic_destination_index =
                 synthetic_destination_index;
             output_ticket->current_destination_index = current_destination_index;
+            output_ticket->synthetics_in_target_camera = true;
             return S_OK;
         }
 
@@ -5297,6 +5301,8 @@ struct D3D12FrameSynthesizer::Impl {
         output_ticket->work_slot = work_slot_index;
         output_ticket->synthetic_destination_index = synthetic_destination_index;
         output_ticket->current_destination_index = current_destination_index;
+        // A skipped native pair copied B into its outputs.
+        output_ticket->synthetics_in_target_camera = !native_dlss || native_pair_generated;
         return S_OK;
     }
 

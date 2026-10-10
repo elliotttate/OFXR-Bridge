@@ -1,8 +1,10 @@
 #pragma once
 
 #include "xrfg/d3d12_frame_synthesizer.hpp"
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 
 namespace xrfg {
@@ -13,6 +15,11 @@ class D3D12NativeDlssG final {
   public:
     struct Output {
         ID3D12Resource *image{};
+        // The camera the output is shown from, per view, as the rotation
+        // (x, y, z, w) that takes a ray of it into B's camera; the compose
+        // samples NGX's frame along that ray, and A beyond B's view. None:
+        // B's own camera.
+        std::optional<std::array<std::array<float, 4>, 2>> camera_to_current{};
     };
     // Why the last record() returned S_FALSE.
     enum class Skip {

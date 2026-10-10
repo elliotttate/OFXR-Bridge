@@ -60,6 +60,11 @@ struct D3D12FrameSynthesisTicket {
     std::uint32_t synthetic_destination_index{
         std::numeric_limits<std::uint32_t>::max()};
     std::uint32_t current_destination_index{};
+    // A pair's synthetics are in the target cameras submit_pair was given.
+    // False where the pair was not generated but filled with the current
+    // frame - a native DLSS FG pair NGX skipped - so its synthetics show B's
+    // camera and go to the runtime with B's pose.
+    bool synthetics_in_target_camera{};
 };
 
 // Completed direct-queue GPU intervals for one NVIDIA Optical Flow pair.
