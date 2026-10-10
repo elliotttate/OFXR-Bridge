@@ -155,7 +155,11 @@ struct PanelRates {
 };
 
 struct StatusPanelInput {
+    // What the tray asks for now; what this session was started with, which
+    // is what it tries to run (the tray's method takes effect at the next
+    // game start, 3X at once); and what it runs.
     PanelMethod asked;
+    PanelMethod session;
     PanelMethod running;
     // What holds generation back, worst first.
     bool paused{};

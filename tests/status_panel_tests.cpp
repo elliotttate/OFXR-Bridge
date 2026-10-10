@@ -55,6 +55,7 @@ xrfg::PanelMethod tray_default() {
 xrfg::StatusPanelInput generating(const xrfg::PanelMethod& asked, const xrfg::PanelMethod& running) {
     xrfg::StatusPanelInput input;
     input.asked = asked;
+    input.session = asked;
     input.running = running;
     input.rates = {90.0f, 45.0f, 45.0f, 0.0f, 90.0f, -1.0f, true};
     input.vectors_published = true;
@@ -219,8 +220,11 @@ int main(int argc, char** argv) {
         text = status_panel_text(input);
         require(has_line(text, "refused a fourth swapchain: shallow pipeline", PanelTone::warn), "shallow fallback");
         require(text.state == "FALLBACK", "shallow fallback is a fallback");
+        // The session started shallow and the tray now asks for deep: a
+        // change that waits for the next start, not a fallback.
         input.shallow_fallback = false;
-        require(has_line(status_panel_text(input), "deep pipeline starts with the next game start", PanelTone::dim) &&
+        input.session.deep = false;
+        require(has_line(status_panel_text(input), "newer choice starts with the next game start", PanelTone::dim) &&
                 status_panel_text(input).state == "GENERATING", "a changed setting is not a fallback");
         asked.frames = 3;
         running = asked;
@@ -276,8 +280,32 @@ int main(int argc, char** argv) {
         require(line_labelled(text, "Running").text == "Extrapolate, FidelityFX flow, 2X" &&
                 has_line(text, "No DLSS vectors from this game", PanelTone::warn), "extrapolation from flow");
         input.asked.extrapolate = 0;
-        require(has_line(status_panel_text(input), "Extrapolation stops with the next game start", PanelTone::dim),
+        require(has_line(status_panel_text(input), "newer choice starts with the next game start", PanelTone::dim),
                 "extrapolation is fixed for the session");
+
+        // The tray switched to DLSS Frame Generation mid-game: the session
+        // runs on what it started with, and says the change is pending.
+        asked = PanelMethod{};
+        asked.native = true;
+        input = generating(asked, tray_default());
+        input.session = tray_default();
+        input.running.flow = PanelFlow::fidelity_fx;
+        input.running.flow_scale = 25;
+        text = status_panel_text(input);
+        require(text.state == "GENERATING" && line_labelled(text, "Asked").text == "DLSS Frame Generation 67%, 2X" &&
+                line_labelled(text, "Running").text == "Hybrid: DLSS vectors + FidelityFX flow, 2X, deep" &&
+                has_line(text, "newer choice starts with the next game start", PanelTone::dim) &&
+                line_labelled(text, "Vectors").tone == PanelTone::good, "a pending method is not a fallback");
+        // 3X follows the tray at once: no pending change for it alone.
+        asked = tray_default();
+        asked.frames = 3;
+        input = generating(asked, asked);
+        input.session.frames = 2;
+        text = status_panel_text(input);
+        require(text.state == "GENERATING" &&
+                std::none_of(text.lines.begin(), text.lines.end(),
+                             [](const PanelLine& line) { return line.text.find("newer") != std::string::npos; }),
+                "3X counted as a pending change");
 
         // Held back: paused, off, out of swapchains, or passing frames through.
         input = generating(tray_default(), tray_default());

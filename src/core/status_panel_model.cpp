@@ -281,9 +281,12 @@ std::string describe_running(const StatusPanelInput& input) {
 
 StatusPanelText status_panel_text(const StatusPanelInput& input) {
     StatusPanelText text;
+    // A fallback is the session running something other than what it was
+    // started with; a newer choice in the tray is not one, only pending.
     const PanelMethod asked = normalized(input.asked);
+    const PanelMethod set = normalized(input.session);
     const PanelMethod& running = input.running;
-    const Engine wanted = asked_engine(asked);
+    const Engine wanted = asked_engine(set);
     const Engine engine = running_engine(input);
     const bool held = input.paused || !input.enabled || input.budget_exhausted;
 
@@ -299,7 +302,7 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
                PanelTone::bad);
     } else if (input.budget_exhausted) {
         reason("The runtime refused a swapchain: real frames only this session", PanelTone::bad);
-    } else if (engine == Engine::none && !(asked.native && input.rates.generating)) {
+    } else if (engine == Engine::none && !(set.native && input.rates.generating)) {
         reason(bypass_text(input.bypass), PanelTone::warn);
     }
     if (input.declined_images > 0) {
@@ -309,7 +312,7 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
                PanelTone::warn);
     }
     if (!held) {
-        if (asked.native) {
+        if (set.native) {
             if (!input.native_available) {
                 reason("DLSS Frame Generation is unavailable on this GPU or driver", PanelTone::bad);
             } else if (engine == Engine::none && input.rates.generating) {
@@ -330,26 +333,24 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
                     break;
                 }
             }
-            if (asked.frames > 2 && input.native_single_frame) {
+            if (set.frames > 2 && input.native_single_frame) {
                 reason("This GPU's DLSS Frame Generation makes one frame: 2X", PanelTone::warn);
             }
         } else if (engine != Engine::none) {
-            if (asked.extrapolate != running.extrapolate) {
-                reason(asked.extrapolate != 0 ? "Extrapolation starts with the next game start"
-                                              : "Extrapolation stops with the next game start",
-                       PanelTone::dim);
-            } else if (uses_vectors(wanted) && !uses_vectors(engine)) {
+            if (uses_vectors(wanted) && !uses_vectors(engine)) {
                 reason(wanted == Engine::hybrid && !input.vectors_published
                            ? "The hybrid waits for the game's first DLSS vectors"
                            : vector_fallback(input),
                        PanelTone::warn);
             }
-            if (asked.flow == PanelFlow::nvidia && input.nvidia_unavailable &&
+            if (set.flow == PanelFlow::nvidia && input.nvidia_unavailable &&
                 (engine == Engine::flow || wanted == Engine::flow)) {
                 reason("NVIDIA optical flow is unavailable here: FidelityFX", PanelTone::warn);
             }
         }
-        if (asked.frames > running.frames && !(asked.native && input.native_single_frame)) {
+        // 3X follows the tray at once, so it is the tray's choice that is
+        // compared here.
+        if (asked.frames > running.frames && !(set.native && input.native_single_frame)) {
             if (input.shallow_fallback) {
                 reason("The runtime refused a fourth swapchain: 2X", PanelTone::warn);
             } else if (input.graphics == PanelGraphics::d3d11_interop) {
@@ -363,16 +364,22 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
         } else if (asked.frames < running.frames) {
             reason("Switching to 2X", PanelTone::dim);
         }
-        if (running.frames <= 2 && running.extrapolate == 0 && asked.frames <= 2 &&
-            asked.extrapolate == 0) {
-            if (asked.deep && !running.deep) {
-                reason(input.shallow_fallback
-                           ? "The runtime refused a fourth swapchain: shallow pipeline"
-                           : "The deep pipeline starts with the next game start",
-                       input.shallow_fallback ? PanelTone::warn : PanelTone::dim);
-            } else if (!asked.deep && running.deep) {
-                reason("The shallow pipeline starts with the next game start", PanelTone::dim);
-            }
+        if (set.deep && !running.deep && running.frames <= 2 && input.shallow_fallback) {
+            reason("The runtime refused a fourth swapchain: shallow pipeline", PanelTone::warn);
+        }
+        // Everything else the tray changes is read when the game starts.
+        PanelMethod pending = input.asked;
+        pending.frames = input.session.frames;
+        pending = normalized(pending);
+        const auto same = [](const PanelMethod& a, const PanelMethod& b) {
+            return a.native == b.native && (!a.native || a.native_scale == b.native_scale) &&
+                a.flow == b.flow && a.preset == b.preset && a.flow_scale == b.flow_scale &&
+                a.both_ways == b.both_ways && a.game_vectors == b.game_vectors &&
+                a.hybrid == b.hybrid && a.extrapolate == b.extrapolate &&
+                (a.extrapolate == 0 || a.mesh == b.mesh) && a.deep == b.deep;
+        };
+        if (!same(pending, set)) {
+            reason("The tray's newer choice starts with the next game start", PanelTone::dim);
         }
     }
 
@@ -405,10 +412,10 @@ StatusPanelText status_panel_text(const StatusPanelInput& input) {
         reasons[index].label = index == 0 ? "Why" : "";
         lines.push_back(std::move(reasons[index]));
     }
-    if (asked.native || asked.game_vectors) {
+    if (set.native || set.game_vectors) {
         const PanelVectors& vectors = input.vectors;
         const std::uint64_t refused = vectors.temporal_rejections + vectors.invalid_rejections;
-        PanelLine line{asked.native ? "Guides" : "Vectors", {}, PanelTone::dim};
+        PanelLine line{set.native ? "Guides" : "Vectors", {}, PanelTone::dim};
         if (vectors.used > 0) {
             const double share = static_cast<double>(vectors.used) /
                 static_cast<double>(vectors.used + refused);
