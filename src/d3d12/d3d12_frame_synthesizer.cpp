@@ -1,5 +1,6 @@
 #include "xrfg/d3d12_frame_synthesizer.hpp"
 #include "xrfg/bridge_flight_logger.hpp"
+#include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/frame_dump.hpp"
 
@@ -1035,9 +1036,9 @@ struct D3D12FrameSynthesizer::Impl {
 
         ComPtr<ID3DBlob> serialized;
         ComPtr<ID3DBlob> error;
-        HRESULT result = D3D12SerializeRootSignature(
-            &root_description,
-            D3D_ROOT_SIGNATURE_VERSION_1,
+        HRESULT result = serialize_root_signature(
+            device.Get(),
+            root_description,
             serialized.GetAddressOf(),
             error.GetAddressOf());
         if (FAILED(result)) {
@@ -1314,6 +1315,15 @@ struct D3D12FrameSynthesizer::Impl {
             return result;
         }
 
+        // FidelityFX's prebuilt DX12 backend serializes its root signatures
+        // with the global D3D12 functions, which a host whose Agility SDK
+        // exports are broken refuses (see create_d3d12_device_on_adapter).
+        // It carries on with no pipelines and the first dispatch faults
+        // inside D3D12: Beat Saber crashed on a switch to FidelityFX. Such a
+        // process gets no FidelityFX context; NVIDIA's flow still works.
+        if (!global_d3d12_functions_usable()) {
+            return static_cast<HRESULT>(0x887E0003L);
+        }
         const size_t scratch_size =
             ffxGetScratchMemorySizeDX12(FFX_OPTICALFLOW_CONTEXT_COUNT);
         if (scratch_size == 0) {

@@ -5,6 +5,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <utility>
@@ -177,7 +178,82 @@ void copy_mip_zero(
     }
 }
 
+// D3D12_ERROR_INVALID_REDIST: the host exe's Agility SDK exports name a
+// D3D12Core that is not where they say. Beat Saber ships Unity's exports
+// (version 715 at .\D3D12\) without the folder; the game itself is D3D11 and
+// never notices, but every D3D12 device in the process is refused - the
+// bridge's included - and the session ran without generation.
+constexpr HRESULT kInvalidRedist = static_cast<HRESULT>(0x887E0003L);
+
+// A device on the system's own D3D12, past the host's configuration: a device
+// factory for the version the system's D3D12Core.dll reports, at its path.
+HRESULT create_device_on_system_d3d12(IDXGIAdapter* adapter, ID3D12Device** device) noexcept {
+    HMODULE core = LoadLibraryExW(L"D3D12Core.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (core == nullptr) return HRESULT_FROM_WIN32(GetLastError());
+    const auto* version = reinterpret_cast<const UINT*>(GetProcAddress(core, "D3D12SDKVersion"));
+    const UINT system_version = version != nullptr ? *version : 0U;
+    FreeLibrary(core);
+    if (system_version == 0) return kInvalidRedist;
+    ComPtr<ID3D12SDKConfiguration1> configuration;
+    HRESULT result = D3D12GetInterface(CLSID_D3D12SDKConfiguration,
+                                       IID_PPV_ARGS(configuration.GetAddressOf()));
+    if (FAILED(result)) return result;
+    wchar_t system_directory[MAX_PATH]{};
+    char system_path[MAX_PATH * 2]{};
+    const UINT length = GetSystemDirectoryW(system_directory, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH ||
+        WideCharToMultiByte(CP_UTF8, 0, system_directory, -1, system_path,
+                            static_cast<int>(sizeof(system_path)) - 2, nullptr, nullptr) == 0) {
+        return E_FAIL;
+    }
+    strcat_s(system_path, "\\");
+    for (const char* path : {"", static_cast<const char*>(system_path)}) {
+        ComPtr<ID3D12DeviceFactory> factory;
+        result = configuration->CreateDeviceFactory(system_version, path,
+                                                    IID_PPV_ARGS(factory.GetAddressOf()));
+        if (FAILED(result)) continue;
+        result = factory->CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0,
+                                       IID_PPV_ARGS(device));
+        if (SUCCEEDED(result)) return result;
+    }
+    return result;
+}
+
 }  // namespace
+
+HRESULT create_d3d12_device_on_adapter(IDXGIAdapter* adapter, ID3D12Device** device) noexcept {
+    if (device == nullptr) return E_POINTER;
+    *device = nullptr;
+    const HRESULT result = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(device));
+    if (result != kInvalidRedist) return result;
+    return create_device_on_system_d3d12(adapter, device);
+}
+
+bool global_d3d12_functions_usable() noexcept {
+    static const bool usable = [] {
+        D3D12_ROOT_SIGNATURE_DESC description{};
+        ComPtr<ID3DBlob> blob;
+        ComPtr<ID3DBlob> error;
+        return D3D12SerializeRootSignature(&description, D3D_ROOT_SIGNATURE_VERSION_1,
+                                           blob.GetAddressOf(), error.GetAddressOf()) !=
+               kInvalidRedist;
+    }();
+    return usable;
+}
+
+HRESULT serialize_root_signature(
+    ID3D12Device* device, const D3D12_ROOT_SIGNATURE_DESC& description,
+    ID3DBlob** blob, ID3DBlob** error) noexcept {
+    const HRESULT result = D3D12SerializeRootSignature(
+        &description, D3D_ROOT_SIGNATURE_VERSION_1, blob, error);
+    if (result != kInvalidRedist || device == nullptr) return result;
+    ComPtr<ID3D12DeviceConfiguration> configuration;
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(configuration.GetAddressOf())))) return result;
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC versioned{};
+    versioned.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
+    versioned.Desc_1_0 = description;
+    return configuration->SerializeVersionedRootSignature(&versioned, blob, error);
+}
 
 HRESULT create_d3d12_device_for_d3d11(
     ID3D11Device* d3d11_device,
@@ -207,10 +283,7 @@ HRESULT create_d3d12_device_for_d3d11(
         }
 
         ComPtr<ID3D12Device> device;
-        result = D3D12CreateDevice(
-            adapter.Get(),
-            D3D_FEATURE_LEVEL_11_0,
-            IID_PPV_ARGS(device.GetAddressOf()));
+        result = create_d3d12_device_on_adapter(adapter.Get(), device.GetAddressOf());
         if (FAILED(result)) {
             return result;
         }

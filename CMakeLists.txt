@@ -1252,6 +1252,23 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         endif()
         add_test(NAME xrfg_d3d11_bridge_tests COMMAND xrfg_d3d11_bridge_tests)
 
+        add_executable(xrfg_d3d12_invalid_redist_tests tests/d3d12_invalid_redist_tests.cpp)
+        target_include_directories(xrfg_d3d12_invalid_redist_tests PRIVATE include)
+        target_link_libraries(xrfg_d3d12_invalid_redist_tests PRIVATE
+            xrfg_d3d12_history
+            d3d11
+            d3d12
+            dxgi)
+        target_compile_features(xrfg_d3d12_invalid_redist_tests PRIVATE cxx_std_20)
+        if(MSVC)
+            target_compile_options(xrfg_d3d12_invalid_redist_tests PRIVATE
+                /W4 /permissive- /EHsc)
+            target_compile_definitions(xrfg_d3d12_invalid_redist_tests PRIVATE
+                NOMINMAX
+                WIN32_LEAN_AND_MEAN)
+        endif()
+        add_test(NAME xrfg_d3d12_invalid_redist_tests COMMAND xrfg_d3d12_invalid_redist_tests)
+
         add_executable(xrfg_d3d12_history_tests tests/d3d12_history_tests.cpp)
         target_include_directories(xrfg_d3d12_history_tests PRIVATE include)
         target_link_libraries(xrfg_d3d12_history_tests PRIVATE

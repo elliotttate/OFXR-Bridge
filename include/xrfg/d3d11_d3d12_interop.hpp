@@ -2,6 +2,7 @@
 
 #include <d3d11_4.h>
 #include <d3d12.h>
+#include <dxgi.h>
 
 #include <cstdint>
 #include <memory>
@@ -41,6 +42,23 @@ enum class D3D11InteropInitializationStage : std::uint32_t {
     open_d3d11_fence = 24,
     create_event = 25,
 };
+
+// A D3D12 device on the adapter. Where the host exe's Agility SDK exports
+// name a D3D12Core that is not there (D3D12_ERROR_INVALID_REDIST for every
+// device in the process), the device is made on the system's D3D12 instead.
+[[nodiscard]] HRESULT create_d3d12_device_on_adapter(
+    IDXGIAdapter* adapter, ID3D12Device** device) noexcept;
+
+// D3D12SerializeRootSignature, which the same host configuration refuses as it
+// refuses devices; a device from create_d3d12_device_on_adapter's fallback
+// serializes through its own ID3D12DeviceConfiguration instead.
+// Whether this process may call the global D3D12 functions at all; false
+// where the host's Agility SDK exports are broken. Asked once.
+[[nodiscard]] bool global_d3d12_functions_usable() noexcept;
+
+[[nodiscard]] HRESULT serialize_root_signature(
+    ID3D12Device* device, const D3D12_ROOT_SIGNATURE_DESC& description,
+    ID3DBlob** blob, ID3DBlob** error) noexcept;
 
 // Creates a private D3D12 device and direct queue on the adapter that owns the
 // supplied D3D11 OpenXR device. The caller retains both returned objects.

@@ -1,4 +1,5 @@
 #include "xrfg/d3d12_native_dlssg.hpp"
+#include "xrfg/d3d11_d3d12_interop.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -650,7 +651,7 @@ struct D3D12NativeDlssG::Impl {
         rd.NumParameters = 3;
         rd.pParameters = rp;
         ComPtr<ID3DBlob> blob, error;
-        HRESULT hr = D3D12SerializeRootSignature(&rd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &error);
+        HRESULT hr = serialize_root_signature(device.Get(), rd, &blob, &error);
         if (FAILED(hr)) {
             return hr;
         }
