@@ -14474,8 +14474,7 @@ XrResult layer_end_frame_impl(
         result = with_runtime_entry(state, [&] {
             return state->fps_overlay
                 ? state->fps_overlay->end_frame(submitted_end_info, pair_ready,
-                      !(pair_ready && submitted_end_info == &first_generated.info &&
-                        first_generated.repeats_current))
+                      !(pair_ready && first_is_synthetic && first_generated.repeats_current))
                 : state->dispatch->end_frame(session, submitted_end_info);
         });
     }

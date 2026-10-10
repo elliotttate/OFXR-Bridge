@@ -1240,6 +1240,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_layer_promise_shown_time_extrapolate
             xrfg_layer_promise_two_groups
             xrfg_layer_rephase
+            xrfg_layer_inline_promise
             PROPERTIES RESOURCE_LOCK xrfg_layer_long_call_chain)
 
         add_test(
