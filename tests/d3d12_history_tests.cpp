@@ -2763,6 +2763,22 @@ void test_stereo_motion_synthesis_beats_same_pixel_blend(
 // each eye's image takes its own eye's evaluation, whichever ran last. With
 // the capture at xrEndFrame both eyes have evaluated by then, and the newest
 // alone went to both, so one eye followed the other's motion.
+// The flow's per-eye input is held to 2304 pixels whatever scale is chosen.
+void test_flow_input_cap() {
+    using Scale = xrfg::D3D12OpticalFlowInputScale;
+    require(xrfg::capped_flow_input_scale(Scale::three_quarter, 3004) == Scale::three_quarter,
+            "75% of a 3004-pixel eye (2253) keeps its scale");
+    require(xrfg::capped_flow_input_scale(Scale::three_quarter, 6514) == Scale::quarter,
+            "a 6514-pixel eye steps 75% down to a quarter");
+    require(xrfg::capped_flow_input_scale(Scale::half, 4608) == Scale::half &&
+                xrfg::capped_flow_input_scale(Scale::half, 4610) == Scale::quarter,
+            "half holds to 4608-pixel eyes");
+    require(xrfg::capped_flow_input_scale(Scale::full, 3000) == Scale::three_quarter,
+            "full steps to 75% on a 3000-pixel eye");
+    require(xrfg::capped_flow_input_scale(Scale::quarter, 20000) == Scale::quarter,
+            "a quarter is the floor");
+}
+
 void test_dlss_motion_vector_per_eye_swapchains(D3D12WarpFixture& fixture) {
     xrfg::configure_dlss_motion_vector_tracking(false);
     xrfg::configure_dlss_motion_vector_tracking(true);
@@ -6719,6 +6735,7 @@ int main() {
             return 0;
         }
         D3D12WarpFixture fixture;
+        test_flow_input_cap();
         test_stereo_capture_ring(fixture);
         test_capture_is_async_and_consumer_fence_blocks_reuse(fixture);
         test_depth_capture_path(fixture);

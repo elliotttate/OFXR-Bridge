@@ -61,9 +61,9 @@ constexpr UINT kFidelityFxFlowBlockSize = 8;
 constexpr UINT kNvidiaFlowBlockSize = 4;
 constexpr UINT kEyeGapPixels = 64;
 constexpr UINT kMinimumFlowDimension = 64;
-// The tallest per-eye flow input any chosen scale may give; see the scale's
-// use in initialize. 75% of Galactic Racer's 3004-pixel eyes (2253) is below
-// it, so ordinary resolutions keep the scale they were given.
+// The tallest per-eye flow input any chosen scale may give; see
+// capped_flow_input_scale. 75% of Galactic Racer's 3004-pixel eyes (2253) is
+// below it, so ordinary resolutions keep the scale they were given.
 constexpr UINT64 kMaxFlowInputHeight = 2304;
 // Keep only one complete OFXR transaction resident on the graphics queue.  A
 struct NvidiaInputScaleRatio {
@@ -720,6 +720,19 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
 }
 
 }  // namespace
+
+D3D12OpticalFlowInputScale capped_flow_input_scale(
+    D3D12OpticalFlowInputScale scale, unsigned long long eye_height) noexcept {
+    for (;;) {
+        const NvidiaInputScaleRatio ratio = nvidia_input_scale_ratio(scale);
+        if (scale == D3D12OpticalFlowInputScale::quarter ||
+            (eye_height * ratio.numerator + ratio.denominator - 1U) / ratio.denominator <=
+                kMaxFlowInputHeight) {
+            return scale;
+        }
+        scale = static_cast<D3D12OpticalFlowInputScale>(static_cast<int>(scale) + 1);
+    }
+}
 
 float usable_synthesis_fraction(float fraction, bool extrapolate) noexcept {
     if (!std::isfinite(fraction)) {
@@ -2321,15 +2334,8 @@ struct D3D12FrameSynthesizer::Impl {
         // 75% took 9.8 ms a pair beside an 8.2 ms composition, and half the
         // generated frames missed their slots. The height is per eye in
         // both layouts (side by side, or one array slice per eye).
-        D3D12NvidiaInputScale effective_scale = input_nvidia_options.input_scale;
-        NvidiaInputScaleRatio scale = nvidia_input_scale_ratio(effective_scale);
-        while (effective_scale != D3D12NvidiaInputScale::quarter &&
-               (static_cast<UINT64>(description.Height) * scale.numerator +
-                scale.denominator - 1U) / scale.denominator > kMaxFlowInputHeight) {
-            effective_scale = static_cast<D3D12NvidiaInputScale>(
-                static_cast<int>(effective_scale) + 1);
-            scale = nvidia_input_scale_ratio(effective_scale);
-        }
+        const NvidiaInputScaleRatio scale = nvidia_input_scale_ratio(
+            capped_flow_input_scale(input_nvidia_options.input_scale, description.Height));
         const auto scaled = [&](UINT64 value) -> UINT64 {
             return (value * scale.numerator + scale.denominator - 1U) /
                 scale.denominator;

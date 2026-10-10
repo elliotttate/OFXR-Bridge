@@ -110,6 +110,13 @@ enum class D3D12OpticalFlowInputScale {
 // The name the NVIDIA options and the tray settings already use.
 using D3D12NvidiaInputScale = D3D12OpticalFlowInputScale;
 
+// The flow input scale run for eyes this many pixels tall: the chosen one,
+// stepped down (75% to 50% to 25%) until the flow's per-eye input is at most
+// 2304 pixels tall. Flow finer than that adds little for its cost, and
+// supersampled eyes make it unaffordable.
+[[nodiscard]] D3D12OpticalFlowInputScale capped_flow_input_scale(
+    D3D12OpticalFlowInputScale scale, unsigned long long eye_height) noexcept;
+
 enum class D3D12FrameGeneration { ofxr, native_dlss };
 
 struct D3D12NvidiaOpticalFlowOptions {

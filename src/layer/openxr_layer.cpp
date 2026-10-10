@@ -13023,11 +13023,20 @@ static_assert(static_cast<int>(xrfg::PanelVectorStatus::multi_frame_unsupported)
     input.enabled = desired.enabled && !state->control_reconfigure_required;
     input.settings_failed = state->control_reconfigure_required;
     input.budget_exhausted = state->generation_budget_exhausted.load(std::memory_order_acquire);
+    std::uint32_t eye_height = 0;
     for (const auto& chain : find_swapchains(state)) {
         std::scoped_lock lock(chain->mutex);
         if (chain->generation_declined && chain->projection_used.load(std::memory_order_relaxed)) {
             ++input.declined_images;
         }
+        if (chain->projection_used.load(std::memory_order_relaxed)) {
+            eye_height = std::max(eye_height, chain->create_info.height);
+        }
+    }
+    // The scale the synthesizer runs, held down on tall eyes.
+    if (eye_height != 0) {
+        running.flow_scale = panel_scale_percent(static_cast<int>(
+            xrfg::capped_flow_input_scale(options.input_scale, eye_height)));
     }
     if (now - state->panel_bypass_at < std::chrono::seconds(1)) {
         switch (static_cast<GenerationPrepareReason>(state->panel_bypass_reason)) {
