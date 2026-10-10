@@ -483,6 +483,16 @@ hybrid under a new key and ignores the old one.
   | Beat Saber | Unity, D3D11 (bridge) | 60 + 60 | NVIDIA medium 4.0 ms (needed the invalid-redist fallback) |
   | Drop Dead: The Cabin | Unity | 31 + 31 | NVIDIA medium 1.9 ms (the game holds about 31) |
 
+  On the Meta XR Simulator at 90 Hz, while the headset was away:
+
+  | Game | How it runs | Shown a second | Per pair, live |
+  |---|---|---|---|
+  | Moss | UE4, native (`-hmd=OpenXRHMD`) | 45 + 45 | NVIDIA medium 1.6 ms |
+  | Into the Radius | UE4, native (`-hmd=OpenXRHMD`) | 45 + 45 | NVIDIA medium 1.6 ms |
+  | Deep Rock Galactic | UE4, UEVR Native Stereo (`-dx12`) | about 41 + 41 (82 real without) | NVIDIA medium 1.55 ms, FidelityFX 0.29 |
+  | Atomic Heart | UE4, UEVR Native Stereo | about 26 + 26 (32-37 real without) | NVIDIA medium 1.6 ms; FidelityFX 0.30 kept 29 real |
+  | Metal Eden | UE5, UEVR Native Stereo | 30 + 30 | its menu ran DLSS for 15 frames, enough to take up the hybrid, then stopped; FidelityFX alone 0.29 ms |
+
   Unity games ask for OpenXR 1.1 first, which SteamVR refuses, and then make
   their instance at 1.0; FlatOut does the same. Not generating, and not
   because of the layer: The Riese Project - Prologue waits on a launcher that
