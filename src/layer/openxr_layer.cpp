@@ -6188,11 +6188,14 @@ XrResult layer_create_swapchain_impl(
     }
 
     PresenterResourceLifetimeGuard presenter_guard(state);
-    const bool active_color_reconfiguration =
-        state->generation_steady_state_established &&
-        (create_info->usageFlags & XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT) != 0 &&
-        (create_info->usageFlags &
-         XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) == 0;
+    // A new swapchain no longer holds generation off for the structural
+    // quarantine's second, for the reason destroying one stopped doing so
+    // (layer_destroy_swapchain_impl): generation resources are only taken
+    // when a projection layer first names a swapchain, so a new one changes
+    // nothing the current pair uses, and a projection that moves onto it is
+    // still handled as a projection change. Riven made a 1024x1024 swapchain
+    // two seconds into generation and lost the second's 120 generated
+    // frames to the deadline alone.
     // Bridged and multisampled: the runtime gets a single-sample swapchain
     // and the application a multisampled texture of its own, resolved at
     // release (D3D11BridgePath::resolve). Every path below sees the
@@ -6451,12 +6454,6 @@ XrResult layer_create_swapchain_impl(
         swapchain_state->vulkan_bridge = std::move(bridge);
     }
     *swapchain = created_swapchain;
-    if (active_color_reconfiguration) {
-        schedule_generation_quarantine(
-            state,
-            GenerationQuarantineReason::swapchain_created,
-            handle_value(created_swapchain));
-    }
     return result;
 }
 
