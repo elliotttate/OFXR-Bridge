@@ -460,6 +460,35 @@ hybrid under a new key and ignores the old one.
   costs more of SteamVR's sixteen swapchains. Bootstrap Island uses OpenVR and
   is outside an OpenXR layer's reach; Hogwarts Legacy exits while this UEVR
   build hooks D3D12, before any OpenXR session.
+- **Tested across a Steam library.** On the Steam Frame at 120 Hz (2X, the
+  hybrid by default), shown frames a second as real + generated:
+
+  | Game | How it runs | Shown a second | Per pair, live |
+  |---|---|---|---|
+  | Riven | UE5, native OpenXR (`-vr`), DLSS | 59.8 + 59.8 | hybrid 1.13 ms (taken up 0.06 s after the first DLSS) |
+  | Firmament | UE, native OpenXR (`-vr`), DLSS | 59.7 + 59.6 | hybrid 1.12 ms |
+  | Halo: Campaign Evolved | UE5.6, UEVR Native Stereo | 60 + 60 (112 real a second without) | NVIDIA medium 6.0 ms, FidelityFX 1.2 (DLSS not on from its menu) |
+  | Surreal 98 | UE5.8, native OpenXR (`-vr`), D3D12 | 33-37 + the same | NVIDIA medium 3.7 ms, FidelityFX 0.93 (the game holds about 38 alone) |
+  | The Midnight Walk | UE5, native OpenXR (`-vr XRSystem`) | 59.9 + 59.9 | NVIDIA medium 3.5 ms (no DLSS in VR) |
+  | Out of Sight VR | UE5, native OpenXR | 59.7 + 59.7 | NVIDIA medium 3.4 ms |
+  | Moss: Book II | UE4, native (`-hmd=OpenXRHMD`; it tries Oculus first) | 59.6 + 59.7 | NVIDIA medium 4.0 ms |
+  | Legendary Tales | UE, native OpenXR | 60 + 60 | NVIDIA medium 3.4 ms |
+  | FlatOut 4: Total Insanity VR | D3D11 (the D3D11 bridge) | 59.8 + 59.8 | NVIDIA medium 2.8 ms |
+  | Gunman Contracts | Unity, D3D11 (bridge) | 59.8 + 59.9 | NVIDIA medium 3.6 ms |
+  | Little Nightmares VR | Unity, OpenXR | 59.7 + 59.7 | NVIDIA medium 7.2-7.8 ms |
+  | theBlu | Unity, D3D11 (bridge) | 59.8 + 59.8 | NVIDIA medium 1.8 ms |
+  | Escape Simulator | Unity (`es_vr`) | 59.8 + 59.7 | NVIDIA medium 3.7 ms |
+  | WHAT THE BAT? | Unity, D3D11 (bridge) | 56.3 + 56.2 | NVIDIA medium 3.7 ms |
+  | Trombone Champ: Unflattened | Unity, D3D11 (bridge), 6514x6514 per eye | 59.7 + 59.7 | 3.8-4.7 ms since the flow's input is capped (was 19-21 ms) |
+  | Beat Saber | Unity, D3D11 (bridge) | 60 + 60 | NVIDIA medium 4.0 ms (needed the invalid-redist fallback) |
+  | Drop Dead: The Cabin | Unity | 31 + 31 | NVIDIA medium 1.9 ms (the game holds about 31) |
+
+  Unity games ask for OpenXR 1.1 first, which SteamVR refuses, and then make
+  their instance at 1.0; FlatOut does the same. Not generating, and not
+  because of the layer: The Riese Project - Prologue waits on a launcher that
+  needs a mouse click; this Bulletstorm VR install (with UE4SS mods) never
+  starts an OpenXR session; the Stellar Blade demo crashes in its own code
+  under this UEVR build with or without the layer.
 - **Extrapolation goes on by the game's own step.** The DLSS vectors span the
   game's step from the previous frame - the frame time it gives DLSS - and a
   frame extrapolated a display period on should show the scene a display
