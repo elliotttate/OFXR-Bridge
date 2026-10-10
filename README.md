@@ -95,12 +95,11 @@ flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
   game that only just holds half, OFXR's own 3X is the better choice. The
   tray's 3X entry and the in-VR status panel say so.
 - **Under head turns OFXR's own methods do better.** Replaying Galactic
-  Racer's menu with the head made to sway 20 degrees (up to 42 degrees a
-  second), the error where the scene moved was 2.2 for OFXR's FidelityFX or
-  NVIDIA flow, 2.6 for the hybrid and 2.9 for the DLSS vectors, against 3.2
-  for native generation at 100% and 3.9 at its default 67% (repeating the
-  frame: 24.4). Where heads move a lot, OFXR's interpolation is the better
-  choice.
+  Racer's menu and a race with the head made to sway 20 degrees (up to 42
+  degrees a second), the error where the scene moved was 2.2 in the menu and
+  4.7 in the race for OFXR's hybrid (the default), against 3.0-3.3 and
+  6.8-6.9 for native generation (repeating the frame: 24.4 and 14.3). Where
+  heads move a lot, OFXR's interpolation is the better choice.
 - **The real frame stays bit-exact.** Only the in-between frames are
   generated, and OFXR's bit-exact copy of the real frame is preserved. Colour
   reaches NGX display-encoded: sRGB is encoded in the pack and decoded on

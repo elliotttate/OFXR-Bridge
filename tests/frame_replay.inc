@@ -255,6 +255,109 @@ void replay_held_out(const std::filesystem::path& directory) {
         : dt1 + dt2 > 0 ? dt1 / (dt1 + dt2) : 0.5F;
     std::cout << "replay frame times " << dt1 << " and " << dt2 << " ms: fraction " << fraction
               << ", vectors x" << vector_scale << '\n';
+    // XRFG_TEST_REPLAY_CHAIN_VECTORS=1 gives B the game's vectors chained from
+    // frame2 to frame1 and on to frame0, rather than frame2's scaled by the
+    // frame times. A head turn follows display time, not the game's, so where
+    // frames are unevenly paced scaled vectors miss part of it; flow measures
+    // the whole span. Where the chain leaves frame1, the scaled vector stands.
+    // =head instead splits each vector: the tracked head turn from frame2 to
+    // frame1, which the views give exactly, is replaced by the turn from
+    // frame2 to frame0, and only the rest (the game's own motion) is scaled
+    // by the frame times. Chaining samples frame1's vectors at moving edges,
+    // where they belong to the wrong object.
+    const char* chain_mode = extrapolate ? nullptr : std::getenv("XRFG_TEST_REPLAY_CHAIN_VECTORS");
+    const bool chain = chain_mode != nullptr;
+    const bool chain_head = chain && std::string_view(chain_mode) == "head";
+    // Where pixel (x, y) of a width x height grid in `current`'s view lies in
+    // `previous`'s, for a point at infinity: the displacement of a pure turn.
+    const auto turn_displacement = [](const xrfg::D3D12ReprojectionView& current,
+                                      const xrfg::D3D12ReprojectionView& previous, UINT width,
+                                      UINT height, UINT x, UINT y) -> std::array<float, 2> {
+        const auto rotate = [](const auto& q, std::array<float, 3> v, bool inverse) {
+            const float qx = inverse ? -q.x : q.x, qy = inverse ? -q.y : q.y, qz = inverse ? -q.z : q.z;
+            const float tx = 2 * (qy * v[2] - qz * v[1]), ty = 2 * (qz * v[0] - qx * v[2]),
+                        tz = 2 * (qx * v[1] - qy * v[0]);
+            return std::array<float, 3>{v[0] + q.w * tx + (qy * tz - qz * ty),
+                                        v[1] + q.w * ty + (qz * tx - qx * tz),
+                                        v[2] + q.w * tz + (qx * ty - qy * tx)};
+        };
+        const float l = std::tan(current.fov.angle_left), r = std::tan(current.fov.angle_right);
+        const float u = std::tan(current.fov.angle_up), d = std::tan(current.fov.angle_down);
+        const std::array<float, 3> ray{l + (float(x) + 0.5F) / float(width) * (r - l),
+                                       u - (float(y) + 0.5F) / float(height) * (u - d), -1.0F};
+        const auto there = rotate(previous.pose.orientation,
+                                  rotate(current.pose.orientation, ray, false), true);
+        if (there[2] >= -1e-4F) return {0.0F, 0.0F};
+        const float pl = std::tan(previous.fov.angle_left), pr = std::tan(previous.fov.angle_right);
+        const float pu = std::tan(previous.fov.angle_up), pd = std::tan(previous.fov.angle_down);
+        const float px = there[0] / -there[2], py = there[1] / -there[2];
+        return {(px - pl) / (pr - pl) * float(width) - 0.5F - float(x),
+                (pu - py) / (pu - pd) * float(height) - 0.5F - float(y)};
+    };
+    const auto chained_motion = [&](std::size_t e) -> std::optional<xrfg::DumpedTexture> {
+        if (!chain || e >= f1.guides.size() || e >= f2_guides.guides.size() ||
+            f1.motion_files[e] == "-" || f2_guides.motion_files[e] == "-") return std::nullopt;
+        if (chain_head && (e >= f0.views.size() || e >= f1.views.size() || e >= f2.views.size()))
+            return std::nullopt;
+        xrfg::DumpedTexture t2, t1;
+        if (!xrfg::read_dumped_texture(frame_dir(b_index + guide_shift) / f2_guides.motion_files[e], &t2) ||
+            !xrfg::read_dumped_texture(frame_dir(truth_index) / f1.motion_files[e], &t1) ||
+            t2.format != DXGI_FORMAT_R16G16_FLOAT || t1.format != DXGI_FORMAT_R16G16_FLOAT)
+            return std::nullopt;
+        const auto half_to_float = [](std::uint16_t h) {
+            const int exponent = (h >> 10) & 31, mantissa = h & 1023;
+            float value = exponent == 0 ? std::ldexp(float(mantissa), -24)
+                                        : std::ldexp(float(mantissa | 1024), exponent - 25);
+            return (h & 0x8000) ? -value : value;
+        };
+        const auto float_to_half = [](float f) -> std::uint16_t {
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &f, 4);
+            const std::uint16_t sign = static_cast<std::uint16_t>((bits >> 16) & 0x8000);
+            const float magnitude = std::min(std::abs(f), 65504.0F);
+            if (magnitude < 6.1035156e-05F)
+                return static_cast<std::uint16_t>(sign | std::lround(magnitude / 5.9604645e-08F));
+            int exponent = 0;
+            const float fraction = std::frexp(magnitude, &exponent);  // [0.5, 1)
+            long mantissa = std::lround((fraction * 2.0F - 1.0F) * 1024.0F);
+            if (mantissa == 1024) { mantissa = 0; ++exponent; }
+            return static_cast<std::uint16_t>(sign | ((exponent + 14) << 10) | mantissa);
+        };
+        const auto texel = [&](const xrfg::DumpedTexture& t, UINT slice, UINT x, UINT y) {
+            const auto& s = t.subresources[slice];
+            std::uint16_t h[2];
+            std::memcpy(h, s.data.data() + std::size_t(y) * s.row_bytes + std::size_t(x) * 4, 4);
+            return std::array<float, 2>{half_to_float(h[0]), half_to_float(h[1])};
+        };
+        const auto& g2 = f2_guides.guides[e];
+        const auto& g1 = f1.guides[e];
+        xrfg::DumpedTexture out = t2;
+        auto& data = out.subresources[g2.motion_slice];
+        for (UINT y = 0; y < g2.motion_height; ++y)
+            for (UINT x = 0; x < g2.motion_width; ++x) {
+                const auto v2 = texel(t2, g2.motion_slice, g2.motion_x + x, g2.motion_y + y);
+                // In frame2's render pixels, then where that lands in frame1's.
+                const float px = v2[0] * g2.scale_x, py = v2[1] * g2.scale_y;
+                const long qx = std::lround(float(x) + px), qy = std::lround(float(y) + py);
+                float cx = v2[0] * vector_scale, cy = v2[1] * vector_scale;
+                if (chain_head) {
+                    const auto to_frame1 = turn_displacement(f2.views[e], f1.views[e], g2.motion_width,
+                                                        g2.motion_height, x, y);
+                    const auto to_frame0 = turn_displacement(f2.views[e], f0.views[e], g2.motion_width,
+                                                       g2.motion_height, x, y);
+                    cx = (to_frame0[0] + (px - to_frame1[0]) * vector_scale) / g2.scale_x;
+                    cy = (to_frame0[1] + (py - to_frame1[1]) * vector_scale) / g2.scale_y;
+                } else if (qx >= 0 && qy >= 0 && qx < long(g1.motion_width) && qy < long(g1.motion_height)) {
+                    const auto v1 = texel(t1, g1.motion_slice, g1.motion_x + UINT(qx), g1.motion_y + UINT(qy));
+                    cx = (px + v1[0] * g1.scale_x) / g2.scale_x;
+                    cy = (py + v1[1] * g1.scale_y) / g2.scale_y;
+                }
+                const std::uint16_t h[2] = {float_to_half(cx), float_to_half(cy)};
+                std::memcpy(data.data.data() + std::size_t(g2.motion_y + y) * data.row_bytes +
+                                std::size_t(g2.motion_x + x) * 4, h, 4);
+            }
+        return out;
+    };
     // Guides as the layer hands them on: A's, and B's scaled to reach A.
     const auto make_guides = [&](const ReplayFrame& frame, std::uint64_t serial, float scale,
                                  const ReplayFrame* previous) {
@@ -288,7 +391,15 @@ void replay_held_out(const std::filesystem::path& directory) {
                 uploaded[name] = r;
                 return r;
             };
-            g->motion_vectors = load(frame.motion_files[e]);
+            const auto chained = &frame == &f2_guides ? chained_motion(e) : std::nullopt;
+            if (chained) {
+                g->scale_x = frame.guides[e].scale_x;
+                g->scale_y = frame.guides[e].scale_y;
+                g->motion_vectors = upload_dumped(fixture, *chained, D3D12_RESOURCE_FLAG_NONE,
+                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            } else {
+                g->motion_vectors = load(frame.motion_files[e]);
+            }
             g->depth = load(frame.depth_files[e]);
             g->resource_state = g->depth_resource_state =
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
