@@ -27,6 +27,16 @@ The setting is independent of diagnostic logging. A different version's tray
 or INI cannot control this instance. Disarming does not unload an already
 loaded DLL; a disarmed tray does not update its runtime configuration.
 
+## The status panel
+
+Beside the number there is now a status panel, shown on a controller turned
+upside down (`[overlay] panel=gesture`, the default), always (`always`) or
+never (`off`); while it shows, it takes the number's place. What it shows is
+in the README ("The status panel") and how it works in
+[BUILDING.md](BUILDING.md) ("The status panel"). It shares this overlay's
+quad machinery and four-per-second refresh, and the number below is the
+panel's **shown/s**.
+
 ## Reading the number
 
 The value counts **new images**: originals and fresh synthetics from nonempty

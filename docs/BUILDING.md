@@ -1227,6 +1227,125 @@ cost, headset comfort, or behavior in a particular game. Full camera translation
 reprojection and separate baked-in HUD/UI guides remain future work; the bridge
 still has its existing limitation for camera translation.
 
+## The status panel
+
+The panel in the headset (README, "The status panel") is three pieces, one
+per layer of the code, and only the last one touches the game.
+
+**The model** (`include/xrfg/status_panel_model.hpp`,
+`src/core/status_panel_model.cpp`, in `xrfg_core`) is pure: the
+`[overlay] panel` setting, the flip gesture, the panel's text and its pixels.
+
+- The gesture is xrFPS's
+  ([elliotttate/xrFPS](https://github.com/elliotttate/xrFPS),
+  `src/overlay.cpp`, `update_gesture`): a grip whose own +Y, located in a
+  space whose +Y is up, has turned more than 120 degrees from straight up is
+  upside down (`grip_upside_down`: the up axis's height below
+  cos 120 = -0.5); a quarter
+  second of that shows the panel, half a second the right way up hides it,
+  and a break in either restarts the delay (`FlipGesture`). The panel stays
+  on the hand that brought it up while that hand stays turned. Placement is
+  xrFPS's "adaptive underside": the grip's pose turned half a turn about its
+  own Z, which stands the panel upright and facing back along the
+  controller, and lifted along the grip's -Y - up, while it is upside down -
+  by half the panel's height and 5 cm, where xrFPS lifts its smaller HUD
+  11 cm (`panel_pose_on_grip`).
+- The text compares three configurations. `asked` is the tray's choice as
+  the ini says now. `session` is what the session set out to run: the method
+  the embedded control read when the process started (the tray's method
+  reaches a running game only through the provider API, so a tray change
+  waits for the next game start), the hybrid and the mesh as last re-read at
+  a control change, extrapolation and the depth as read at xrCreateSession,
+  and 3X as the tray has it, since a switchable session follows it live.
+  `running` is the session's synthesizer options after every fallback. A
+  fallback is `session` against `running` (amber or red, and FALLBACK or NOT
+  GENERATING in the corner); a pending change is `asked` against `session`
+  (grey). Whether the game's vectors went into the frames is read from the
+  guide statistics' counters since the previous repaint, not from the last
+  status alone, which flips between used and rejected pair by pair; a
+  window with no pair either way (the first after the panel was hidden)
+  falls back on the last status. Native DLSS FG counts as generating only
+  for pairs that used the guides: a pair NGX skipped still goes out, as a
+  copy of the real frame, and the counter would call it generated.
+- The latency line is the README's account of the pipeline (interpolation
+  shows each real frame a display period later, two at 3X, the deep pipeline
+  one more, extrapolation none) plus the promise correction
+  (`observe_promise_lateness`), not a measurement.
+- The pixels are font8x8's public-domain glyphs (`THIRD_PARTY.md`), grown by
+  Scale2x to 16 and 32 pixels once per process, on a 1024-wide texture with a
+  rounded, bordered background. Premultiplied alpha, like the counter's;
+  colours are chosen in sRGB and converted to linear light for a UNORM
+  swapchain. The panel is cut to its lines: the rasterizer reports the rows it
+  drew, the quad's `imageRect` shows only those and only those are uploaded,
+  so the quad's height follows the number of lines at a fixed text size.
+
+**The overlay** (`src/layer/openxr_fps_overlay.cpp`) owns a second quad
+beside the counter, each with its own swapchain and upload state (`Surface`);
+the counter's behaviour, format choice and failure handling are unchanged.
+The panel's swapchain is made the first time the panel is wanted, sRGB first.
+`application_frame` repaints it at most four times a second, on the
+application's end-frame thread like the counter, while it is up or while a
+controller has just been turned over, so it appears already painted;
+`status_wanted` tells the layer when to gather a `StatusPanelInput`, so
+nothing is gathered while the panel is hidden. The overlay's lock is held by
+a presenter through the runtime's xrEndFrame, so `status_wanted` reads an
+atomic rather than the lock, and the raster, the one piece of the overlay's
+work long enough to matter (0.64 ms for a 1024x512 panel of eight lines,
+Release build, on the development machine), runs between two short holds of
+it. Where it goes is decided in
+`end_frame`, once per submission and on whichever thread submits: in gesture
+mode both grips are located in a LOCAL space of the overlay's own at that
+submission's display time, only a pose with the TRACKED bits counts (a
+runtime keeps VALID on a lost controller with its last pose, as xrFPS
+found), and the panel follows the hand at the display's rate rather than
+the game's. While it shows it is the one quad added, in place of the
+counter. `always` puts it in the VIEW space, 1 m away and 30 cm down, tilted
+to face the eye.
+
+**The layer** (`src/layer/openxr_layer.cpp`) supplies the controllers and the
+status. An API layer has no input of its own: an action set reaches the
+runtime only through the application's own suggest, attach and sync calls,
+and only before the application attaches. So, as xrFPS does, with
+`panel=gesture` read at xrCreateInstance the layer makes an action set
+(`ofxr_status_panel`, priority 0) with one pose action on both grips
+(`create_panel_gesture`), and adds it to the application's suggested
+bindings, attach and every sync. Each addition is undone on the spot when
+the runtime refuses it - the application's call is made again exactly as it
+was - so a gamepad profile, which has no grip, gets the application's own
+bindings, and the game's input never depends on the layer's. With the panel
+always on or off the three calls are not intercepted at all. The attach
+makes a grip space a hand and hands them to the overlay; they are destroyed
+with the session, after the overlay. `status_panel_input` gathers the
+status at the application's xrEndFrame when the overlay asks; the session
+keeps what nothing else did: the reason the last frame passed through
+(`bypass_generation`), whether the depth or 3X fell back to the runtime's
+swapchain limit (`fall_back_to_shallow_pipeline`), the guide counters at the
+previous repaint, NGX's frame count, asked once, and each synthesizer's GPU
+time a pair, smoothed, from the timings the flight recorder already reads
+(`log_completed_nvidia_gpu_timings`). Those exist only while the recorder
+runs, since synthesis is timed only then, and are summed over the
+synthesizers measured in the last two seconds: a game with a swapchain per
+eye has one per eye.
+
+The flight log's `status_panel` records say whether the action set was made
+(1), what each binding suggestion did (2), whether the attach took it and
+how many grip spaces were made (3), and when the panel was shown and hidden
+(4, 5).
+
+Tests: `xrfg_status_panel_tests` (the setting, the gesture's hysteresis and
+hands, the placement, every fallback and pending line, the pixels; with an
+argument it writes a preview PPM); `xrfg_openxr_fps_overlay_d3d12` and
+`_d3d11` (the panel always on, off and on a turned controller through a fake
+runtime, uploaded on WARP and read back, its quad's space, pose, size and
+cut, lost controllers and the hide delay); `xrfg_layer_panel_input` and
+`xrfg_layer_panel_input_off` (the input calls through the fake runtime, with
+and without the gesture); `xrfg_fps_overlay_tests` (generated and repeated
+frames counted apart); `xrfg_standalone_launcher_tests` (the tray setting).
+Not covered without a headset: how readable the panel is at its size and
+distance, which way a runtime's quad faces in practice, whether a real
+runtime takes the extra action set for every controller profile a game
+suggests, and its cost on a game's render thread.
+
 ## Continuous integration
 
 `.github/workflows/build.yml` runs the same steps on a clean `windows-2022`

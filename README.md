@@ -44,7 +44,8 @@ separate guide provider. It fixes a hang under SteamVR, corrects the flight
 recorder's GPU timings, and adds benchmark and quality tooling. The rest of
 OFXR Bridge is unchanged from upstream: the tray, Prefer FPS over latency,
 3X Frame Gen, Lower VRAM, the D3D11 and Vulkan bridges, SteamVR pacing, the
-FPS overlay and the flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
+FPS overlay (now with a [status panel](#the-status-panel) beside it) and the
+flight recorder. See [Using OFXR Bridge](#using-ofxr-bridge).
 
 > [!WARNING]
 > Native DLSS Frame Generation is **experimental**. It is off in the default
@@ -327,6 +328,10 @@ hybrid under a new key and ignores the old one.
 
 ## Other changes in this fork
 
+- **A status panel in the headset.** Turn a controller upside down, as with
+  xrFPS, and a panel above it shows the method the tray asks for against the
+  one running, why they differ when they do, and the frame rates, added
+  latency and GPU time. See [The status panel](#the-status-panel).
 - **Extrapolation draws Meta's mesh warps.** A grid moved along the game's
   vectors and depth (Application SpaceWarp) or along optical flow
   (Asynchronous SpaceWarp) replaced OFXR's per-pixel gather, on the 42
@@ -957,12 +962,73 @@ the bridge is armed or paused and which method is in use.
 | **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then how OFXR makes frames: **interpolate** (from the game's DLSS vectors where it has them, the chosen flow elsewhere; the cheapest), **interpolate with DLSS vectors + FidelityFX flow** (default, best quality; games without DLSS keep the chosen flow), or **extrapolate, SpaceWarp-style** (no added latency, less accurate; FidelityFX flow in every game, whatever engine is chosen above). Then **2X** or **3X**. |
 | **Quality and performance** | Optical-flow resolution, NVIDIA's both-ways check, DLSS Frame Generation resolution, and Prefer FPS over latency. |
 | **Benchmark this PC...** | See below. |
-| **FPS overlay**, **Diagnostics**, **Advanced** | Overlay position; flight recorder and logs; Lower VRAM and the pause key. |
+| **FPS overlay**, **Diagnostics**, **Advanced** | Overlay position and the status panel (below); flight recorder and logs; Lower VRAM and the pause key. |
 
 Options that do not apply to the chosen method are greyed out. The settings
 are stored as before in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`; how OFXR makes
 frames adds `dlss_hybrid=0|1` and `extrapolate=0|1`, which the tray also
 writes to the layer's `[ofxr]` section as `dlss_flow_hybrid` and `extrapolate`.
+
+### The status panel
+
+In a game, turn either controller upside down and hold it there for a
+quarter of a second: a panel appears above it, facing you, and says what
+frame generation is doing right now. Turn the controller back and the panel
+goes half a second later. It is the gesture from
+[xrFPS](https://github.com/elliotttate/xrFPS), with the same angle
+(more than 120 degrees from upright) and the same delays, and it follows the
+controller while it shows. The FPS counter is hidden while the panel is up,
+since the panel shows the same number.
+
+The top right corner says how things stand:
+
+- **GENERATING** (green): what the session was started with is running.
+- **FALLBACK** (amber): frames are generated, but not the way the session was
+  set up to make them. The **Why** lines say why.
+- **NOT GENERATING** (red): frames pass through without generation, with the
+  reason.
+- **PAUSED** or **OFF**: paused from the tray, generation switched off, or the
+  runtime out of swapchains for this session.
+
+Under it, four numbers: **shown/s**, the distinct frames the headset gets a
+second, the number the corner counter shows (green at the refresh rate, amber
+within 15% of it, red below that); **game/s**, the game's own frames;
+**generated/s**, the frames the bridge made; and the display's refresh rate.
+Then a line each:
+
+| Line | What it says |
+|---|---|
+| **Asked** | The method the tray is set to, with 2X or 3X and "deep" for Prefer FPS over latency. |
+| **Running** | What the session runs now, after every fallback. For example, the DLSS vectors + FidelityFX hybrid runs the chosen optical flow until the game has given its first DLSS vectors, and the flow on its own in a game without DLSS. |
+| **Why** | One line per reason, if there is any. Amber and red ones are fallbacks: no DLSS vectors from the game, vectors that did not match the frames, NVIDIA optical flow not available on this GPU, DLSS Frame Generation not available or waiting for the game's depth, 3X or the deep pipeline refused by the runtime's swapchain limit, a short hold after a change, eye images that could not be set up. Grey ones are not: the tray's method, the hybrid and extrapolation take effect when the game next starts, so a change made during the game shows here as "starts with the next game start", and 3X switches within a moment. |
+| **Vectors** (OFXR) or **Guides** (DLSS Frame Generation) | The share of the last quarter second's frame pairs that used the game's DLSS vectors, or why none did: none from this game yet, refused because they did not match the frames, waiting for the game's depth. |
+| **Pipeline** | Deep or shallow, and whether the bridge's own presenter thread hands the frames to the runtime or the game's thread does. |
+| **Latency** | The display frames frame generation adds, in milliseconds at the refresh rate: interpolation shows each real frame a frame later (two at 3X), the deep pipeline one more, extrapolation none. "promise +1" means the game is told its frames are shown a frame later than planned, because that is when they go out. |
+| **GPU** | Frame generation's GPU time for each pair of frames, averaged over about a second. It is measured only while the flight recorder is on. |
+| **Frames** | Repeats a second: a frame handed to the headset again because the game had nothing new. On SteamVR also what the headset received a second. |
+| **Session** | The game's graphics API, through which of the bridge's paths, and the OpenXR runtime. |
+
+**FPS overlay** in the tray has three settings for the panel: **On a
+controller turned upside down** (the default), **Always, low in the view**,
+and **Off**. In the layer's ini they are `[overlay] panel=gesture`, `always`
+and `off`.
+
+To read the controllers, the bridge adds one action of its own to the game's
+input: a controller pose, bound to both grips beside the game's own bindings.
+If the runtime refuses it for a controller (a gamepad, for example), the
+game's bindings are set up exactly as the game asked, so the game's input
+never depends on it. A runtime's controller-binding screen, SteamVR's for
+one, may list it for each game as "OFXR Bridge status panel". This is
+decided when the game starts: a game
+started with the panel on Always or Off needs a restart for the gesture, and
+Always and Off leave the game's input untouched. A game that sets up no
+controller input at all has no gesture; use Always there. If xrFPS is
+installed as well, turning a controller over shows both. Disarming the bridge
+removes the panel along with the counter.
+
+The panel is repainted four times a second while it shows, on the game's
+render thread, and costs nothing while it is hidden but two pose reads a
+frame.
 
 ### Benchmark this PC
 
