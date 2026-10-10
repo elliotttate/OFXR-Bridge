@@ -1087,7 +1087,15 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
     return XR_SUCCESS;
 }
 
+std::vector<XrSpace> g_panel_grip_spaces_alive;
+
 XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_space(XrSpace space) {
+    // The status panel's grip spaces (panel-input).
+    const auto grip = std::find(g_panel_grip_spaces_alive.begin(), g_panel_grip_spaces_alive.end(), space);
+    if (grip != g_panel_grip_spaces_alive.end()) {
+        g_panel_grip_spaces_alive.erase(grip);
+        return XR_SUCCESS;
+    }
     if (space != g_valid_composition_space.load(std::memory_order_acquire)) {
         return XR_ERROR_HANDLE_INVALID;
     }
@@ -1306,6 +1314,120 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_release_swapchain_image(
     return XR_SUCCESS;
 }
 
+// panel-input: the input calls the status panel's flip gesture adds its own
+// grip action to. Only this mode offers them, so in every other the layer
+// finds nothing to add to and leaves the input calls alone. The application
+// suggests bindings for a controller and for a gamepad, which refuses any
+// binding that is not the application's, attaches one action set and syncs
+// it; the runtime records what reached it.
+bool g_panel_input_mode = false;
+const auto kApplicationActionSet = reinterpret_cast<XrActionSet>(std::uintptr_t{0x5101});
+const auto kApplicationAction = reinterpret_cast<XrAction>(std::uintptr_t{0x5102});
+const auto kPanelActionSet = reinterpret_cast<XrActionSet>(std::uintptr_t{0x5201});
+const auto kPanelAction = reinterpret_cast<XrAction>(std::uintptr_t{0x5202});
+std::vector<std::string> g_paths;
+std::uint32_t g_panel_action_sets_made{};
+std::uint32_t g_panel_actions_made{};
+std::vector<XrActionSuggestedBinding> g_suggested;
+std::vector<XrActionSet> g_attached;
+std::vector<XrActiveActionSet> g_synced;
+std::vector<XrSpace> g_panel_spaces;
+
+bool g_refuse_panel_sync = false;
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_string_to_path(
+    XrInstance, const char* text, XrPath* path) {
+    const auto found = std::find(g_paths.begin(), g_paths.end(), text);
+    *path = static_cast<XrPath>(found - g_paths.begin()) + 1;
+    if (found == g_paths.end()) g_paths.emplace_back(text);
+    return XR_SUCCESS;
+}
+
+[[nodiscard]] XrPath fake_path(const char* text) {
+    XrPath path = XR_NULL_PATH;
+    static_cast<void>(fake_string_to_path(XR_NULL_HANDLE, text, &path));
+    return path;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_create_action_set(
+    XrInstance, const XrActionSetCreateInfo* info, XrActionSet* action_set) {
+    if (std::strcmp(info->actionSetName, "ofxr_status_panel") != 0 || info->priority != 0) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    ++g_panel_action_sets_made;
+    *action_set = kPanelActionSet;
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_action_set(XrActionSet) {
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_create_action(
+    XrActionSet action_set, const XrActionCreateInfo* info, XrAction* action) {
+    if (action_set != kPanelActionSet || info->actionType != XR_ACTION_TYPE_POSE_INPUT ||
+        info->countSubactionPaths != 2 ||
+        info->subactionPaths[0] != fake_path("/user/hand/left") ||
+        info->subactionPaths[1] != fake_path("/user/hand/right")) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    ++g_panel_actions_made;
+    *action = kPanelAction;
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_suggest_bindings(
+    XrInstance, const XrInteractionProfileSuggestedBinding* suggested) {
+    std::vector<XrActionSuggestedBinding> bindings(
+        suggested->suggestedBindings,
+        suggested->suggestedBindings + suggested->countSuggestedBindings);
+    // A gamepad has no grip, and a runtime refuses the whole suggestion.
+    if (suggested->interactionProfile == fake_path("/interaction_profiles/microsoft/xbox_controller") &&
+        std::any_of(bindings.begin(), bindings.end(),
+                    [](const XrActionSuggestedBinding& binding) { return binding.action != kApplicationAction; })) {
+        return XR_ERROR_PATH_UNSUPPORTED;
+    }
+    g_suggested = std::move(bindings);
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_attach_action_sets(
+    XrSession, const XrSessionActionSetsAttachInfo* info) {
+    if (!g_attached.empty()) {
+        return XR_ERROR_ACTIONSETS_ALREADY_ATTACHED;
+    }
+    g_attached.assign(info->actionSets, info->actionSets + info->countActionSets);
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_sync_actions(
+    XrSession, const XrActionsSyncInfo* info) {
+    std::vector<XrActiveActionSet> active(
+        info->activeActionSets, info->activeActionSets + info->countActiveActionSets);
+    for (const XrActiveActionSet& set : active) {
+        if (std::find(g_attached.begin(), g_attached.end(), set.actionSet) == g_attached.end() ||
+            (g_refuse_panel_sync && set.actionSet == kPanelActionSet)) {
+            return XR_ERROR_ACTIONSET_NOT_ATTACHED;
+        }
+    }
+    g_synced = std::move(active);
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_create_action_space(
+    XrSession, const XrActionSpaceCreateInfo* info, XrSpace* space) {
+    if (info->action != kPanelAction ||
+        (info->subactionPath != fake_path("/user/hand/left") &&
+         info->subactionPath != fake_path("/user/hand/right")) ||
+        info->poseInActionSpace.orientation.w != 1.0F) {
+        return XR_ERROR_VALIDATION_FAILURE;
+    }
+    *space = reinterpret_cast<XrSpace>(std::uintptr_t{0x5401} + g_panel_spaces.size());
+    g_panel_spaces.push_back(*space);
+    g_panel_grip_spaces_alive.push_back(*space);
+    return XR_SUCCESS;
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XrInstance,
     const char* name,
@@ -1364,6 +1486,16 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XRFG_FAKE_FUNCTION("xrAcquireSwapchainImage", fake_acquire_swapchain_image)
     XRFG_FAKE_FUNCTION("xrWaitSwapchainImage", fake_wait_swapchain_image)
     XRFG_FAKE_FUNCTION("xrReleaseSwapchainImage", fake_release_swapchain_image)
+    if (g_panel_input_mode) {
+        XRFG_FAKE_FUNCTION("xrStringToPath", fake_string_to_path)
+        XRFG_FAKE_FUNCTION("xrCreateActionSet", fake_create_action_set)
+        XRFG_FAKE_FUNCTION("xrDestroyActionSet", fake_destroy_action_set)
+        XRFG_FAKE_FUNCTION("xrCreateAction", fake_create_action)
+        XRFG_FAKE_FUNCTION("xrSuggestInteractionProfileBindings", fake_suggest_bindings)
+        XRFG_FAKE_FUNCTION("xrAttachSessionActionSets", fake_attach_action_sets)
+        XRFG_FAKE_FUNCTION("xrSyncActions", fake_sync_actions)
+        XRFG_FAKE_FUNCTION("xrCreateActionSpace", fake_create_action_space)
+    }
 #undef XRFG_FAKE_FUNCTION
     return XR_ERROR_FUNCTION_UNSUPPORTED;
 }
@@ -2189,9 +2321,10 @@ int main(int argc, char** argv) {
             "flight-simulator|uevr-pipelined-time|inverted-fov|"
             "d3d11-inverted-fov|d3d11-single-threaded|vulkan|swapchain-budget|"
             "dcs|dcs-d3d11|d3d11-bridge|d3d11-bridge-acquire-ahead|"
-            "steamvr-own-time|promise-shown-time]\n";
+            "steamvr-own-time|promise-shown-time|panel-input]\n";
         return EXIT_FAILURE;
     }
+    g_panel_input_mode = argc == 4 && std::strcmp(argv[3], "panel-input") == 0;
     g_dcs_d3d11_mode = argc == 4 && std::strcmp(argv[3], "dcs-d3d11") == 0;
     g_acquire_ahead_mode =
         argc == 4 && std::strcmp(argv[3], "d3d11-bridge-acquire-ahead") == 0;
@@ -2268,7 +2401,7 @@ int main(int argc, char** argv) {
         !g_d3d11_interop_mode && !g_steamvr_runtime_mode &&
         !g_flight_simulator_mode && !g_uevr_pipelined_display_time_mode &&
         !g_inverted_vertical_fov && !g_vulkan_mode && !g_vulkan_bridge_mode &&
-        !g_swapchain_budget_mode) {
+        !g_swapchain_budget_mode && !g_panel_input_mode) {
         std::cerr << "unknown test mode\n";
         return EXIT_FAILURE;
     }
@@ -2476,6 +2609,111 @@ int main(int argc, char** argv) {
     if (XR_FAILED(create_session(instance, &session_info, &session)) ||
         XR_FAILED(begin_session(session, &session_begin_info))) {
         return EXIT_FAILURE;
+    }
+
+    if (g_panel_input_mode) {
+        // The layer made its action set at xrCreateInstance and answers the
+        // three input calls itself.
+        const auto suggest = get_layer_function<PFN_xrSuggestInteractionProfileBindings>(
+            request.getInstanceProcAddr, "xrSuggestInteractionProfileBindings");
+        const auto attach = get_layer_function<PFN_xrAttachSessionActionSets>(
+            request.getInstanceProcAddr, "xrAttachSessionActionSets");
+        const auto sync = get_layer_function<PFN_xrSyncActions>(
+            request.getInstanceProcAddr, "xrSyncActions");
+        const auto fail = [&](const char* message) {
+            std::cerr << "panel-input: " << message << '\n';
+            return EXIT_FAILURE;
+        };
+        // With the panel off or always on, nothing is added: the application
+        // reaches the runtime's own input calls.
+        std::array<wchar_t, 16> panel_setting{};
+        GetPrivateProfileStringW(L"overlay", L"panel", L"gesture", panel_setting.data(),
+            static_cast<DWORD>(panel_setting.size()),
+            (std::filesystem::path(argv[1]).parent_path() / L"ofxr_bridge.ini").wstring().c_str());
+        if (std::wstring(panel_setting.data()) != L"gesture") {
+            if (reinterpret_cast<void*>(suggest) != reinterpret_cast<void*>(&fake_suggest_bindings) ||
+                reinterpret_cast<void*>(attach) != reinterpret_cast<void*>(&fake_attach_action_sets) ||
+                reinterpret_cast<void*>(sync) != reinterpret_cast<void*>(&fake_sync_actions) ||
+                g_panel_action_sets_made != 0) {
+                return fail("the layer touched the input with the panel's gesture off");
+            }
+            if (XR_FAILED(end_session(session)) || XR_FAILED(destroy_session(session)) ||
+                XR_FAILED(destroy_instance(instance))) {
+                return fail("teardown");
+            }
+            FreeLibrary(module);
+            std::cout << "OpenXR status panel input left alone with the gesture off\n";
+            return EXIT_SUCCESS;
+        }
+        if (!suggest || !attach || !sync ||
+            reinterpret_cast<void*>(suggest) == reinterpret_cast<void*>(&fake_suggest_bindings) ||
+            reinterpret_cast<void*>(sync) == reinterpret_cast<void*>(&fake_sync_actions)) {
+            return fail("the input calls are not the layer's");
+        }
+        if (g_panel_action_sets_made != 1 || g_panel_actions_made != 1) {
+            return fail("no grip action set made at xrCreateInstance");
+        }
+        // A controller: the application's binding reaches the runtime with
+        // the layer's two grips beside it.
+        const XrActionSuggestedBinding controller_binding{
+            kApplicationAction, fake_path("/user/hand/right/input/a/click")};
+        XrInteractionProfileSuggestedBinding controller{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        controller.interactionProfile = fake_path("/interaction_profiles/oculus/touch_controller");
+        controller.countSuggestedBindings = 1;
+        controller.suggestedBindings = &controller_binding;
+        if (suggest(instance, &controller) != XR_SUCCESS || g_suggested.size() != 3 ||
+            g_suggested[0].action != kApplicationAction ||
+            g_suggested[0].binding != controller_binding.binding ||
+            g_suggested[1].action != kPanelAction ||
+            g_suggested[1].binding != fake_path("/user/hand/left/input/grip/pose") ||
+            g_suggested[2].action != kPanelAction ||
+            g_suggested[2].binding != fake_path("/user/hand/right/input/grip/pose")) {
+            return fail("controller bindings not merged");
+        }
+        // A gamepad refuses the grips: the application's suggestion is made
+        // again as it was, and succeeds.
+        const XrActionSuggestedBinding gamepad_binding{
+            kApplicationAction, fake_path("/user/gamepad/input/a/click")};
+        XrInteractionProfileSuggestedBinding gamepad{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        gamepad.interactionProfile = fake_path("/interaction_profiles/microsoft/xbox_controller");
+        gamepad.countSuggestedBindings = 1;
+        gamepad.suggestedBindings = &gamepad_binding;
+        if (suggest(instance, &gamepad) != XR_SUCCESS || g_suggested.size() != 1 ||
+            g_suggested[0].binding != gamepad_binding.binding) {
+            return fail("a refused grip cost the application its gamepad bindings");
+        }
+        // Attached beside the application's set, with a grip space a hand.
+        XrSessionActionSetsAttachInfo attach_info{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+        attach_info.countActionSets = 1;
+        attach_info.actionSets = &kApplicationActionSet;
+        if (attach(session, &attach_info) != XR_SUCCESS || g_attached.size() != 2 ||
+            g_attached[0] != kApplicationActionSet || g_attached[1] != kPanelActionSet ||
+            g_panel_spaces.size() != 2) {
+            return fail("action set or grip spaces not attached");
+        }
+        // Synced with the application's, every time; and when the runtime
+        // will not have it, the application's sync goes through alone.
+        const XrActiveActionSet active{kApplicationActionSet, XR_NULL_PATH};
+        XrActionsSyncInfo sync_info{XR_TYPE_ACTIONS_SYNC_INFO};
+        sync_info.countActiveActionSets = 1;
+        sync_info.activeActionSets = &active;
+        if (sync(session, &sync_info) != XR_SUCCESS || g_synced.size() != 2 ||
+            g_synced[0].actionSet != kApplicationActionSet || g_synced[1].actionSet != kPanelActionSet) {
+            return fail("the layer's action set not synced");
+        }
+        g_refuse_panel_sync = true;
+        if (sync(session, &sync_info) != XR_SUCCESS || g_synced.size() != 1 ||
+            g_synced[0].actionSet != kApplicationActionSet) {
+            return fail("a refused sync cost the application its own");
+        }
+        // The grip spaces go with the session.
+        if (XR_FAILED(end_session(session)) || XR_FAILED(destroy_session(session)) ||
+            !g_panel_grip_spaces_alive.empty() || XR_FAILED(destroy_instance(instance))) {
+            return fail("teardown, or grip spaces left behind");
+        }
+        FreeLibrary(module);
+        std::cout << "OpenXR status panel input: bindings, attach, sync and their refusals passed\n";
+        return EXIT_SUCCESS;
     }
 
     XrSwapchainCreateInfo swapchain_info{XR_TYPE_SWAPCHAIN_CREATE_INFO};

@@ -738,6 +738,23 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-${mode}.log" ${mode})
         endforeach()
+        # The status panel's flip gesture: the layer's grip action added to
+        # the application's bindings, attach and sync, and taken out again
+        # wherever the runtime refuses it.
+        add_test(NAME xrfg_layer_panel_input COMMAND xrfg_layer_call_chain
+            $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+            "${CMAKE_CURRENT_BINARY_DIR}/xrfg-panel-input.log" panel-input)
+        # And with the panel off, the input calls are not intercepted at all.
+        add_test(
+            NAME xrfg_layer_panel_input_off
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_panel_off.ini"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/panel-input-off"
+                "-DMODE=panel-input"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+        set_tests_properties(xrfg_layer_panel_input_off PROPERTIES TIMEOUT 60)
         # The budget scenario is about the private rings falling back from
         # the deeper depth when the runtime refuses a fourth swapchain, so it
         # runs with the rings, which the shipped ini (single-swapchain rings)

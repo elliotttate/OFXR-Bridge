@@ -548,6 +548,21 @@ struct Dispatch {
     bool inline_unless_pipelined{};
     XrVersion runtime_version{};
     std::string runtime_name;
+    // The status panel's flip gesture: an action set of the layer's own with
+    // one pose action on both grips, added to the application's input (see
+    // layer_suggest_interaction_profile_bindings). Made at xrCreateInstance
+    // when `[overlay] panel` is gesture. Without it none of the three input
+    // calls is intercepted.
+    struct PanelGesture {
+        PFN_xrSuggestInteractionProfileBindings suggest_bindings{};
+        PFN_xrAttachSessionActionSets attach_action_sets{};
+        PFN_xrSyncActions sync_actions{};
+        PFN_xrCreateActionSpace create_action_space{};
+        XrActionSet action_set{XR_NULL_HANDLE};
+        XrAction grip_action{XR_NULL_HANDLE};
+        std::array<XrPath, 2> hands{XR_NULL_PATH, XR_NULL_PATH};
+        std::array<XrPath, 2> grips{XR_NULL_PATH, XR_NULL_PATH};
+    } panel_gesture;
 };
 
 [[nodiscard]] std::uint64_t runtime_name_hash(
@@ -800,6 +815,32 @@ struct SessionState {
     std::atomic<bool> generation_steady_state_established{false};
     bool manual_stop_applied{}; // frame_call_mutex; terminal for this XrSession.
     std::unique_ptr<xrfg::OpenXrFpsOverlay> fps_overlay;
+    // The status panel. Grip spaces of the layer's own action, made when the
+    // application attached its action sets with the layer's beside them and
+    // destroyed after the overlay; whether that attach took ours, which every
+    // xrSyncActions then follows.
+    std::array<XrSpace, 2> panel_grip_spaces{XR_NULL_HANDLE, XR_NULL_HANDLE};
+    std::atomic<bool> panel_actions_attached{false};
+    // What the panel says that nothing else keeps. Why the last frame passed
+    // through (a GenerationPrepareReason) and when; whether the depth or 3X
+    // fell back for the runtime's swapchain limit; where the DLSS guide
+    // counters stood at the panel's last refresh; and NGX's frame count,
+    // asked once. The application's xrEndFrame thread only.
+    std::int64_t panel_bypass_reason{};
+    std::chrono::steady_clock::time_point panel_bypass_at{};
+    bool shallow_fallback{};
+    xrfg::DlssMotionVectorStatistics panel_vectors{};
+    std::chrono::steady_clock::time_point panel_vectors_at{};
+    std::optional<std::uint32_t> panel_native_frames;
+    // Each synthesizer's GPU time a pair, smoothed, and when it was last
+    // measured: there is one per eye in a game with a swapchain per eye, and
+    // a pair costs them all. Only while the flight recorder runs, which is
+    // when synthesis is timed. gpu_mutex.
+    struct PanelGpuTime {
+        float microseconds{};
+        std::chrono::steady_clock::time_point at{};
+    };
+    std::unordered_map<const void*, PanelGpuTime> panel_gpu;
     // Owned here rather than by the overlay because the presenter reads the
     // vsync anchor from the same connection. Null off SteamVR.
     std::unique_ptr<xrfg::SteamVrDelivery> steamvr_delivery;
@@ -1943,7 +1984,10 @@ struct FrameGenerationSwapchainState {
     std::shared_ptr<HandoverCopier> copier;
 };
 
+// The caller holds the session's gpu_mutex, which also guards the status
+// panel's GPU times this keeps.
 void log_completed_nvidia_gpu_timings(
+    SessionState& session,
     const std::shared_ptr<xrfg::D3D12FrameSynthesizer>& synthesizer) noexcept {
     if (!synthesizer || !xrfg::bridge_flight_logger().enabled()) {
         return;
@@ -1973,6 +2017,17 @@ void log_completed_nvidia_gpu_timings(
             timing.composition_microseconds,
             timing.total_microseconds,
             timing.current_serial);
+        // The status panel's GPU time, smoothed over about a second of pairs.
+        try {
+            auto& smoothed = session.panel_gpu[synthesizer.get()];
+            const auto now = std::chrono::steady_clock::now();
+            const float measured = static_cast<float>(timing.total_microseconds);
+            smoothed.microseconds = now - smoothed.at > std::chrono::seconds(2)
+                ? measured
+                : smoothed.microseconds + (measured - smoothed.microseconds) * 0.05F;
+            smoothed.at = now;
+        } catch (...) {
+        }
         // When the GPU actually began and ended this pair's synthesis, on
         // the log's own timeline, so it can be compared directly with the
         // internal_end_frame that handed the synthetic to the runtime.
@@ -3946,6 +4001,7 @@ create_vulkan_frame_generation_swapchains(
         session->deep_pipeline = false;
         session->frames_per_application_frame = 2;
         session->two_slot_synthetic_ring = false;
+        session->shallow_fallback = true;
         if (session->triple_switchable) {
             session->fixed_frame_multiplier.hold();
         }
@@ -4120,6 +4176,15 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
     XrSwapchain* swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_swapchain(XrSwapchain swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space);
+XRAPI_ATTR XrResult XRAPI_CALL layer_suggest_interaction_profile_bindings(
+    XrInstance instance,
+    const XrInteractionProfileSuggestedBinding* suggested_bindings);
+XRAPI_ATTR XrResult XRAPI_CALL layer_attach_session_action_sets(
+    XrSession session,
+    const XrSessionActionSetsAttachInfo* attach_info);
+XRAPI_ATTR XrResult XRAPI_CALL layer_sync_actions(
+    XrSession session,
+    const XrActionsSyncInfo* sync_info);
 // The runtime's list with the sharing extensions a D3D12 interop needs added
 // where it lacks them. SteamVR asks for external memory and timeline
 // semaphores but not for exporting a semaphore to D3D12, so a list from it
@@ -4563,6 +4628,23 @@ XrResult layer_get_instance_proc_addr_impl(
             layer_release_swapchain_image,
             function);
     }
+    // The status panel's flip gesture adds to the application's input only
+    // where its action set was made; everywhere else these three go straight
+    // to the runtime, untouched.
+    if (dispatch->panel_gesture.action_set != XR_NULL_HANDLE) {
+        const auto& gesture = dispatch->panel_gesture;
+        if (std::strcmp(name, "xrSuggestInteractionProfileBindings") == 0) {
+            return expose_intercept(dispatch, gesture.suggest_bindings,
+                layer_suggest_interaction_profile_bindings, function);
+        }
+        if (std::strcmp(name, "xrAttachSessionActionSets") == 0) {
+            return expose_intercept(dispatch, gesture.attach_action_sets,
+                layer_attach_session_action_sets, function);
+        }
+        if (std::strcmp(name, "xrSyncActions") == 0) {
+            return expose_intercept(dispatch, gesture.sync_actions, layer_sync_actions, function);
+        }
+    }
 
     // Vulkan negotiation: recorded, then forwarded unchanged. Only offered
     // where the runtime has the function, so the application sees exactly
@@ -4605,6 +4687,98 @@ XrResult layer_get_instance_proc_addr_impl(
     }
 
     return dispatch->get_instance_proc_addr(instance, name, function);
+}
+
+// `[overlay] panel`, as the instance is made: whether the layer adds its
+// grip action to the application's input is decided then, because the
+// application suggests its bindings and attaches its action sets once, before
+// its first frame. The overlay follows the setting live after that.
+[[nodiscard]] xrfg::StatusPanelMode read_status_panel_mode() noexcept {
+    try {
+        std::array<wchar_t, 32> value{};
+        const auto ini = current_layer_directory() / L"ofxr_bridge.ini";
+        GetPrivateProfileStringW(L"overlay", L"panel", L"gesture", value.data(),
+            static_cast<DWORD>(value.size()), ini.c_str());
+        std::string text;
+        for (const wchar_t c : value) {
+            if (c == L'\0') break;
+            text += c < 128 ? static_cast<char>(c) : '?';
+        }
+        return xrfg::parse_status_panel_mode(text);
+    } catch (...) {
+        return xrfg::StatusPanelMode::off;
+    }
+}
+
+// The status panel's flip gesture needs the controllers' poses, and an API
+// layer has no input of its own: an action set reaches the runtime only
+// through the application's suggest, attach and sync calls, and only before
+// the application has attached. So, as xrFPS does, the layer makes an action
+// set of its own now, one pose action on both grips, and adds it to each of
+// those calls (layer_suggest_interaction_profile_bindings and the two after
+// it). A runtime that will not have it costs the gesture and nothing else.
+void create_panel_gesture(
+    Dispatch& dispatch,
+    PFN_xrGetInstanceProcAddr next,
+    XrInstance instance) noexcept {
+    try {
+        auto& gesture = dispatch.panel_gesture;
+        PFN_xrStringToPath string_to_path = nullptr;
+        PFN_xrCreateActionSet create_action_set = nullptr;
+        PFN_xrDestroyActionSet destroy_action_set = nullptr;
+        PFN_xrCreateAction create_action = nullptr;
+        if (!load_function(next, instance, "xrStringToPath", string_to_path) ||
+            !load_function(next, instance, "xrCreateActionSet", create_action_set) ||
+            !load_function(next, instance, "xrDestroyActionSet", destroy_action_set) ||
+            !load_function(next, instance, "xrCreateAction", create_action) ||
+            !load_function(next, instance, "xrSuggestInteractionProfileBindings",
+                           gesture.suggest_bindings) ||
+            !load_function(next, instance, "xrAttachSessionActionSets",
+                           gesture.attach_action_sets) ||
+            !load_function(next, instance, "xrSyncActions", gesture.sync_actions) ||
+            !load_function(next, instance, "xrCreateActionSpace", gesture.create_action_space)) {
+            return;
+        }
+        constexpr std::array<const char*, 2> kHands{"/user/hand/left", "/user/hand/right"};
+        constexpr std::array<const char*, 2> kGrips{
+            "/user/hand/left/input/grip/pose", "/user/hand/right/input/grip/pose"};
+        for (std::size_t hand = 0; hand < kHands.size(); ++hand) {
+            if (XR_FAILED(string_to_path(instance, kHands[hand], &gesture.hands[hand])) ||
+                XR_FAILED(string_to_path(instance, kGrips[hand], &gesture.grips[hand]))) {
+                return;
+            }
+        }
+        XrActionSetCreateInfo set_info{XR_TYPE_ACTION_SET_CREATE_INFO};
+        strcpy_s(set_info.actionSetName, "ofxr_status_panel");
+        strcpy_s(set_info.localizedActionSetName, "OFXR Bridge status panel");
+        // The lowest priority: where the application binds the same grip,
+        // its own action sets are never the ones that give way.
+        set_info.priority = 0;
+        XrActionSet action_set = XR_NULL_HANDLE;
+        XrResult result = create_action_set(instance, &set_info, &action_set);
+        if (XR_SUCCEEDED(result)) {
+            XrActionCreateInfo action_info{XR_TYPE_ACTION_CREATE_INFO};
+            strcpy_s(action_info.actionName, "grip_pose");
+            strcpy_s(action_info.localizedActionName,
+                     "Controller pose, for the OFXR Bridge status panel");
+            action_info.actionType = XR_ACTION_TYPE_POSE_INPUT;
+            action_info.countSubactionPaths = static_cast<std::uint32_t>(gesture.hands.size());
+            action_info.subactionPaths = gesture.hands.data();
+            XrAction action = XR_NULL_HANDLE;
+            result = create_action(action_set, &action_info, &action);
+            if (XR_SUCCEEDED(result)) {
+                gesture.action_set = action_set;
+                gesture.grip_action = action;
+            } else {
+                destroy_action_set(action_set);
+            }
+        }
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::status_panel, 1,
+            gesture.action_set != XR_NULL_HANDLE ? 1 : 0,
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
+    } catch (...) {
+    }
 }
 
 XrResult layer_create_api_layer_instance_impl(
@@ -4900,6 +5074,9 @@ XrResult layer_create_api_layer_instance_impl(
             bridge_requested_by_ini ? 1 : 0,
             (bridge_extension_added ? 1ULL : 0ULL) |
                 (dispatch->d3d11_bridge ? 2ULL : 0ULL));
+    }
+    if (read_status_panel_mode() == xrfg::StatusPanelMode::gesture) {
+        create_panel_gesture(*dispatch, next_get_instance_proc_addr, created_instance);
     }
 
     try {
@@ -5482,6 +5659,13 @@ XrResult layer_destroy_session_impl(XrSession session) {
     xrfg::stop_ngx_guide_capture(state->d3d12_queue.Get());
     stop_continuous_presenter(state);
     state->fps_overlay.reset();
+    // The status panel's grip spaces, which the overlay read until now.
+    for (XrSpace& grip : state->panel_grip_spaces) {
+        if (grip != XR_NULL_HANDLE && state->dispatch->destroy_space != nullptr) {
+            state->dispatch->destroy_space(grip);
+        }
+        grip = XR_NULL_HANDLE;
+    }
     for (const auto& swapchain_state : find_swapchains(state)) {
         std::scoped_lock call_lock(swapchain_state->call_mutex);
         drain_swapchain_gpu(swapchain_state);
@@ -11117,7 +11301,7 @@ struct PreparedProjectionFrame {
                 current_destination_index);
         {
             std::scoped_lock gpu_lock(state->session->gpu_mutex);
-            log_completed_nvidia_gpu_timings(generation->synthesizer);
+            log_completed_nvidia_gpu_timings(*state->session, generation->synthesizer);
             if (generation->interop) {
                 submit_result =
                     generation->interop->prepare_synthesis();
@@ -12458,6 +12642,199 @@ void log_video_memory_periodically(SessionState& state) noexcept {
     log_video_memory(state, VideoMemoryStage::periodic, 0);
 }
 
+// The panel reads DLSS guide statuses by value; both lists must stay in step.
+static_assert(static_cast<int>(xrfg::PanelVectorStatus::used) ==
+              static_cast<int>(xrfg::DlssMotionVectorStatus::used));
+static_assert(static_cast<int>(xrfg::PanelVectorStatus::multi_frame_unsupported) ==
+              static_cast<int>(xrfg::DlssMotionVectorStatus::multi_frame_unsupported));
+
+[[nodiscard]] int panel_scale_percent(int scale) noexcept {
+    switch (scale) {
+    case static_cast<int>(xrfg::D3D12OpticalFlowInputScale::full): return 100;
+    case static_cast<int>(xrfg::D3D12OpticalFlowInputScale::three_quarter): return 75;
+    case static_cast<int>(xrfg::D3D12OpticalFlowInputScale::quarter): return 25;
+    default: return 50;
+    }
+}
+
+// The status panel's account of the session: what the tray asks for now,
+// what the session was started with, what it runs, and what is holding it
+// back. Built at the application's xrEndFrame, a few times a second while
+// the panel is up and never otherwise. The rates are the overlay's own, and
+// the GPU time is added under gpu_mutex (panel_gpu_milliseconds).
+[[nodiscard]] xrfg::StatusPanelInput status_panel_input(
+    const std::shared_ptr<SessionState>& state,
+    bool use_continuous_presenter,
+    std::chrono::steady_clock::time_point now) {
+    namespace layer = xrfg::implicit_layer;
+    xrfg::StatusPanelInput input;
+    const auto directory = current_layer_directory();
+
+    // The tray's choice, as its ini now says.
+    auto& asked = input.asked;
+    asked.native = layer::read_frame_generation(directory) == layer::ConfiguredFrameGeneration::native_dlss;
+    asked.native_scale = layer::read_native_dlssg_scale(directory);
+    asked.flow = layer::read_flow_backend(directory) == layer::ConfiguredFlowBackend::nvidia
+        ? xrfg::PanelFlow::nvidia : xrfg::PanelFlow::fidelity_fx;
+    const auto configured = layer::read_nvidia_options(directory);
+    asked.preset = static_cast<xrfg::PanelPreset>(configured.preset);
+    asked.flow_scale = panel_scale_percent(static_cast<int>(configured.input_scale));
+    asked.both_ways = configured.bidirectional;
+    {
+        std::array<wchar_t, 16> motion{};
+        GetPrivateProfileStringW(L"ofxr", L"motion_vectors", L"off", motion.data(),
+            static_cast<DWORD>(motion.size()), (directory / L"ofxr_bridge.ini").c_str());
+        asked.game_vectors = asked.native || _wcsicmp(motion.data(), L"dlss") == 0;
+    }
+    asked.hybrid = layer::read_dlss_flow_hybrid(directory);
+    asked.extrapolate = layer::read_extrapolate(directory);
+    asked.mesh = layer::read_extrapolate_mesh(directory);
+    asked.frames = layer::read_triple_frame_gen(directory) ? 3U : 2U;
+    asked.deep = layer::read_deep_pipeline(directory);
+
+    // What the session set out to run: the method the process read when it
+    // started, the modes read at xrCreateSession, and 3X as the tray has it,
+    // since a session follows that live.
+    const auto desired = xrfg::embedded::snapshot().desired;
+    auto& session = input.session;
+    session.native = desired.frame_generation == 1;
+    session.native_scale = desired.native_scale;
+    session.flow = desired.backend == 1 ? xrfg::PanelFlow::nvidia : xrfg::PanelFlow::fidelity_fx;
+    session.preset = static_cast<xrfg::PanelPreset>(desired.preset);
+    session.flow_scale = panel_scale_percent(desired.scale);
+    session.both_ways = desired.backward;
+    session.game_vectors = desired.motion_vectors == 1 || session.native;
+    session.hybrid = state->dlss_flow_hybrid;
+    session.extrapolate = state->extrapolate;
+    session.mesh = state->extrapolate_mesh;
+    session.frames = asked.frames;
+    session.deep = state->deep_pipeline_configured;
+
+    // And what runs, after every fallback.
+    const auto& options = state->nvidia_options;
+    auto& running = input.running;
+    running.native = options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss;
+    running.native_scale = static_cast<int>(options.native_scale);
+    running.flow = state->optical_flow_backend == xrfg::D3D12OpticalFlowBackend::nvidia
+        ? xrfg::PanelFlow::nvidia : xrfg::PanelFlow::fidelity_fx;
+    running.preset = static_cast<xrfg::PanelPreset>(options.preset);
+    running.flow_scale = panel_scale_percent(static_cast<int>(options.input_scale));
+    running.both_ways = options.bidirectional;
+    running.game_vectors = state->dlss_motion_vectors;
+    running.hybrid = options.hybrid;
+    running.extrapolate = options.extrapolate ? (options.extrapolate_hybrid ? 2 : 1) : 0;
+    running.mesh = options.extrapolate_mesh;
+    running.frames = state->frames_per_application_frame.load();
+    running.deep = state->deep_pipeline;
+
+    input.paused = state->pause_applied;
+    input.enabled = desired.enabled && !state->control_reconfigure_required;
+    input.settings_failed = state->control_reconfigure_required;
+    input.budget_exhausted = state->generation_budget_exhausted.load(std::memory_order_acquire);
+    for (const auto& chain : find_swapchains(state)) {
+        std::scoped_lock lock(chain->mutex);
+        if (chain->generation_declined && chain->projection_used.load(std::memory_order_relaxed)) {
+            ++input.declined_images;
+        }
+    }
+    if (now - state->panel_bypass_at < std::chrono::seconds(1)) {
+        switch (static_cast<GenerationPrepareReason>(state->panel_bypass_reason)) {
+        case GenerationPrepareReason::cooldown_active:
+            input.bypass = xrfg::PanelBypass::cooldown;
+            break;
+        case GenerationPrepareReason::structural_quarantine_active:
+            input.bypass = xrfg::PanelBypass::quarantine;
+            break;
+        case GenerationPrepareReason::empty_mappings:
+            input.bypass = xrfg::PanelBypass::no_projection;
+            break;
+        case GenerationPrepareReason::inline_wait_outstanding:
+            input.bypass = xrfg::PanelBypass::waiting_ahead;
+            break;
+        default:
+            input.bypass = xrfg::PanelBypass::other;
+            break;
+        }
+    }
+    input.nvidia_unavailable = state->nvidia_backend_unavailable;
+    input.vectors_published = state->dlss_vectors_published;
+    if (session.native) {
+        // Asked of NGX once: the first question may initialise it.
+        if (!state->panel_native_frames) {
+            state->panel_native_frames =
+                xrfg::native_dlssg_max_generated_frames(state->d3d12_device.Get());
+        }
+        input.native_available = *state->panel_native_frames > 0;
+        input.native_single_frame = *state->panel_native_frames == 1;
+    }
+    input.shallow_fallback = state->shallow_fallback;
+    input.triple_fixed = !state->triple_switchable;
+
+    // The guide counters since the last refresh. After a while hidden the
+    // window would span all of it, so it starts again, and the panel reads
+    // the last pair's report instead.
+    const auto statistics = xrfg::dlss_motion_vector_statistics();
+    auto& vectors = input.vectors;
+    vectors.status = static_cast<xrfg::PanelVectorStatus>(statistics.status);
+    vectors.published = statistics.published;
+    if (now - state->panel_vectors_at < std::chrono::seconds(1)) {
+        const auto since = [](std::uint64_t value, std::uint64_t before) {
+            return value > before ? value - before : 0;
+        };
+        vectors.used = since(statistics.used, state->panel_vectors.used);
+        vectors.temporal_rejections =
+            since(statistics.temporal_rejections, state->panel_vectors.temporal_rejections);
+        vectors.invalid_rejections =
+            since(statistics.invalid_rejections, state->panel_vectors.invalid_rejections);
+    }
+    state->panel_vectors = statistics;
+    state->panel_vectors_at = now;
+
+    input.gpu_timing = state->recorder_applied;
+    input.presenter = use_continuous_presenter;
+    input.promise_periods = state->promise_shown_time
+        ? static_cast<std::uint32_t>(std::max(
+              state->promise_correction_periods.load(std::memory_order_relaxed), 0))
+        : 0U;
+    switch (state->graphics_binding) {
+    case SessionGraphicsBinding::d3d12:
+        input.graphics = state->d3d11_bridge ? xrfg::PanelGraphics::d3d11_bridge
+            : state->vulkan_bridge          ? xrfg::PanelGraphics::vulkan_bridge
+                                            : xrfg::PanelGraphics::d3d12;
+        break;
+    case SessionGraphicsBinding::d3d11:
+        input.graphics = xrfg::PanelGraphics::d3d11_interop;
+        break;
+    case SessionGraphicsBinding::vulkan:
+        input.graphics = xrfg::PanelGraphics::vulkan_interop;
+        break;
+    default:
+        input.graphics = xrfg::PanelGraphics::other;
+        break;
+    }
+    input.runtime = state->dispatch->runtime_name;
+    return input;
+}
+
+// The status panel's GPU time a pair: every synthesizer measured in the last
+// two seconds, which in a game with a swapchain per eye is both eyes'. The
+// caller holds gpu_mutex.
+[[nodiscard]] float panel_gpu_milliseconds(
+    SessionState& state, std::chrono::steady_clock::time_point now) noexcept {
+    float total = 0.0F;
+    bool measured = false;
+    for (auto entry = state.panel_gpu.begin(); entry != state.panel_gpu.end();) {
+        if (now - entry->second.at > std::chrono::seconds(2)) {
+            entry = state.panel_gpu.erase(entry);
+            continue;
+        }
+        total += entry->second.microseconds;
+        measured = true;
+        ++entry;
+    }
+    return measured ? total / 1000.0F : -1.0F;
+}
+
 XrResult layer_end_frame_impl(
     XrSession session,
     const XrFrameEndInfo* end_info) {
@@ -12572,9 +12949,17 @@ XrResult layer_end_frame_impl(
         if (state->fps_overlay) state->fps_overlay->suspend();
     }
     if (state->fps_overlay && !manually_disarmed) {
+        // The status panel's input only when it is up and due a repaint.
+        std::optional<xrfg::StatusPanelInput> status;
+        if (state->fps_overlay->status_wanted()) {
+            status = status_panel_input(state, use_continuous_presenter, application_end_now);
+        }
         std::scoped_lock gpu_lock(state->gpu_mutex);
+        if (status) {
+            status->gpu_ms = panel_gpu_milliseconds(*state, application_end_now);
+        }
         state->fps_overlay->set_paused(state->pause_applied);
-        state->fps_overlay->application_frame(end_info);
+        state->fps_overlay->application_frame(end_info, status ? &*status : nullptr);
     }
 
     const auto submit_borrowed_to_presenter = [&]() -> XrResult {
@@ -12612,6 +12997,9 @@ XrResult layer_end_frame_impl(
         };
     const auto bypass_generation =
         [&](GenerationPrepareReason reason) -> XrResult {
+            // For the status panel's account of why nothing is generated.
+            state->panel_bypass_reason = static_cast<std::int64_t>(reason);
+            state->panel_bypass_at = application_end_now;
             const XrResult exclusive_result = enter_presenter_exclusive();
             if (XR_FAILED(exclusive_result)) {
                 return exclusive_result;
@@ -13725,6 +14113,148 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space) {
             guards.emplace_back(session);
         }
         return dispatch->destroy_space(space);
+    });
+}
+
+// The runtime's own entry point, for a session the layer keeps nothing for -
+// which should not happen: the call then goes on unchanged rather than
+// failing the application.
+template <typename Function>
+[[nodiscard]] Function panel_gesture_next(Function Dispatch::PanelGesture::*member) {
+    std::scoped_lock lock(g_state_mutex);
+    for (const auto& [handle, dispatch] : g_instances) {
+        static_cast<void>(handle);
+        if (dispatch && dispatch->panel_gesture.*member != nullptr) {
+            return dispatch->panel_gesture.*member;
+        }
+    }
+    return nullptr;
+}
+
+// The status panel's grip bindings, beside the application's own for every
+// interaction profile it suggests (see create_panel_gesture). A profile with
+// no grip - a gamepad, eye gaze - refuses them, and then the application's
+// call is made again exactly as it made it, so its own bindings never depend
+// on the layer's being accepted.
+XRAPI_ATTR XrResult XRAPI_CALL layer_suggest_interaction_profile_bindings(
+    XrInstance instance,
+    const XrInteractionProfileSuggestedBinding* suggested_bindings) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto dispatch = find_dispatch(instance);
+        if (!dispatch || dispatch->panel_gesture.suggest_bindings == nullptr) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        const auto& gesture = dispatch->panel_gesture;
+        if (suggested_bindings == nullptr ||
+            suggested_bindings->type != XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING ||
+            (suggested_bindings->countSuggestedBindings != 0 &&
+             suggested_bindings->suggestedBindings == nullptr)) {
+            return gesture.suggest_bindings(instance, suggested_bindings);
+        }
+        std::vector<XrActionSuggestedBinding> bindings(
+            suggested_bindings->suggestedBindings,
+            suggested_bindings->suggestedBindings + suggested_bindings->countSuggestedBindings);
+        bindings.push_back({gesture.grip_action, gesture.grips[0]});
+        bindings.push_back({gesture.grip_action, gesture.grips[1]});
+        XrInteractionProfileSuggestedBinding merged = *suggested_bindings;
+        merged.suggestedBindings = bindings.data();
+        merged.countSuggestedBindings = static_cast<std::uint32_t>(bindings.size());
+        XrResult result = gesture.suggest_bindings(instance, &merged);
+        const bool added = XR_SUCCEEDED(result);
+        if (!added) {
+            result = gesture.suggest_bindings(instance, suggested_bindings);
+        }
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::status_panel, 2, added ? 1 : 0,
+            static_cast<std::uint64_t>(suggested_bindings->interactionProfile),
+            static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
+        return result;
+    });
+}
+
+// The layer's action set beside the application's. Taken, it brings the two
+// grip spaces the panel's gesture reads; refused, the application's sets are
+// attached as it asked, and the session simply has no gesture.
+XRAPI_ATTR XrResult XRAPI_CALL layer_attach_session_action_sets(
+    XrSession session,
+    const XrSessionActionSetsAttachInfo* attach_info) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto state = find_session(session);
+        if (!state || state->dispatch->panel_gesture.attach_action_sets == nullptr) {
+            const auto next = panel_gesture_next(&Dispatch::PanelGesture::attach_action_sets);
+            return next ? next(session, attach_info) : XR_ERROR_HANDLE_INVALID;
+        }
+        const auto& gesture = state->dispatch->panel_gesture;
+        if (attach_info == nullptr ||
+            attach_info->type != XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO ||
+            (attach_info->countActionSets != 0 && attach_info->actionSets == nullptr)) {
+            return gesture.attach_action_sets(session, attach_info);
+        }
+        std::vector<XrActionSet> action_sets(
+            attach_info->actionSets, attach_info->actionSets + attach_info->countActionSets);
+        action_sets.push_back(gesture.action_set);
+        XrSessionActionSetsAttachInfo merged = *attach_info;
+        merged.actionSets = action_sets.data();
+        merged.countActionSets = static_cast<std::uint32_t>(action_sets.size());
+        XrResult result = gesture.attach_action_sets(session, &merged);
+        if (XR_FAILED(result)) {
+            result = gesture.attach_action_sets(session, attach_info);
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::status_panel, 3, 0, 0,
+                static_cast<std::uint64_t>(static_cast<std::int64_t>(result)));
+            return result;
+        }
+        std::array<XrSpace, 2> grips{XR_NULL_HANDLE, XR_NULL_HANDLE};
+        std::uint64_t made = 0;
+        for (std::size_t hand = 0; hand < grips.size(); ++hand) {
+            XrActionSpaceCreateInfo space_info{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+            space_info.action = gesture.grip_action;
+            space_info.subactionPath = gesture.hands[hand];
+            space_info.poseInActionSpace.orientation.w = 1.0F;
+            if (XR_SUCCEEDED(gesture.create_action_space(session, &space_info, &grips[hand]))) {
+                ++made;
+            } else {
+                grips[hand] = XR_NULL_HANDLE;
+            }
+        }
+        state->panel_grip_spaces = grips;
+        state->panel_actions_attached.store(true, std::memory_order_release);
+        if (state->fps_overlay) {
+            state->fps_overlay->set_grip_spaces(grips[0], grips[1]);
+        }
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::status_panel, 3, 1, made);
+        return result;
+    });
+}
+
+// The layer's action set is synced with the application's, once it was
+// attached. Should the runtime refuse the addition, the application's sync is
+// made again as it asked.
+XRAPI_ATTR XrResult XRAPI_CALL layer_sync_actions(
+    XrSession session,
+    const XrActionsSyncInfo* sync_info) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        const auto state = find_session(session);
+        if (!state || state->dispatch->panel_gesture.sync_actions == nullptr) {
+            const auto next = panel_gesture_next(&Dispatch::PanelGesture::sync_actions);
+            return next ? next(session, sync_info) : XR_ERROR_HANDLE_INVALID;
+        }
+        const auto& gesture = state->dispatch->panel_gesture;
+        if (!state->panel_actions_attached.load(std::memory_order_acquire) ||
+            sync_info == nullptr || sync_info->type != XR_TYPE_ACTIONS_SYNC_INFO ||
+            (sync_info->countActiveActionSets != 0 && sync_info->activeActionSets == nullptr)) {
+            return gesture.sync_actions(session, sync_info);
+        }
+        std::vector<XrActiveActionSet> active(
+            sync_info->activeActionSets,
+            sync_info->activeActionSets + sync_info->countActiveActionSets);
+        active.push_back({gesture.action_set, XR_NULL_PATH});
+        XrActionsSyncInfo merged = *sync_info;
+        merged.activeActionSets = active.data();
+        merged.countActiveActionSets = static_cast<std::uint32_t>(active.size());
+        const XrResult result = gesture.sync_actions(session, &merged);
+        return XR_FAILED(result) ? gesture.sync_actions(session, sync_info) : result;
     });
 }
 
