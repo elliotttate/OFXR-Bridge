@@ -516,6 +516,9 @@ struct Dispatch {
     // locates a VIEW space of the layer's own. Without them it is not written.
     PFN_xrCreateReferenceSpace create_reference_space{};
     PFN_xrLocateSpace locate_space{};
+    // Best-effort as well: the application's xrLocateViews is only recorded
+    // (app_locate_views), never changed.
+    PFN_xrLocateViews locate_views{};
     // Best-effort, like the two above: forwarded unchanged unless a Vulkan
     // session was bridged to D3D12, where the runtime's DXGI list is shown
     // to the application as Vulkan formats.
@@ -4295,6 +4298,13 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
     XrSwapchain* swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_swapchain(XrSwapchain swapchain);
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space);
+XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
+    XrSession session,
+    const XrViewLocateInfo* locate_info,
+    XrViewState* view_state,
+    std::uint32_t view_capacity_input,
+    std::uint32_t* view_count_output,
+    XrView* views);
 XRAPI_ATTR XrResult XRAPI_CALL layer_suggest_interaction_profile_bindings(
     XrInstance instance,
     const XrInteractionProfileSuggestedBinding* suggested_bindings);
@@ -4710,6 +4720,10 @@ XrResult layer_get_instance_proc_addr_impl(
         return expose_intercept(
             dispatch, dispatch->destroy_space, layer_destroy_space, function);
     }
+    if (std::strcmp(name, "xrLocateViews") == 0) {
+        return expose_intercept(
+            dispatch, dispatch->locate_views, layer_locate_views, function);
+    }
     if (std::strcmp(name, "xrPollEvent") == 0) {
         return expose_intercept(
             dispatch, dispatch->poll_event, layer_poll_event, function);
@@ -5068,6 +5082,12 @@ XrResult layer_create_api_layer_instance_impl(
              created_instance,
              "xrLocateSpace",
              dispatch->locate_space)),
+         true) &&
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrLocateViews",
+             dispatch->locate_views)),
          true) &&
         load_function(
             next_get_instance_proc_addr,
@@ -14424,6 +14444,45 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_create_swapchain(
 //
 // Upstream never needed this because the application waited for the queue to
 // empty inside xrEndFrame; it does not any more.
+XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
+    XrSession session,
+    const XrViewLocateInfo* locate_info,
+    XrViewState* view_state,
+    std::uint32_t view_capacity_input,
+    std::uint32_t* view_count_output,
+    XrView* views) {
+    return guard_c_api_boundary([&]() -> XrResult {
+        // A session the layer does not know still has its call forwarded,
+        // through any instance's next function, rather than failing.
+        PFN_xrLocateViews next = nullptr;
+        if (const auto state = find_session(session)) {
+            next = state->dispatch->locate_views;
+        } else {
+            std::scoped_lock lock(g_state_mutex);
+            for (const auto& [handle, dispatch] : g_instances) {
+                static_cast<void>(handle);
+                if (dispatch && dispatch->locate_views != nullptr) {
+                    next = dispatch->locate_views;
+                    break;
+                }
+            }
+        }
+        if (next == nullptr) {
+            return XR_ERROR_HANDLE_INVALID;
+        }
+        const XrResult result = next(
+            session, locate_info, view_state, view_capacity_input, view_count_output, views);
+        if (locate_info != nullptr && xrfg::bridge_flight_logger().enabled()) {
+            xrfg::bridge_flight_logger().event(
+                xrfg::BridgeFlightOperation::app_locate_views,
+                static_cast<std::int64_t>(result),
+                static_cast<std::uint64_t>(locate_info->displayTime),
+                static_cast<std::uint64_t>(locate_info->viewConfigurationType));
+        }
+        return result;
+    });
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL layer_destroy_space(XrSpace space) {
     return guard_c_api_boundary([&]() -> XrResult {
         std::shared_ptr<Dispatch> dispatch;

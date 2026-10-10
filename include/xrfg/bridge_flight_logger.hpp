@@ -274,6 +274,13 @@ enum class BridgeFlightOperation : std::uint32_t {
     // with real. Under a steady head turn a synthetic with its own pose
     // reads about what a real frame does; with the real frame's, about b.
     reprojection_angle,
+    // The application's xrLocateViews, forwarded unchanged and recorded when
+    // the recorder runs: result the runtime's, a the display time it asked
+    // for, b the view configuration type. Against app_wait_frame's predicted
+    // display time it shows how far ahead the game predicts its poses, and
+    // whether that moves frame to frame (UEVR adds a period when its game
+    // thread runs ahead of the frame wait).
+    app_locate_views,
 };
 
 struct BridgeFlightToken {

@@ -926,6 +926,18 @@ handed over at its display time reads 0, and the first synthetic, submitted
 at B's time with the pose halfway from A's, 2.005 degrees - half its pair's
 turn (`layer_flight_logging.cmake`).
 
+`app_locate_views` records the application's own xrLocateViews, forwarded
+unchanged: the display time it asks poses for (a) and the view configuration
+(b). Against app_wait_frame's predicted time and the frames'
+presenter_content it shows whether a game renders for the time its frame is
+shown. Users of Galactic Racer under UEVR reported "something fighting the
+camera" in head turns, and UEVR adds a period to its predicted time when its
+game thread runs ahead of the frame wait. On the Meta XR Simulator with native
+DLSS FG at 2X, UEVR asked for one returned period past the last wait in 95.6%
+of calls and two in 4.4%, and every one of those frames went out with, and was
+shown at, the time it was rendered for (shown minus requested 0.00 ms in both
+groups): there the period it adds is not a misprediction.
+
 #### DLSS vectors for a swapchain per eye
 
 `resolve_dlss_motion_vectors` matches the game's DLSS evaluations to the image
