@@ -420,7 +420,8 @@ OpenXR session, and extrapolation wins if both are set.
   against the game's own steps - the next frame's step spread over the
   display until it is shown, which is what makes the shown motion even - the
   layer's extrapolation erred 0.0596 on average where the fixed share erred
-  0.1103 and the stamps 0.1119 (0.0179 against 0.0266 in a steadier race).
+  0.1103 and the stamps 0.1119 (0.0179 against 0.0266 in a steadier race),
+  and in Subnautica 2 0.0313 against 0.0365 and 0.0516.
   Against display times alone, which assume the game steps evenly, the fixed
   share stays closer (0.0050 against 0.0601); that assumption is what the
   game's steps break. A game that gives DLSS no frame time, or a step outside

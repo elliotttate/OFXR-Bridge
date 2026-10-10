@@ -789,8 +789,10 @@ fixed share erred 0.0266, the stamps 0.0303 and the hand-over interval
 0.0394, and live on that rule 0.0596 against 0.1103 in a race whose steps
 swung 12-20 ms; against display times alone the fixed share stays closer
 (0.0089 and 0.0050 against 0.0204 and 0.0601), as display times assume even
-steps. The layer extrapolates by the game's step where the game gives DLSS
-one between half and twice the frame period.
+steps. In Subnautica 2 (steps of 14-24 ms) the rule erred 0.0286, the layer
+on it 0.0313, the fixed share 0.0365 and the stamps 0.0516. The layer
+extrapolates by the game's step where the game gives DLSS one between half
+and twice the frame period.
 `synthesis_fraction` records each pair's fraction and stamp gap in the flight
 log, and `xrfg_layer_cadence_fraction` checks on the fake runtime, with
 repeated stamps and the rate halved part way (`XRFG_TEST_REPEAT_STAMP_EVERY`,
