@@ -996,6 +996,11 @@ struct SessionState {
     // xrCreateSession, the hybrid again at each control change; see
     // nvidia_options_for.
     bool dlss_flow_hybrid{};
+    // Whether the process has published DLSS vectors. The hybrid waits for
+    // them: until a game shows it has DLSS, the chosen engine runs as in any
+    // game without, and the first publication takes the hybrid up through
+    // apply_embedded_control as a settings change would.
+    bool dlss_vectors_published{};
     // Extrapolation shows the real frame first and the synthetics after it,
     // each predicted from it, instead of interpolating before it. 2 also runs
     // FidelityFX's flow beside the game's vectors.
@@ -4967,7 +4972,8 @@ XrResult layer_destroy_instance_impl(XrInstance instance) {
 // The tray's synthesis modes for OFXR's own algorithm: extrapolation, from
 // the game's DLSS vectors and depth where it has them and from FidelityFX's
 // flow where it does not; else the hybrid of the game's vectors and
-// FidelityFX's flow. Both take the FidelityFX backend.
+// FidelityFX's flow, once the game has published DLSS vectors. Both take the
+// FidelityFX backend.
 void synthesis_modes(const SessionState& state, bool dlss_motion_vectors,
                      xrfg::D3D12NvidiaOpticalFlowOptions& options,
                      xrfg::D3D12OpticalFlowBackend& backend) noexcept {
@@ -4975,7 +4981,8 @@ void synthesis_modes(const SessionState& state, bool dlss_motion_vectors,
     options.extrapolate = state.extrapolate != 0 && ofxr;
     options.extrapolate_hybrid = state.extrapolate == 2 && ofxr;
     options.extrapolate_mesh = state.extrapolate != 0 && state.extrapolate_mesh && ofxr;
-    options.hybrid = state.dlss_flow_hybrid && ofxr && dlss_motion_vectors && !options.extrapolate;
+    options.hybrid = state.dlss_flow_hybrid && state.dlss_vectors_published && ofxr &&
+        dlss_motion_vectors && !options.extrapolate;
     // Where the flow only patches what the game's vectors miss, it runs at a
     // quarter per axis rather than half: on the recorded frames the hybrid
     // erred 7.19 against 7.18 (SSIM 0.815 both) for 11% less time, and the
@@ -5056,6 +5063,7 @@ XrResult layer_create_session_impl(
     state->recorder_applied = xrfg::bridge_flight_logger().enabled();
     state->menu_enabled = initial_control.desired.enabled && !state->pause_applied;
     state->dlss_motion_vectors = initial_control.desired.motion_vectors == 1 || initial_control.desired.frame_generation == 1;
+    state->dlss_vectors_published = xrfg::dlss_motion_vector_publications() != 0;
     synthesis_modes(*state, state->dlss_motion_vectors, state->nvidia_options,
                     state->optical_flow_backend);
     state->control_revision = initial_control.revision;
@@ -11998,9 +12006,15 @@ void apply_embedded_control(
     const auto control = xrfg::embedded::snapshot();
     const bool paused = state->manual_control.pause_requested();
     const bool recording = xrfg::bridge_flight_logger().enabled();
+    // The game's first DLSS vectors take up the hybrid; see
+    // dlss_vectors_published.
+    const bool vectors_arrived = state->dlss_flow_hybrid && state->dlss_motion_vectors &&
+        state->extrapolate == 0 &&
+        state->nvidia_options.frame_generation == xrfg::D3D12FrameGeneration::ofxr &&
+        !state->dlss_vectors_published && xrfg::dlss_motion_vector_publications() != 0;
     if (state->control_revision == control.revision &&
         paused == state->pause_applied &&
-        recording == state->recorder_applied) return;
+        recording == state->recorder_applied && !vectors_arrived) return;
     // Any change, not only a pause or the recorder: a settings change rebuilds
     // the synthesizer, and frames the presenter still holds were made by the
     // old one. Their deferred real-frame copies must be flushed by it; flushed
@@ -12038,6 +12052,8 @@ void apply_embedded_control(
         xrfg::implicit_layer::read_extrapolate_mesh(current_layer_directory());
     state->dlss_flow_hybrid =
         xrfg::implicit_layer::read_dlss_flow_hybrid(current_layer_directory());
+    if (!state->dlss_vectors_published)
+        state->dlss_vectors_published = xrfg::dlss_motion_vector_publications() != 0;
     synthesis_modes(*state, dlss_motion_vectors, options, backend);
     const bool changed = state->control_reconfigure_required || backend != state->optical_flow_backend ||
         options.preset != state->nvidia_options.preset ||

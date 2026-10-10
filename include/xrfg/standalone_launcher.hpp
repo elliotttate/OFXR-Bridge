@@ -46,15 +46,15 @@ struct LauncherSettings {
     // How OFXR makes frames; the layer's dlss_flow_hybrid and extrapolate,
     // read at session start. Both off: interpolation, from the game's DLSS
     // vectors where it has them and the chosen optical flow where it does
-    // not. dlss_flow_hybrid runs FidelityFX's flow beside the vectors and
-    // keeps, per pixel, whichever explains both frames better. extrapolate
+    // not. dlss_flow_hybrid (the default) runs FidelityFX's flow beside the
+    // vectors and keeps, per pixel, whichever explains both frames better. extrapolate
     // shows each real frame at once and predicts the next from it,
     // SpaceWarp-style, from the vectors and depth or else FidelityFX flow, and
     // turns the deeper pipeline off. Either takes the FidelityFX backend.
     // Neither applies to native DLSS Frame Generation. The tray menu sets at
     // most one; with both set by hand the layer extrapolates, and so does the
     // menu.
-    bool dlss_flow_hybrid{};
+    bool dlss_flow_hybrid{true};
     bool extrapolate{};
     // "Prefer FPS over latency": the layer's deeper pipeline. On by default.
     bool deep_pipeline{true};

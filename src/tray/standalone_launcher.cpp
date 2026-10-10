@@ -210,7 +210,11 @@ LauncherSettings parse_settings(std::string_view text) {
                 } else if (key == "nvidia_bidirectional") {
                     settings.nvidia_bidirectional = value == "1" ||
                         lower_ascii(value) == "true";
-                } else if (key == "dlss_flow_hybrid") {
+                } else if (key == "dlss_hybrid") {
+                    // Not dlss_flow_hybrid: while the hybrid was off by
+                    // default every save wrote dlss_flow_hybrid=0, so that
+                    // key says nothing about what the user chose and is
+                    // ignored, as vulkan_support is below.
                     settings.dlss_flow_hybrid = value == "1" ||
                         lower_ascii(value) == "true";
                 } else if (key == "extrapolate") {
@@ -272,7 +276,7 @@ std::string serialize_settings(const LauncherSettings& settings) {
            nvidia_input_scale_ini_value(settings.nvidia_input_scale) +
            "\r\nnvidia_bidirectional=" +
            (settings.nvidia_bidirectional ? "1" : "0") +
-           "\r\ndlss_flow_hybrid=" + (settings.dlss_flow_hybrid ? "1" : "0") +
+           "\r\ndlss_hybrid=" + (settings.dlss_flow_hybrid ? "1" : "0") +
            "\r\nextrapolate=" + (settings.extrapolate ? "1" : "0") +
            "\r\ndeep_pipeline=" + (settings.deep_pipeline ? "1" : "0") +
            "\r\ntriple_frame_gen=" + (settings.triple_frame_gen ? "1" : "0") +

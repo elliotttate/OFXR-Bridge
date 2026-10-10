@@ -984,7 +984,7 @@ void show_context_menu(AppState& state) {
     const bool native = method == sl::Method::native_dlss;
     const bool triple = settings.triple_frame_gen;
     const sl::OfxrMode mode = sl::ofxr_mode(settings);
-    // The hybrid and extrapolation run FidelityFX flow whatever is chosen.
+    // Extrapolation runs FidelityFX flow whatever is chosen.
     const bool forced_fidelity_fx = !native && sl::mode_forces_fidelity_fx(mode);
     const bool nvidia_flow = !native && method != sl::Method::fidelity_fx && !forced_fidelity_fx;
     const bool extrapolating = !native && mode == sl::OfxrMode::extrapolate;
@@ -997,7 +997,7 @@ void show_context_menu(AppState& state) {
         return sl::menu_annotation(sl::method_cost(*results, settings, entry, query), refresh,
                                    query.triple.value_or(triple));
     };
-    // An NVIDIA engine is not what runs under the hybrid or extrapolation.
+    // An NVIDIA engine is not what runs under extrapolation.
     const auto engine_note = [&](sl::Method entry) {
         return forced_fidelity_fx ? std::wstring(L"FidelityFX runs in this OFXR mode")
                                   : method_note(entry);
@@ -1074,11 +1074,11 @@ void show_context_menu(AppState& state) {
         append_note(methods, native ? L"How OFXR makes frames (not with DLSS Frame Generation)"
                                     : L"How OFXR makes frames (cost in games with DLSS vectors)");
         append_entry(methods, ofxr_mode_interpolate,
-                     L"Interpolate, from the game's DLSS vectors where it has them (default)",
+                     L"Interpolate, from the game's DLSS vectors where it has them (cheapest)",
                      mode == sl::OfxrMode::interpolate, !native, true,
                      mode_note(sl::OfxrMode::interpolate));
         append_entry(methods, ofxr_mode_hybrid,
-                     L"Interpolate, DLSS vectors + FidelityFX flow (best quality)",
+                     L"Interpolate, DLSS vectors + FidelityFX flow (best quality, default)",
                      mode == sl::OfxrMode::hybrid, !native, true, mode_note(sl::OfxrMode::hybrid));
         const std::wstring extrapolation = mode_note(sl::OfxrMode::extrapolate);
         append_entry(methods, ofxr_mode_extrapolate,
@@ -1525,7 +1525,8 @@ void handle_command(AppState& state, UINT command) {
             : mode == sl::OfxrMode::hybrid
                 ? L"In games with DLSS, FidelityFX flow runs beside the game's vectors and each "
                   L"pixel takes the better: the least error measured, for about 1 ms more. "
-                  L"FidelityFX flow is used in every game. From the next game start."
+                  L"Games without DLSS keep the optical flow chosen above. From the next game "
+                  L"start."
                 : L"Frames are generated between two real frames, from the game's DLSS vectors "
                   L"where it has them and the chosen optical flow where not. From the next game "
                   L"start.");

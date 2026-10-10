@@ -623,6 +623,18 @@ the vectors' covered-background conclusion cut that to 2.8 but cost the real
 frames 0.4, since their vectors are not exact. 1.61 ms a pair offline at
 3004x3004, 1.58-1.71 ms live.
 
+Since release 18 the hybrid is the default. The engine is chosen when a
+session starts, before the game has necessarily run DLSS, so the layer starts
+on the tray's engine and the first DLSS publication in the process
+(`dlss_motion_vector_publications`) takes the hybrid up through
+`apply_embedded_control`, as a settings change would; a game without DLSS
+keeps the tray's engine at its own resolution rather than FidelityFX alone at
+a quarter. In Galactic Racer the game ran DLSS 2.5 s after the session was
+created and 7 s before generation began, so the first context built was
+already the hybrid, at 1.43 ms a pair at 2316x2316. Hybrid pairs had also
+counted as temporal rejections in the guide statistics (one rejection for
+every use); they no longer do.
+
 #### Extrapolation
 
 Meta's runtimes were examined for how they predict. The PC runtime's ASW

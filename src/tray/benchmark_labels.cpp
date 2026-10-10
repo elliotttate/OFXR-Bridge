@@ -99,7 +99,7 @@ void apply_ofxr_mode(LauncherSettings& settings, OfxrMode mode) noexcept {
 }
 
 bool mode_forces_fidelity_fx(OfxrMode mode) noexcept {
-    return mode != OfxrMode::interpolate;
+    return mode == OfxrMode::extrapolate;
 }
 
 int input_scale_percent(NvidiaInputScale scale) noexcept {
@@ -133,7 +133,8 @@ std::wstring ofxr_mode_name(OfxrMode mode) {
 
 std::wstring active_method_summary(const LauncherSettings& settings) {
     const Method method = current_method(settings);
-    // The engine that runs: the hybrid and extrapolation take FidelityFX.
+    // The engine that runs in games without DLSS vectors: extrapolation
+    // takes FidelityFX.
     std::wstring text = method_name(method != Method::native_dlss && mode_forces_fidelity_fx(ofxr_mode(settings))
                                         ? Method::fidelity_fx : method);
     if (method == Method::native_dlss) {

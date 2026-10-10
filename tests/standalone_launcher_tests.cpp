@@ -38,18 +38,18 @@ int main() {
     if (parse_settings(serialize_settings(full_settings)).native_scale != 100 ||
         !contains(build_runtime_ini(full_settings), "dlssg_resolution=100") ||
         parse_settings("[tray]\ndlssg_resolution=7\n").native_scale != 67) return 1;
-    // What OFXR does in a DLSS game: the game's vectors alone unless the
-    // hybrid or extrapolation is chosen. Both keys go to the layer's [ofxr].
-    if (release_defaults.dlss_flow_hybrid || release_defaults.extrapolate ||
-        !contains(default_runtime_ini, "\r\ndlss_flow_hybrid=0\r\n") ||
+    // What OFXR does in a DLSS game: the hybrid unless the vectors alone or
+    // extrapolation is chosen. Both keys go to the layer's [ofxr].
+    if (!release_defaults.dlss_flow_hybrid || release_defaults.extrapolate ||
+        !contains(default_runtime_ini, "\r\ndlss_flow_hybrid=1\r\n") ||
         !contains(default_runtime_ini, "\r\nextrapolate=0\r\n") ||
-        !contains(serialize_settings(release_defaults), "\r\ndlss_flow_hybrid=0\r\n") ||
+        !contains(serialize_settings(release_defaults), "\r\ndlss_hybrid=1\r\n") ||
         !contains(serialize_settings(release_defaults), "\r\nextrapolate=0\r\n")) {
         std::cerr << "DLSS game mode defaults failed\n";
         return 1;
     }
     for (const auto& [hybrid, extrapolate] : {std::pair{true, false}, std::pair{false, true},
-                                             std::pair{true, true}}) {
+                                             std::pair{true, true}, std::pair{false, false}}) {
         LauncherSettings mode;
         mode.dlss_flow_hybrid = hybrid;
         mode.extrapolate = extrapolate;
@@ -63,10 +63,14 @@ int main() {
             return 1;
         }
     }
-    if (!parse_settings("[tray]\r\ndlss_flow_hybrid=true\r\n").dlss_flow_hybrid ||
+    // A tray.ini from before the hybrid was the default holds
+    // dlss_flow_hybrid=0 whatever was chosen; it takes the hybrid.
+    if (parse_settings("[tray]\r\ndlss_hybrid=0\r\n").dlss_flow_hybrid ||
+        !parse_settings("[tray]\r\ndlss_hybrid=true\r\n").dlss_flow_hybrid ||
+        !parse_settings("[tray]\r\ndlss_flow_hybrid=0\r\nextrapolate=0\r\n").dlss_flow_hybrid ||
         !parse_settings("[tray]\r\nextrapolate=1\r\n").extrapolate ||
         parse_settings("[tray]\r\nextrapolate=0\r\n").extrapolate ||
-        parse_settings("[other]\r\ndlss_flow_hybrid=1\r\n").dlss_flow_hybrid) {
+        !parse_settings("[other]\r\ndlss_hybrid=0\r\n").dlss_flow_hybrid) {
         std::cerr << "DLSS game mode parsing failed\n";
         return 1;
     }

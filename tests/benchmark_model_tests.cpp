@@ -224,14 +224,14 @@ void tray_lookups() {
     require(native.frame_generation == FrameGeneration::ofxr &&
                 native.backend == FlowBackend::fidelity_fx,
             "a flow method leaves native generation");
-    require(ofxr_mode(settings) == OfxrMode::interpolate, "interpolation by default");
+    require(ofxr_mode(settings) == OfxrMode::hybrid, "the hybrid by default");
     for (const auto mode : {OfxrMode::interpolate, OfxrMode::hybrid, OfxrMode::extrapolate}) {
         LauncherSettings changed;
         apply_ofxr_mode(changed, mode);
         require(ofxr_mode(changed) == mode && !(changed.dlss_flow_hybrid && changed.extrapolate),
                 "one OFXR mode at a time");
-        require(mode_forces_fidelity_fx(mode) == (mode != OfxrMode::interpolate),
-                "the hybrid and extrapolation take FidelityFX");
+        require(mode_forces_fidelity_fx(mode) == (mode == OfxrMode::extrapolate),
+                "extrapolation takes FidelityFX, the hybrid only with DLSS vectors");
     }
     LauncherSettings both;
     both.dlss_flow_hybrid = both.extrapolate = true;
@@ -283,11 +283,12 @@ void tray_lookups() {
             "modes in DLSS games include the guide copy");
     require(ofxr_mode_cost(results, settings, OfxrMode::extrapolate).status == CaseStatus::not_run,
             "no extrapolation result");
-    // The hybrid and extrapolation run FidelityFX whatever the list says.
+    // Extrapolation runs FidelityFX whatever the list says; the hybrid only
+    // in games with DLSS vectors, so the list keeps its own costs.
     LauncherSettings hybrid = settings;
     apply_ofxr_mode(hybrid, OfxrMode::hybrid);
-    require(near(method_cost(results, hybrid, Method::nvidia_medium).cost_ms, 0.6),
-            "under the hybrid an NVIDIA choice costs FidelityFX's flow");
+    require(near(method_cost(results, hybrid, Method::nvidia_medium).cost_ms, 2.9),
+            "under the hybrid an NVIDIA choice costs NVIDIA's flow");
     LauncherSettings extrapolating = settings;
     apply_ofxr_mode(extrapolating, OfxrMode::extrapolate);
     results.set({"extrapolate_ffx_50", CaseStatus::ok, 450, 440, 32, ""});

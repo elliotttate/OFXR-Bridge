@@ -217,8 +217,8 @@ launch the game:
 follows the game's motion vectors exactly, but some content does not move the
 way its vectors say: a shadow cast by something moving with the camera onto
 ground rushing past, a reflection, an object that writes no velocity. Optical
-flow follows the image instead, and loses elsewhere. With
-`[ofxr] dlss_flow_hybrid=1`, OFXR runs FidelityFX's flow as well and composes
+flow follows the image instead, and loses elsewhere. The hybrid, the default
+since release 18 (`[ofxr] dlss_flow_hybrid=1`), runs FidelityFX's flow as well and composes
 each pixel from whichever explains both frames better, comparing their samples
 blurred a little; where the vectors already explain both frames, the flow is
 not asked. On 42 recorded Galactic Racer triplets it had the least error of
@@ -308,16 +308,22 @@ does.
   The deeper pipeline is turned off, since its held period would add the
   latency back.
 
-| Where | Hybrid | Extrapolation |
+| Where | Hybrid (default) | Extrapolation |
 |---|---|---|
 | The tray menu, **Frame generation method** | **Interpolate, DLSS vectors + FidelityFX flow** | **Extrapolate, SpaceWarp-style** |
-| Tray settings (`tray.ini`) | `[tray] dlss_flow_hybrid=1` | `[tray] extrapolate=1` |
-| A directly loaded layer (`ofxr_bridge.ini`) | `[ofxr] dlss_flow_hybrid=1` | `[ofxr] extrapolate=1` |
-| For tests, the game's environment | `XRFG_TEST_DLSS_FLOW_HYBRID=1` | `XRFG_TEST_EXTRAPOLATE=1` (or `2`) |
+| Tray settings (`tray.ini`) | `[tray] dlss_hybrid=1` (`0` for the vectors alone) | `[tray] extrapolate=1` |
+| A directly loaded layer (`ofxr_bridge.ini`) | `[ofxr] dlss_flow_hybrid=1` (`0` for the vectors alone) | `[ofxr] extrapolate=1` |
+| For tests, the game's environment | `XRFG_TEST_DLSS_FLOW_HYBRID=1` or `0` | `XRFG_TEST_EXTRAPOLATE=1` (or `2`) |
 
-Both apply to OFXR's own algorithm and take the FidelityFX backend; the
-hybrid needs the game's DLSS vectors. Both are read when the game starts its
-OpenXR session, and extrapolation wins if both are set.
+Both apply to OFXR's own algorithm. Extrapolation takes the FidelityFX
+backend in every game. The hybrid needs the game's DLSS vectors: a session
+starts on the engine chosen in the tray, and the first DLSS vectors the game
+publishes switch it to the hybrid and FidelityFX, which in Galactic Racer
+happened before generation began; a game without DLSS keeps the chosen
+engine. Both are read when the game starts its OpenXR session, and
+extrapolation wins if both are set. Tray settings saved before release 18
+wrote `dlss_flow_hybrid=0` whatever was chosen, so the tray now keeps the
+hybrid under a new key and ignores the old one.
 
 ## Other changes in this fork
 
@@ -948,15 +954,15 @@ the bridge is armed or paused and which method is in use.
 | Entry | What it holds |
 |---|---|
 | **Disarm bridge** / **Pause frame generation** | Arming, and the pause, with its key shown beside it. |
-| **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then how OFXR makes frames: **interpolate** (default; from the game's DLSS vectors where it has them, the chosen flow elsewhere), **interpolate with DLSS vectors + FidelityFX flow** (best quality), or **extrapolate, SpaceWarp-style** (no added latency, less accurate). The last two run FidelityFX flow in every game, whatever engine is chosen above. Then **2X** or **3X**. |
+| **Frame generation method** | One list of methods: FidelityFX optical flow, NVIDIA optical flow (fast, medium, slow) or NVIDIA DLSS Frame Generation. Then how OFXR makes frames: **interpolate** (from the game's DLSS vectors where it has them, the chosen flow elsewhere; the cheapest), **interpolate with DLSS vectors + FidelityFX flow** (default, best quality; games without DLSS keep the chosen flow), or **extrapolate, SpaceWarp-style** (no added latency, less accurate; FidelityFX flow in every game, whatever engine is chosen above). Then **2X** or **3X**. |
 | **Quality and performance** | Optical-flow resolution, NVIDIA's both-ways check, DLSS Frame Generation resolution, and Prefer FPS over latency. |
 | **Benchmark this PC...** | See below. |
 | **FPS overlay**, **Diagnostics**, **Advanced** | Overlay position; flight recorder and logs; Lower VRAM and the pause key. |
 
 Options that do not apply to the chosen method are greyed out. The settings
 are stored as before in `%LOCALAPPDATA%\OFXR Bridge\tray.ini`; how OFXR makes
-frames adds `dlss_flow_hybrid=0|1` and `extrapolate=0|1`, which the tray also
-writes to the layer's `[ofxr]` section.
+frames adds `dlss_hybrid=0|1` and `extrapolate=0|1`, which the tray also
+writes to the layer's `[ofxr]` section as `dlss_flow_hybrid` and `extrapolate`.
 
 ### Benchmark this PC
 

@@ -38,7 +38,9 @@ void apply_method(LauncherSettings& settings, Method method) noexcept;
 enum class OfxrMode { interpolate, hybrid, extrapolate };
 [[nodiscard]] OfxrMode ofxr_mode(const LauncherSettings& settings) noexcept;
 void apply_ofxr_mode(LauncherSettings& settings, OfxrMode mode) noexcept;
-// Whether the mode runs FidelityFX flow whatever engine the list has chosen.
+// Whether the mode runs FidelityFX flow whatever engine the list has chosen:
+// extrapolation. The hybrid takes FidelityFX only in games with DLSS vectors,
+// where the list's engine does not run in any mode.
 [[nodiscard]] bool mode_forces_fidelity_fx(OfxrMode mode) noexcept;
 
 [[nodiscard]] int input_scale_percent(NvidiaInputScale scale) noexcept;

@@ -303,7 +303,20 @@ bool read_switch(const std::filesystem::path& module_directory, const wchar_t* k
 }  // namespace
 
 bool read_dlss_flow_hybrid(const std::filesystem::path& module_directory) noexcept {
-    return read_switch(module_directory, L"dlss_flow_hybrid", L"XRFG_TEST_DLSS_FLOW_HYBRID");
+    try {
+        wchar_t value[8]{};
+        const DWORD n = GetEnvironmentVariableW(L"XRFG_TEST_DLSS_FLOW_HYBRID", value, 8);
+        if (n && n < 8) {
+            return std::wcstol(value, nullptr, 10) != 0;
+        }
+        if (module_directory.empty()) {
+            return true;
+        }
+        const auto ini_path = module_directory / L"ofxr_bridge.ini";
+        return GetPrivateProfileIntW(L"ofxr", L"dlss_flow_hybrid", 1, ini_path.c_str()) != 0;
+    } catch (...) {
+        return true;
+    }
 }
 
 bool read_extrapolate_mesh(const std::filesystem::path& module_directory) noexcept {

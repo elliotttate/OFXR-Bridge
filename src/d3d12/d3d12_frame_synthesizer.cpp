@@ -3973,7 +3973,8 @@ struct D3D12FrameSynthesizer::Impl {
                 return result;
             }
             report_dlss_motion_vector_status(DlssMotionVectorStatus::invalid_input);
-        } else if (current_source.motion_vectors) {
+        } else if (!hybrid && current_source.motion_vectors) {
+            // The hybrid uses the pair below and reports it there.
             report_dlss_motion_vector_status(DlssMotionVectorStatus::temporal_mismatch);
         }
         if (backend == D3D12OpticalFlowBackend::nvidia) {

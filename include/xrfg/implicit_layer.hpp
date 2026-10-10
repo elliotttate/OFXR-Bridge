@@ -117,9 +117,9 @@ struct ConfiguredNvidiaOptions {
 
 // `[ofxr] dlss_flow_hybrid`: in a game with DLSS vectors, OFXR runs
 // FidelityFX's optical flow as well and composes each pixel from whichever
-// explains both frames better. Off unless set to 1, or with the environment
-// variable XRFG_TEST_DLSS_FLOW_HYBRID=1. Read at xrCreateSession and again at
-// each live control change.
+// explains both frames better. On unless set to 0 (the environment variable
+// XRFG_TEST_DLSS_FLOW_HYBRID overrides either way). Read at xrCreateSession and
+// again at each live control change.
 [[nodiscard]] bool read_dlss_flow_hybrid(
     const std::filesystem::path& module_directory) noexcept;
 
