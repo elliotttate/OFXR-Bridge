@@ -42,7 +42,12 @@ cbuffer Params : register(b0) {
     // for 2X, two thirds and one third for 3X.
     float TowardsA;
     uint DepthInverted; // nearer surfaces have larger depth values
-    uint Padding2;
+    // The compose's output is shown from a camera of its own - the head's
+    // pose when the generated frame is shown, which the layer submits it
+    // with - and SyntheticRotation turns its rays into B's camera. It has
+    // B's field of view and rectangle. CurrentFallback holds A in the compose.
+    uint SyntheticCamera;
+    float4 SyntheticRotation;
 };
 
 float3 rotate(float3 ray, float4 q) {
@@ -236,15 +241,56 @@ Vertex NativeDlssGVS(uint id : SV_VertexID) {
     v.position = float4(id == 0 ? float2(-1, -1) : id == 1 ? float2(-1, 3) : float2(3, -1), 0, 1);
     return v;
 }
+
+// What an output pixel shows, as a point of B's eye (pixel centres at
+// halves). Without a camera of its own, the pixel itself. With one, where its
+// ray meets B's view, sampled there with no second resample; a ray that
+// leaves B's view takes A where A saw it - the far side of a head turn - and
+// B's nearest edge where neither did.
+struct Shown {
+    float2 x;
+    float4 previous;
+    bool from_previous;
+};
+Shown shown_at(float2 position) {
+    Shown shown;
+    shown.x = position - OutputRect.xy;
+    shown.previous = float4(0, 0, 0, 1);
+    shown.from_previous = false;
+    if (SyntheticCamera != 0) {
+        float2 uv = shown.x / float2(Extent);
+        float3 ray = float3(lerp(TargetTangents.x, TargetTangents.y, uv.x),
+                            lerp(TargetTangents.z, TargetTangents.w, uv.y), -1);
+        float3 b_ray = rotate(ray, SyntheticRotation);
+        float2 b_uv = source_uv(b_ray, TargetTangents);
+        shown.x = clamp(b_uv * float2(Extent), 0.5, float2(Extent) - 0.5);
+        if (b_ray.z >= -0.00001 || any(b_uv < 0) || any(b_uv > 1)) {
+            float3 a_ray = rotate(b_ray, Rotation);
+            float2 a_uv = source_uv(a_ray, SourceTangents);
+            if (a_ray.z < -0.00001 && all(a_uv >= 0) && all(a_uv <= 1)) {
+                shown.previous = bilinear(CurrentFallback, OutputRect.xy + a_uv * float2(Extent) - 0.5);
+                shown.from_previous = true;
+            }
+        }
+    }
+    return shown;
+}
+
 float4 NativeDlssGPS(Vertex input) : SV_Target {
-    int2 p = int2(input.position.xy);
+    Shown shown = shown_at(input.position.xy);
+    int2 p = int2(OutputRect.xy + shown.x);
     float4 current = SourceColor.Load(int4(p, ColorSlice, 0));
+    if (shown.from_previous) {
+        return shown.previous;
+    }
     if ((DisableInterpolation.Load(0) & 255u) != 0) {
-        return current;
+        return SyntheticCamera != 0 ? bilinear(SourceColor, OutputRect.xy + shown.x - 0.5) : current;
     }
     // The private colour may hold two alpha bits; the real frame's alpha is exact.
     if (!reduced()) {
-        float3 generated = Generated.Load(int3(p - int2(OutputRect.xy) + int2(EyeX, 0), 0)).rgb;
+        float3 generated = SyntheticCamera != 0
+            ? bilinear_cell(Generated, shown.x - 0.5 + float2(EyeX, 0)).rgb
+            : Generated.Load(int3(p - int2(OutputRect.xy) + int2(EyeX, 0), 0)).rgb;
         // An sRGB target encodes only approximately. Decoding the nearest 8-bit
         // code, rather than a 10-bit value between two, keeps unmoved pixels exact.
         return float4(EncodeSrgb != 0 ? decode_srgb(round(generated * 255.0) / 255.0) : generated,
@@ -256,7 +302,7 @@ float4 NativeDlssGPS(Vertex input) : SV_Target {
     // there, is that detail, added back where the generated frame agrees with
     // the packed B. Where they disagree - an occlusion, or content the vectors
     // do not describe - the pixel stays as generated.
-    float2 x = input.position.xy - OutputRect.xy;
+    float2 x = shown.x;
     // Catmull-Rom keeps the generated frame's edges sharper than bilinear,
     // which measured 7% less error for no measurable cost. The packed B it is
     // compared with stays bilinear: filtering both alike measured worse.

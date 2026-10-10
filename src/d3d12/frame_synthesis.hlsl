@@ -325,6 +325,79 @@ CameraSample sample_current_target(
     return output;
 }
 
+// Bit 4: the synthetic is shown from a camera of its own, C - the head's pose
+// at the instant it is shown, which the layer submits it with - rather than
+// from B's. The runtime then has nothing to turn back, where B's pose left it
+// turning the synthetic back by the head's motion over the periods between,
+// with no pixels for the trailing edge. C has B's field of view and
+// rectangle, so the turn from C into B is a pure rotation; it rides in the
+// other view's mapping, which a view's composition never reads otherwise.
+bool synthetic_camera() {
+    return (SynthesisFlags & 16u) != 0u;
+}
+
+float4 multiply_quaternions(float4 left, float4 right) {
+    return float4(
+        left.w * right.xyz + right.w * left.xyz + cross(left.xyz, right.xyz),
+        left.w * right.w - dot(left.xyz, right.xyz));
+}
+
+// C's mapping into B: B's projection on both sides, turned by the rotation.
+CameraMapping synthetic_to_current_mapping() {
+    CameraMapping own = PreviousMappings[ViewIndex];
+    CameraMapping mapping = own;
+    mapping.TargetToSourceRotation = PreviousMappings[1 - ViewIndex].TargetToSourceRotation;
+    mapping.SourceTangents = own.TargetTangents;
+    mapping.SourceRect = own.TargetRect;
+    return mapping;
+}
+
+// What an output pixel shows. Without a synthetic camera, the synthesis at
+// that pixel of B. With one, the synthesis at the point of B the pixel's ray
+// meets - every composition below is evaluated at a continuous point already,
+// so the turn costs no second resample. A ray that leaves B's view takes A's
+// colour where A saw it: the far side of a turn, whose content B has already
+// turned away from. Where neither saw it, B's nearest edge is evaluated, so
+// no pixel is left without content.
+struct OutputSource {
+    float2 current;
+    float4 previous;
+    bool from_previous;
+};
+
+OutputSource output_source(float2 pixel) {
+    OutputSource output;
+    output.current = pixel;
+    output.previous = float4(0.0, 0.0, 0.0, 1.0);
+    output.from_previous = false;
+    if (synthetic_camera()) {
+        CameraMapping to_current = synthetic_to_current_mapping();
+        MappedCoordinate current = map_target_to_source(pixel, to_current);
+        float4 rect = PreviousMappings[ViewIndex].TargetRect;
+        output.current = clamp(current.coordinate, rect.xy, rect.xy + rect.zw - 1.0);
+        if (current.valid < 0.5) {
+            // C into A is C into B, then B into A.
+            CameraMapping to_previous = PreviousMappings[ViewIndex];
+            to_previous.TargetToSourceRotation = multiply_quaternions(
+                to_previous.TargetToSourceRotation, to_current.TargetToSourceRotation);
+            MappedCoordinate previous = map_target_to_source(pixel, to_previous);
+            if (previous.valid >= 0.5) {
+                output.previous = bilinear_previous_source(previous.coordinate, Slice);
+                output.from_previous = true;
+            }
+        }
+    }
+    return output;
+}
+
+// Where a point of B lies in the synthetic's camera, for the mesh warps,
+// which move their grid in B and draw it in C.
+float2 current_to_output(float2 coordinate) {
+    return synthetic_camera()
+        ? map_source_to_target(coordinate, synthetic_to_current_mapping()).coordinate
+        : coordinate;
+}
+
 [numthreads(8, 8, 1)]
 void PackFlowInput(uint3 thread_id : SV_DispatchThreadID) {
     if (thread_id.x >= PackedWidth || thread_id.y >= PackedHeight) {
@@ -704,7 +777,9 @@ FullscreenVertex FullscreenTriangleVS(uint vertex_id : SV_VertexID) {
 // predicts. Correct vectors explain a moving surface however flat or striped
 // it is, so only content they do not describe is kept.
 bool game_motion_static_overlay(float2 pixel, float4 current) {
-    int2 texel = int2(pixel);
+    // The nearest texel: under a synthetic camera the pixel is a point of B
+    // between texels.
+    int2 texel = int2(pixel + 0.5);
     bool overlay = rgb_error(PreviousFrame.Load(int4(texel, int(Slice), 0)), current) <= 1.0 / 255.0;
     MappedCoordinate moved = (MappedCoordinate)0;
     if (overlay) {
@@ -792,8 +867,13 @@ float4 synthesize_midpoint(
     uint2 integer_pixel = uint2(input.position.xy);
     bool in_bounds = integer_pixel.x < Width && integer_pixel.y < Height &&
         Slice < ArraySize;
-    if (in_bounds) {
-        float2 pixel = float2(integer_pixel);
+    OutputSource source = output_source(float2(integer_pixel));
+    if (in_bounds && source.from_previous) {
+        output_color = saturate(source.previous);
+        // The hybrid keeps this branch's answer: the other has no better.
+        last_disagreement = 0.0;
+    } else if (in_bounds) {
+        float2 pixel = source.current;
         CameraSample current_fallback = sample_current_target(
             pixel,
             Slice,
@@ -1213,9 +1293,18 @@ float4 extrapolate(FullscreenVertex input) {
     uint2 integer_pixel = uint2(input.position.xy);
     float4 output_color = float4(0.0, 0.0, 0.0, 1.0);
     if (integer_pixel.x < Width && integer_pixel.y < Height && Slice < ArraySize) {
-        CameraSample here = sample_current_target(float2(integer_pixel), Slice, ViewIndex);
-        output_color = repeated_capture_flag() != 0 ? saturate(here.color)
-                                                     : extrapolate_pixel(float2(integer_pixel), here);
+        // Extrapolated, the synthetic's camera has turned on past B, so the
+        // edge it turns towards is B's nearest; A sees only the other side.
+        OutputSource source = output_source(float2(integer_pixel));
+        CameraSample here = sample_current_target(source.current, Slice, ViewIndex);
+        if (source.from_previous) {
+            output_color = saturate(source.previous);
+            last_extrapolation_error = 0.0;
+        } else {
+            output_color = repeated_capture_flag() != 0
+                ? saturate(here.color)
+                : extrapolate_pixel(source.current, here);
+        }
     }
     return output_color;
 }
@@ -1296,7 +1385,8 @@ MeshVertex extrapolate_mesh_vertex(uint vertex_id) {
         }
     }
     float2 d = extrapolation_displacement(tap);
-    float2 p = q - s * d;
+    // Moved in B, drawn in the synthetic's camera.
+    float2 p = current_to_output(q - s * d);
     // Nearer is smaller for the depth test.
     float z = depth ? ((SynthesisFlags & 4u) != 0 ? 1.0 - tap_depth : tap_depth)
                     : length(d) / 1024.0;
@@ -1345,13 +1435,16 @@ float4 ExtrapolateMeshHybridPS(MeshVertex input) : SV_Target {
     float vectors_error = rgb_error(b_low, a_low) * 0.25;
     [branch] if (vectors_error < 0.02) return vectors;
     extrapolate_flow = true;
-    float2 pixel = float2(uint2(input.position.xy));
+    float2 pixel = output_source(float2(uint2(input.position.xy))).current;
     float4 flow = extrapolate_pixel(pixel, sample_current_target(pixel, Slice, ViewIndex));
     return lerp(flow, vectors, saturate(1.0 + (last_extrapolation_error - vectors_error) * 8.0));
 }
 
 float4 ExtrapolateMeshFillPS(FullscreenVertex input) : SV_Target {
-    return saturate(sample_current_target(float2(uint2(input.position.xy)), Slice, ViewIndex).color);
+    OutputSource source = output_source(float2(uint2(input.position.xy)));
+    return source.from_previous
+        ? saturate(source.previous)
+        : saturate(sample_current_target(source.current, Slice, ViewIndex).color);
 }
 
 // The game's vectors and FidelityFX's optical flow both: per pixel, whichever

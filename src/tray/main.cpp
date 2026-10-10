@@ -324,8 +324,14 @@ void log_lifecycle(const std::filesystem::path& local_directory,
         L"flush_each_event",
         0,
         source.empty() ? destination.c_str() : source.c_str()) != 0;
+    // And `[ofxr] synthetic_pose`, likewise without a menu entry.
+    std::array<wchar_t, 32> synthetic_pose{};
+    GetPrivateProfileStringW(L"ofxr", L"synthetic_pose", L"", synthetic_pose.data(),
+        static_cast<DWORD>(synthetic_pose.size()),
+        source.empty() ? destination.c_str() : source.c_str());
     std::string configuration = xrfg::standalone::build_runtime_ini(
-        state.settings, max_file_mb, flush_each_event);
+        state.settings, max_file_mb, flush_each_event,
+        _wcsicmp(synthetic_pose.data(), L"real") == 0);
     if (!manifest.empty()) {
         const auto control = xrfg::implicit_layer::arm_signal_name(manifest);
         std::string ascii_control;

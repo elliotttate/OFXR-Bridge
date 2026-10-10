@@ -261,6 +261,19 @@ enum class BridgeFlightOperation : std::uint32_t {
     //      2 right
     //   5  the panel hidden again
     status_panel,
+    // How far the runtime will turn a frame to show it, written for every
+    // frame of a generated pair as it is handed over: the angle between the
+    // pose it was submitted with (its views' mean orientation, which cancels
+    // a headset's symmetric eye cant) and the head's at the display time it
+    // was submitted for, as the runtime predicts it at the hand-over. result
+    // is presenter_submission's kind (2 synthetic, 1 real, 0 a repeat), a
+    // the angle in thousandths of a degree, b how far the head turned over
+    // the display period before that time, likewise - what a synthetic
+    // submitted with the newer real frame's pose is turned back by, a period
+    // early at 2X - and c 1 with `[ofxr] synthetic_pose=interpolated`, 0
+    // with real. Under a steady head turn a synthetic with its own pose
+    // reads about what a real frame does; with the real frame's, about b.
+    reprojection_angle,
 };
 
 struct BridgeFlightToken {

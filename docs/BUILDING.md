@@ -811,6 +811,121 @@ repeated stamps and the rate halved part way (`XRFG_TEST_REPEAT_STAMP_EVERY`,
 `XRFG_TEST_THROTTLE_AFTER_WAITS`), that every pair is placed at the
 midpoint.
 
+#### Each synthetic in its own camera
+
+A synthetic was generated in B's camera - the synthesizer first turns A into
+B's camera with the submitted poses, then interpolates the scene's own
+motion - and went to the runtime in B's composition layer, with B's pose and
+field of view. It is shown a display period before B (two and one at 3X).
+SteamVR reprojects every submitted image from the pose it was submitted with
+to the head's pose when it is shown, so under a head turn it turned each
+synthetic back by the angular velocity times the periods between, and the
+trailing edge had no pixels: black strips flickering at the game's frame
+rate. At 3X, 144 Hz and 120 degrees a second, 1.7 and 0.8 degrees of view.
+
+Now each synthetic has a camera of its own, C, and is submitted with it.
+`synthetic_camera_snapshot` in the layer takes, per view, the orientation
+`pose_at_fraction(A, B, f)` - the rotation from A's submitted pose to B's
+turned through f of its angle about its axis, which past 1 carries the turn
+on - and the position likewise, keeping B's field of view and rectangle. f is
+`usable_synthesis_fraction` of the fraction the content is placed at (see
+above), so content and pose agree: the midpoint, 1/3 and 2/3 at 3X,
+1 + periods / step extrapolating. The same snapshot gives the synthesizer its
+target views and replaces the synthetic's views' poses in
+`build_generated_frame_end_info`, so the two are bit-identical. A turn over 45
+degrees or a move over half a metre between A and B - a recentre, a teleport,
+no head in a frame - keeps B's pose for the frame. So does a pair the
+synthesizer did not generate in its camera: the ticket's
+`synthetics_in_target_camera` is false for a native pair NGX skipped, whose
+outputs are copies of B. Camera views are built for every resource of a frame
+or for none, so a frame is never half in one camera.
+
+The synthesizer evaluates the existing synthesis at a point of B per output
+pixel instead of at the pixel: for output pixel p of C, the point where its
+ray meets B's image, q = K_B R_B<-C K_C^-1 p (the pure-rotation homography,
+from each view's FOV tangents and rectangle). Every composition already
+samples A, B, the flows and the vectors at continuous coordinates, so the
+turn adds no resample; a final resample pass after the compose would have
+cost a second bilinear filter of the whole frame and a full-screen pass. A
+ray that leaves B's view takes A along it, through R_A<-C = R_A<-B R_B<-C -
+the far side of the turn, which A saw - and one neither saw takes B's nearest
+edge, evaluated as any point of B. The root constants are full (62 and two
+tables), so the rotation from C into B rides in the other view's mapping,
+which a view's composition never reads (the pack, which reads both, has
+dispatched by then; extrapolation's depth rectangle shares it, in another
+field), and bit 4 of the flags says it is there; an output whose camera is
+B's in every view, within two microradians, draws exactly as before. Every
+path takes it: FidelityFX flow, DLSS vectors, the hybrid, NVIDIA flow, the
+repeated-capture pair, extrapolation's gather and its mesh warps (the grid
+moves in B and is drawn in C; the fill under it goes through the same
+mapping), and the 3X second synthetic with its own C. Native DLSS FG's
+compose already resamples NGX's frame at a continuous point; four more root
+constants carry the rotation, and A sits in the seed's fallback slot, which
+the compose did not read.
+
+Extrapolating, C turns on past B, and the strip beyond B's view lies on the
+side the head turns towards, which neither frame saw: it takes B's nearest
+edge, stretched, where B's pose left the runtime to show black there. A head
+that stops short of the prediction leaves C past where it is shown, and the
+runtime turns the frame back by the miss - as it does any prediction,
+including the game's own for B. The same treatment applies.
+
+Against the scene rendered from C, on a 12-degree turn between A and B
+(`test_synthetic_camera_follows_display_pose`, 160x80 per eye), mean absolute
+error per channel in 255:
+
+| Path | 2X inside B's view | 3X, 1/3 and 2/3 | Beyond B, from A | Black pixels |
+|---|---|---|---|---|
+| FidelityFX flow | 0.23-0.24 | 0.25-0.26, 0.22-0.23 | 0.15-0.17 | 0 |
+| DLSS vectors | 0.12 | 0.13, 0.13-0.14 | 0.15-0.17 | 0 |
+| Hybrid | 0.12-0.13 | 0.13-0.15, 0.13-0.14 | 0.15-0.17 | 0 |
+| NVIDIA flow (hardware) | 0.13-0.14 | 0.14, 0.14-0.15 | 0.15-0.17 | 0 |
+| Native DLSS FG, 100% / 67% | 0.17 / 0.28 | 0.17-0.18 / 0.28-0.29 | 0.15-0.17 | 0 |
+| Extrapolation, vectors, gather / mesh (1.5; 5/3 and 4/3) | 0.16-0.17 / 0.26 | 0.17 / 0.21-0.32 | (unseen: 10-20) | 0 |
+
+Generated in B's camera, the share of each view the runtime would have left
+without pixels was 11-12% at 2X and 14-15% and 8% for the two at 3X. The
+FidelityFX-flow extrapolation errs 32 on this scene with or without its own
+camera (the vectors, 0); it is held to having no black pixel. The call
+chain checks on the fake runtime that every synthetic goes down with the pose
+its share of the way between the real frames on either side, at 2X and 3X,
+inline and on the presenter, and with B's under `synthetic_pose=real`
+(`xrfg_layer_synthetic_pose_real_*`).
+
+GPU time a pair at 2004x2004 per eye on an RTX 5090
+(`XRFG_TEST_FG_BENCH`, p10), B's camera against the synthetic's own:
+
+| Method | B's camera | Own camera |
+|---|---|---|
+| FidelityFX, half-resolution flow | 325 us | 338 us |
+| DLSS vectors | 231 us | 243 us |
+| DLSS vectors + FidelityFX flow | 565 us | 578 us |
+| DLSS vectors extrapolation | 207 us | 219 us |
+| FidelityFX 3X (two synthetics) | 433 us | 458 us |
+| NVIDIA medium, its composition | 136 us | 150 us |
+| Native DLSS FG 2X | 1496 us | 1501 us |
+
+`[ofxr] synthetic_pose=interpolated|real` (interpolated unless `real`;
+`XRFG_TEST_SYNTHETIC_POSE` overrides) is read at xrCreateSession, at a
+control change and twice a second after (`follow_synthetic_pose`): a pair
+takes its cameras and the poses it submits them with from one snapshot at
+its own xrEndFrame, so nothing has to drain. The tray carries the line through
+its rewrites of the runtime ini, as it does `max_file_mb`.
+
+`reprojection_angle` records, while the recorder runs, how far the runtime
+will turn each frame of a pair: the angle between the frame's submitted pose
+(its views' mean orientation, which cancels a symmetric eye cant) and a VIEW
+space of the layer's own located in the frame's projection space at the
+display time it is submitted for, just before the hand-over (a, thousandths
+of a degree); the head's turn over the display period before that time (b);
+and the setting (c). result is presenter_submission's kind. With the head
+turning steadily, `real` should read about b for a 2X synthetic and 2b for
+the first of a 3X pair, `interpolated` about what the real frames read. The
+fake runtime's VIEW space sits at the application's own poses: a real frame
+handed over at its display time reads 0, and the first synthetic, submitted
+at B's time with the pose halfway from A's, 2.005 degrees - half its pair's
+turn (`layer_flight_logging.cmake`).
+
 #### DLSS vectors for a swapchain per eye
 
 `resolve_dlss_motion_vectors` matches the game's DLSS evaluations to the image

@@ -123,6 +123,19 @@ struct ConfiguredNvidiaOptions {
 [[nodiscard]] bool read_dlss_flow_hybrid(
     const std::filesystem::path& module_directory) noexcept;
 
+// `[ofxr] synthetic_pose`: interpolated (the default) generates each
+// synthetic frame in, and submits it with, the head's pose at the instant it
+// is shown - between the two real frames' poses at its share of the span, or
+// on past the second when extrapolating - so the runtime does not turn it
+// back by the head's motion and show the edge it turns away from black. real
+// gives it the newer real frame's pose and camera, as before. True for
+// interpolated. The environment variable XRFG_TEST_SYNTHETIC_POSE overrides
+// either way. Read at xrCreateSession, at each live control change, and
+// twice a second while the session runs, so the two can be compared under
+// the same head turn; the tray carries it through its rewrites of the ini.
+[[nodiscard]] bool read_synthetic_pose_interpolated(
+    const std::filesystem::path& module_directory) noexcept;
+
 // `[ofxr] extrapolate_mesh`: extrapolate with Meta's mesh warps
 // (Application SpaceWarp's from the game's vectors and depth, Asynchronous
 // SpaceWarp's from optical flow; with extrapolate=2 the vectors' grid asks

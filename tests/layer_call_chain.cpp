@@ -88,6 +88,12 @@ bool g_single_rings = true;
 // beside the layer turns "3X Frame Gen" on, and the virtual period the
 // application is served follows it.
 XrDuration g_frames_per_application_frame = 2;
+// Whether a synthetic is submitted with the head's pose when it is shown -
+// between the previous application frame's and the current one's - or with
+// the current one's. Read from the same ini (`[ofxr] synthetic_pose`,
+// interpolated unless `real`) and XRFG_TEST_SYNTHETIC_POSE, as the layer
+// reads them.
+bool g_synthetic_pose_interpolated = true;
 bool g_cropped_subimage_mode = false;
 bool g_double_wide_mode = false;
 bool g_uevr_pipelined_display_time_mode = false;
@@ -418,6 +424,94 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
     view.fov.angleLeft -= 0.005F;
     view.fov.angleRight += 0.007F;
     return view;
+}
+
+// The pose a synthetic between two application frames is submitted with: the
+// head's when it is shown, `fraction` of the way from the previous frame's
+// submitted pose to the current one's, with the current one's field of view;
+// or the current one's own with synthetic_pose=real. Every fake orientation is
+// a yaw, so the slerp is the yaw's half-angle interpolated.
+[[nodiscard]] XrPosef fake_synthetic_pose(
+    XrTime previous_time,
+    XrTime current_time,
+    float fraction,
+    std::uint32_t index) {
+    const XrView previous = fake_submitted_view_for_time(previous_time, index);
+    const XrView current = fake_submitted_view_for_time(current_time, index);
+    if (!g_synthetic_pose_interpolated) {
+        return current.pose;
+    }
+    const float previous_half = std::atan2(previous.pose.orientation.y, previous.pose.orientation.w);
+    const float current_half = std::atan2(current.pose.orientation.y, current.pose.orientation.w);
+    const float half = previous_half + (current_half - previous_half) * fraction;
+    XrPosef pose{};
+    pose.orientation = {0.0F, std::sin(half), 0.0F, std::cos(half)};
+    pose.position = {
+        previous.pose.position.x + (current.pose.position.x - previous.pose.position.x) * fraction,
+        previous.pose.position.y + (current.pose.position.y - previous.pose.position.y) * fraction,
+        previous.pose.position.z + (current.pose.position.z - previous.pose.position.z) * fraction,
+    };
+    return pose;
+}
+
+// Every synthetic between two real frames goes to the runtime with the pose
+// its own share of the way between theirs - (index + 1) / frames for the
+// index-th synthetic after the first real frame, so 1/3 and 2/3 at 3X - or,
+// with synthetic_pose=real, with the second real frame's. Only runs of one
+// real frame, frames - 1 synthetics and the next real frame are judged: a
+// prime, a repeat or a frame passed through says nothing about the pair. Not
+// for extrapolation, which shows each synthetic after its real frame.
+// Returns how many runs were judged, or -1 at the first that does not hold.
+[[nodiscard]] int judge_synthetic_poses(
+    const std::vector<EndFrameRecord>& records,
+    XrDuration frames) {
+    const auto close = [](float actual, float expected) {
+        return std::fabs(actual - expected) <= 1.0e-4F;
+    };
+    int judged = 0;
+    for (std::size_t first = 0; first + 1 < records.size(); ++first) {
+        if (records[first].target != SubmittedTarget::current) {
+            continue;
+        }
+        std::size_t next = first + 1;
+        while (next < records.size() && records[next].target == SubmittedTarget::synthetic) {
+            ++next;
+        }
+        if (next >= records.size() || records[next].target != SubmittedTarget::current ||
+            next - first - 1 != static_cast<std::size_t>(frames - 1)) {
+            continue;
+        }
+        for (std::size_t synthetic = first + 1; synthetic < next; ++synthetic) {
+            const float fraction =
+                static_cast<float>(synthetic - first) / static_cast<float>(frames);
+            for (std::size_t view = 0; view < records[synthetic].poses.size(); ++view) {
+                const XrPosef& previous = records[first].poses[view];
+                const XrPosef& current = records[next].poses[view];
+                // Every fake orientation is a yaw.
+                const float previous_half = std::atan2(previous.orientation.y, previous.orientation.w);
+                const float current_half = std::atan2(current.orientation.y, current.orientation.w);
+                const float share = g_synthetic_pose_interpolated ? fraction : 1.0F;
+                const float half = previous_half + (current_half - previous_half) * share;
+                const XrPosef& actual = records[synthetic].poses[view];
+                const bool matches = close(actual.orientation.y, std::sin(half)) &&
+                    close(actual.orientation.w, std::cos(half)) &&
+                    close(actual.position.x,
+                        previous.position.x + (current.position.x - previous.position.x) * share) &&
+                    close(actual.position.y,
+                        previous.position.y + (current.position.y - previous.position.y) * share) &&
+                    close(actual.position.z,
+                        previous.position.z + (current.position.z - previous.position.z) * share);
+                if (!matches) {
+                    std::cerr << "synthetic " << synthetic << " view " << view
+                              << " at display time " << records[synthetic].display_time
+                              << " is not at " << share << " between the real frames' poses\n";
+                    return -1;
+                }
+            }
+        }
+        ++judged;
+    }
+    return judged;
 }
 
 XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_instance(XrInstance) {
@@ -1089,7 +1183,41 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_create_swapchain(
 
 std::vector<XrSpace> g_panel_grip_spaces_alive;
 
+// The head, for the layer's reprojection_angle record: a VIEW space whose
+// orientation at a time is the one the application submits for it, so a
+// frame submitted with its own display time's pose reads zero.
+const XrSpace g_fake_view_space = fake_handle<XrSpace>(0x7E1E);
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_create_reference_space(
+    XrSession,
+    const XrReferenceSpaceCreateInfo* create_info,
+    XrSpace* space) {
+    if (create_info == nullptr || space == nullptr ||
+        create_info->referenceSpaceType != XR_REFERENCE_SPACE_TYPE_VIEW) {
+        return XR_ERROR_REFERENCE_SPACE_UNSUPPORTED;
+    }
+    *space = g_fake_view_space;
+    return XR_SUCCESS;
+}
+
+XRAPI_ATTR XrResult XRAPI_CALL fake_locate_space(
+    XrSpace space,
+    XrSpace,
+    XrTime time,
+    XrSpaceLocation* location) {
+    if (space != g_fake_view_space || location == nullptr) {
+        return XR_ERROR_HANDLE_INVALID;
+    }
+    location->pose = fake_submitted_view_for_time(time, 0).pose;
+    location->locationFlags = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+        XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    return XR_SUCCESS;
+}
+
 XRAPI_ATTR XrResult XRAPI_CALL fake_destroy_space(XrSpace space) {
+    if (space == g_fake_view_space) {
+        return XR_SUCCESS;
+    }
     // The status panel's grip spaces (panel-input).
     const auto grip = std::find(g_panel_grip_spaces_alive.begin(), g_panel_grip_spaces_alive.end(), space);
     if (grip != g_panel_grip_spaces_alive.end()) {
@@ -1480,6 +1608,8 @@ XRAPI_ATTR XrResult XRAPI_CALL fake_get_instance_proc_addr(
     XRFG_FAKE_FUNCTION("xrCreateSwapchain", fake_create_swapchain)
     XRFG_FAKE_FUNCTION("xrDestroySwapchain", fake_destroy_swapchain)
     XRFG_FAKE_FUNCTION("xrDestroySpace", fake_destroy_space)
+    XRFG_FAKE_FUNCTION("xrCreateReferenceSpace", fake_create_reference_space)
+    XRFG_FAKE_FUNCTION("xrLocateSpace", fake_locate_space)
     XRFG_FAKE_FUNCTION("xrPollEvent", fake_poll_event)
     XRFG_FAKE_FUNCTION("xrEnumerateSwapchainImages", fake_enumerate_swapchain_images)
     XRFG_FAKE_FUNCTION("xrAcquireSwapchainImage", fake_acquire_swapchain_image)
@@ -2388,6 +2518,14 @@ int main(int argc, char** argv) {
             // The bridge makes a D3D12 session, which takes the single
             // rings; the legacy interop and Vulkan mirror the rings.
             !(g_d3d11_interop_mode && !g_d3d11_bridge_mode) && !g_vulkan_mode;
+        std::array<wchar_t, 32> synthetic_pose{};
+        if (GetEnvironmentVariableW(L"XRFG_TEST_SYNTHETIC_POSE", synthetic_pose.data(),
+                static_cast<DWORD>(synthetic_pose.size())) == 0) {
+            GetPrivateProfileStringW(L"ofxr", L"synthetic_pose", L"interpolated",
+                synthetic_pose.data(), static_cast<DWORD>(synthetic_pose.size()),
+                ini.wstring().c_str());
+        }
+        g_synthetic_pose_interpolated = _wcsicmp(synthetic_pose.data(), L"real") != 0;
         if (GetPrivateProfileIntW(
                 L"ofxr", L"triple_frame_gen", 0, ini.wstring().c_str()) != 0) {
             // What the flag stands for in this file is the synthetic ring's
@@ -2923,11 +3061,17 @@ int main(int argc, char** argv) {
         const auto nearly_equal = [](float actual, float expected) {
             return std::fabs(actual - expected) <= 1.0e-5F;
         };
+        // previous_time: a synthetic's previous application frame, whose
+        // pose it is submitted part of the way from.
         const auto camera_matches = [&](const EndFrameRecord& record,
-                                        XrTime metadata_time) {
+                                        XrTime metadata_time,
+                                        XrTime previous_time) {
             for (std::uint32_t index = 0; index < record.poses.size(); ++index) {
-                const XrView expected =
+                XrView expected =
                     fake_submitted_view_for_time(metadata_time, index);
+                if (previous_time != 0) {
+                    expected.pose = fake_synthetic_pose(previous_time, metadata_time, 0.5F, index);
+                }
                 const XrPosef& pose = record.poses[index];
                 const XrFovf& fov = record.fovs[index];
                 if (!nearly_equal(pose.orientation.y, expected.pose.orientation.y) ||
@@ -2973,7 +3117,9 @@ int main(int argc, char** argv) {
                        passthrough_layer_preserved &&
                    end_records[index].passthrough_layer_index ==
                        passthrough_layer_index &&
-                   camera_matches(end_records[index], metadata_time);
+                   // The pair's previous application frame is a period back.
+                   camera_matches(end_records[index], metadata_time,
+                       target == SubmittedTarget::synthetic ? metadata_time - 100 : 0);
         };
         const bool valid =
             frame_sequence_succeeded && teardown_succeeded &&
@@ -3651,11 +3797,23 @@ int main(int argc, char** argv) {
             (refusals == 1 &&
              g_destroy_swapchain_calls.load(std::memory_order_relaxed) ==
                  g_create_swapchain_calls.load(std::memory_order_relaxed) - refusals);
+        std::vector<EndFrameRecord> end_records;
+        {
+            std::scoped_lock lock(g_end_records_mutex);
+            end_records = g_end_records;
+        }
+        // Each synthetic's pose, at either multiplier. The swapchain budget
+        // leaves a 3X session one synthetic slot, which holds it to pairs.
+        int judged_poses =
+            judge_synthetic_poses(end_records, g_frames_per_application_frame);
+        if (judged_poses == 0 && g_swapchain_budget_mode) {
+            judged_poses = judge_synthetic_poses(end_records, 2);
+        }
         // The fake runtime never throttles this mode, so vulkan stays
         // inline here; only the single-threaded device forbids a presenter.
         const bool valid = frame_sequence_succeeded && teardown_succeeded &&
             (off_thread == 0 || g_vulkan_mode) && pixel_failures == 0 &&
-            budget_valid &&
+            budget_valid && judged_poses >= 2 &&
             (!g_d3d11_bridge_mode ||
              g_bridge_session_bound.load(std::memory_order_acquire)) &&
             // The private depth swapchain's information never reaches the
@@ -3675,6 +3833,7 @@ int main(int argc, char** argv) {
                       << teardown_succeeded << " off-thread=" << off_thread
                       << " synthetic=" << synthetic_acquires
                       << " stale-pixels=" << pixel_failures
+                      << " judged-poses=" << judged_poses
                       << " private-depth=" << private_depth
                       << " budget-refusals=" << refusals
                       << " creates=" << g_create_swapchain_calls.load()
@@ -4151,9 +4310,13 @@ int main(int argc, char** argv) {
         }
         const std::uint32_t waits =
             g_wait_frame_calls.load(std::memory_order_relaxed);
+        // Each synthetic's pose, as the presenter hands it over.
+        const int judged_poses =
+            judge_synthetic_poses(end_records, g_frames_per_application_frame);
         const bool valid = frame_sequence_succeeded && teardown_succeeded &&
             g_submission_after_destroy.load() == 0 &&
             matched_targets == expected_generated_order.size() &&
+            judged_poses >= 2 &&
             waits == g_begin_frame_calls.load(std::memory_order_relaxed) &&
             waits == g_end_frame_calls.load(std::memory_order_relaxed) &&
             waits > application_frames.size() &&
@@ -4166,6 +4329,7 @@ int main(int argc, char** argv) {
             std::cerr << "SteamVR presenter validation failed: sequence="
                       << frame_sequence_succeeded << " teardown="
                       << teardown_succeeded << " matched=" << matched_targets
+                      << " judged-poses=" << judged_poses
                       << " after-destroy=" << g_submission_after_destroy.load()
                       << " refusals=" << g_layer_refusals.load()
                       << " waits=" << waits << " begins="
@@ -4475,11 +4639,14 @@ int main(int argc, char** argv) {
     const bool submitted_camera_differs_from_locate =
         !pose_matches(submitted_reference.pose, located_reference.pose) &&
         !fov_matches(submitted_reference.fov, located_reference.fov);
+    // previous_time: for a synthetic, the application frame before its own,
+    // whose pose it is submitted part of the way from.
     const auto record_matches = [&](std::size_t index,
                                     XrTime time,
                                     SubmittedTarget target,
                                     std::uint32_t layer_count,
-                                    XrTime metadata_time) {
+                                    XrTime metadata_time,
+                                    XrTime previous_time) {
         if (index >= end_records.size() ||
             end_records[index].display_time != time ||
             end_records[index].target != target ||
@@ -4500,9 +4667,13 @@ int main(int argc, char** argv) {
             return false;
         }
         for (std::uint32_t view_index = 0; view_index < 2; ++view_index) {
-            const XrView expected = fake_submitted_view_for_time(
+            XrView expected = fake_submitted_view_for_time(
                 metadata_time,
                 view_index);
+            if (target == SubmittedTarget::synthetic) {
+                expected.pose = fake_synthetic_pose(
+                    previous_time, metadata_time, 0.5F, view_index);
+            }
             if (!pose_matches(end_records[index].poses[view_index], expected.pose) ||
                 !fov_matches(end_records[index].fovs[view_index], expected.fov)) {
                 return false;
@@ -4551,6 +4722,11 @@ int main(int argc, char** argv) {
     }
 
     bool frame_outputs_valid = end_records.size() == expected_ends.size();
+    // The application frames go down in order and a pair's synthetic before
+    // its real frame, so a synthetic's previous application frame is the
+    // metadata of the submission before it. Frame e pairs with frame d across
+    // the frame that went down empty.
+    XrTime previous_application_time = 0;
     for (std::size_t index = 0;
          frame_outputs_valid && index < expected_ends.size();
          ++index) {
@@ -4558,7 +4734,11 @@ int main(int argc, char** argv) {
                                              expected_ends[index].display_time,
                                              expected_ends[index].target,
                                              expected_ends[index].layer_count,
-                                             expected_ends[index].metadata_time);
+                                             expected_ends[index].metadata_time,
+                                             previous_application_time);
+        if (expected_ends[index].metadata_time != 0) {
+            previous_application_time = expected_ends[index].metadata_time;
+        }
     }
 
     const std::array<XrTime, 10> expected_locate_times{

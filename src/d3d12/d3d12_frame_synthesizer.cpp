@@ -105,8 +105,15 @@ constexpr UINT kNvidiaTimestampCompositionEnd = 4;
 constexpr UINT kSpanBegin = 5;
 constexpr UINT kSpanEnd = 6;
 constexpr UINT kTimestampCount = 7;
-constexpr float kPositionToleranceMeters = 1.0e-4F;
 constexpr float kCameraTolerance = 1.0e-5F;
+// Bit 4 of synthesis_flags: the synthetic is generated in a camera of its own
+// rather than B's. The rotation from it into B's rides in the other view's
+// mapping (apply_synthetic_camera).
+constexpr UINT kSyntheticCameraFlag = 16U;
+// A target camera turned from B's by less than this - two microradians, a
+// few thousandths of a pixel at any eye resolution - is B's own: what a pose
+// copied from B comes to after the rotation between them is formed in float.
+constexpr float kSyntheticCameraMinimumTurn = 1.0e-6F;
 constexpr D3D12_RESOURCE_STATES kShaderReadState =
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -323,7 +330,9 @@ struct SynthesisParameters {
     std::array<CameraMapping, kMaxReprojectionViews> previous_mappings{};
     UINT slice{};
     // Bit 0 is the repeated-capture flag; bit 1 asks the pack shaders to
-    // sRGB-encode the flow input; bits 8-23 carry the synthetic's position
+    // sRGB-encode the flow input; bits 2 and 3 describe extrapolation's
+    // depth; bit 4 says the synthetic has a camera of its own
+    // (kSyntheticCameraFlag); bits 8-23 carry the synthetic's position
     // between the two captures in 1/65535ths. They share a slot because the
     // root signature is full - see the assert below.
     UINT synthesis_flags{};
@@ -605,32 +614,6 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
     commands->ClearRenderTargetView(rtv, colour ? colour : purple, 1, &mark);
 }
 
-[[nodiscard]] bool same_position(
-    const Vec3& left,
-    const Vec3& right) noexcept {
-    const float delta_x = left.x - right.x;
-    const float delta_y = left.y - right.y;
-    const float delta_z = left.z - right.z;
-    return delta_x * delta_x + delta_y * delta_y + delta_z * delta_z <=
-           kPositionToleranceMeters * kPositionToleranceMeters;
-}
-
-[[nodiscard]] float quaternion_dot(
-    const Quaternion& left,
-    const Quaternion& right) noexcept {
-    return left.x * right.x + left.y * right.y +
-           left.z * right.z + left.w * right.w;
-}
-
-[[nodiscard]] bool same_orientation(
-    Quaternion left,
-    Quaternion right) noexcept {
-    left = normalize(left);
-    right = normalize(right);
-    return std::abs(std::abs(quaternion_dot(left, right)) - 1.0F) <=
-           kCameraTolerance;
-}
-
 [[nodiscard]] bool same_fov(
     const D3D12FieldOfView& left,
     const D3D12FieldOfView& right) noexcept {
@@ -640,12 +623,14 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
            std::abs(left.angle_down - right.angle_down) <= kCameraTolerance;
 }
 
-[[nodiscard]] bool same_camera(
+// A synthetic's target camera may be turned from B's, but it projects as B
+// does: the same field of view into the same rectangle. That keeps the turn
+// from the target into B a pure rotation, which the composition evaluates per
+// pixel, and leaves the target where the runtime is told B's image lies.
+[[nodiscard]] bool same_projection(
     const D3D12ReprojectionView& left,
     const D3D12ReprojectionView& right) noexcept {
-    return same_position(left.pose.position, right.pose.position) &&
-           same_orientation(left.pose.orientation, right.pose.orientation) &&
-           same_fov(left.fov, right.fov) &&
+    return same_fov(left.fov, right.fov) &&
            left.image_rect.offset_x == right.image_rect.offset_x &&
            left.image_rect.offset_y == right.image_rect.offset_y &&
            left.image_rect.width == right.image_rect.width &&
@@ -720,7 +705,31 @@ void clear_synthetic_marker(ID3D12GraphicsCommandList* commands,
     };
 }
 
+// The rotation that takes a ray of a synthetic's target camera into B's, as
+// the composition turns it.
+[[nodiscard]] std::array<float, 4> target_to_current_rotation(
+    const D3D12ReprojectionView& current,
+    const D3D12ReprojectionView& target) noexcept {
+    return make_camera_mapping(current, target, 1, 1).target_to_source_rotation;
+}
+
+[[nodiscard]] bool camera_turned(const std::array<float, 4>& rotation) noexcept {
+    // The vector part's length is the sine of half the angle.
+    return std::sqrt(rotation[0] * rotation[0] + rotation[1] * rotation[1] +
+                     rotation[2] * rotation[2]) > kSyntheticCameraMinimumTurn * 0.5F;
+}
+
 }  // namespace
+
+float usable_synthesis_fraction(float fraction, bool extrapolate) noexcept {
+    if (!std::isfinite(fraction)) {
+        return extrapolate ? 1.0F : 0.5F;
+    }
+    if (extrapolate) {
+        return std::clamp(fraction, 1.0F, 3.0F);
+    }
+    return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
+}
 
 struct D3D12FrameSynthesizer::Impl {
     struct Destination {
@@ -880,6 +889,33 @@ struct D3D12FrameSynthesizer::Impl {
     // serves both.
     std::optional<std::uint32_t> extra_synthetic_destination;
     float extra_synthetic_fraction{0.5F};
+    // Each synthetic output's target camera, per view, as the rotation from
+    // it into the current capture's camera; set by every submit_pair beside
+    // the fractions. An output whose camera is B's in every view is drawn
+    // exactly as before, without the flag.
+    std::array<std::array<std::array<float, 4>, kMaxReprojectionViews>, 2>
+        synthetic_camera_rotations{};
+    std::array<bool, 2> synthetic_camera_turned{};
+
+    // Sets one composition draw's synthetic camera: the flag, and the rotation
+    // from the output's camera into B's in the other view's mapping, which a
+    // view's composition never reads for anything else - the pack, which
+    // reads both, has drawn by then. The caller restores the pair's mappings
+    // before each draw. A one-view resource's other mapping is unused anyway.
+    void apply_synthetic_camera(
+        SynthesisParameters& parameters,
+        UINT output,
+        UINT view_index) const noexcept {
+        const bool turned = synthetic_camera_turned[output];
+        parameters.synthesis_flags =
+            (parameters.synthesis_flags & ~kSyntheticCameraFlag) |
+            (turned ? kSyntheticCameraFlag : 0U);
+        if (turned) {
+            parameters.previous_mappings[1U - std::min(view_index, 1U)]
+                .target_to_source_rotation =
+                synthetic_camera_rotations[output][std::min(view_index, kMaxReprojectionViews - 1U)];
+        }
+    }
 
     [[nodiscard]] UINT synthetic_output_count() const noexcept {
         return extra_synthetic_destination ? 2U : 1U;
@@ -3049,11 +3085,14 @@ struct D3D12FrameSynthesizer::Impl {
         parameters.array_size = image_description.DepthOrArraySize;
         parameters.flow_block_size = 1;
         parameters.use_game_motion = 1;
+        // A against B's own camera: the synthetic's, where it has one of its
+        // own, is applied per draw.
         for (UINT view_index = 0; view_index < target_views.size(); ++view_index) {
             parameters.previous_mappings[view_index] = make_camera_mapping(
-                previous_source.views[view_index], target_views[view_index],
+                previous_source.views[view_index], current_source.views[view_index],
                 static_cast<UINT>(image_description.Width), image_description.Height);
         }
+        const auto view_mappings = parameters.previous_mappings;
 
         const auto rtv_start = rtv_heap->GetCPUDescriptorHandleForHeapStart();
         for (UINT output = 0; output < synthetic_output_count(); ++output) {
@@ -3116,6 +3155,8 @@ struct D3D12FrameSynthesizer::Impl {
                           guide->jitter_x - guide->previous_jitter_x,
                           guide->jitter_y - guide->previous_jitter_y}
                     : std::array<float, 2>{};
+                parameters.previous_mappings = view_mappings;
+                apply_synthetic_camera(parameters, output, view_index);
                 slot.command_list->SetGraphicsRoot32BitConstants(2,
                     kSynthesisConstantCount, &parameters, 0);
                 const auto rtv = offset_cpu_handle(rtv_start, first_rtv + slice, rtv_increment);
@@ -3549,15 +3590,18 @@ struct D3D12FrameSynthesizer::Impl {
         parameters.flow_width = flow_width;
         parameters.flow_height = flow_height;
         parameters.flow_block_size = flow_block_size;
+        // The pack warps A into B's own camera; the synthetic's is applied
+        // per composition draw.
         for (UINT view_index = 0;
              view_index < static_cast<UINT>(target_views.size());
              ++view_index) {
             parameters.previous_mappings[view_index] = make_camera_mapping(
                 previous_source.views[view_index],
-                target_views[view_index],
+                current_source.views[view_index],
                 static_cast<UINT>(image_description.Width),
                 image_description.Height);
         }
+        const auto view_mappings = parameters.previous_mappings;
         for (UINT eye_index = 0;
              eye_index < image_description.DepthOrArraySize;
              ++eye_index) {
@@ -3708,6 +3752,8 @@ struct D3D12FrameSynthesizer::Impl {
                     image_description.DepthOrArraySize);
                 parameters.slice = slice;
                 parameters.view_index = view_index;
+                parameters.previous_mappings = view_mappings;
+                apply_synthetic_camera(parameters, output, view_index);
                 const D3D12_GPU_DESCRIPTOR_HANDLE block = offset_gpu_handle(
                     gpu_start,
                     slice * kDescriptorBlockSize,
@@ -3923,6 +3969,9 @@ struct D3D12FrameSynthesizer::Impl {
             for (UINT output=0; output<synthetic_output_count(); ++output) {
                 outputs[output].image = synthetic_destinations[
                     synthetic_output_destination(output, synthetic_destination_index)].resource.Get();
+                if (synthetic_camera_turned[output]) {
+                    outputs[output].camera_to_current = synthetic_camera_rotations[output];
+                }
                 if (!full_coverage) copy(slot.command_list.Get(), outputs[output].image);
             }
             const UINT work_slot = static_cast<UINT>(&slot - work_slots.data());
@@ -4097,12 +4146,13 @@ struct D3D12FrameSynthesizer::Impl {
         parameters.flow_height = flow_height;
         parameters.flow_block_size = flow_block_size;
         parameters.slice = 0;
+        // A against B's own camera; the synthetic's is applied per draw.
         for (UINT view_index = 0;
              view_index < static_cast<UINT>(target_views.size());
              ++view_index) {
             parameters.previous_mappings[view_index] = make_camera_mapping(
                 previous_source.views[view_index],
-                target_views[view_index],
+                current_source.views[view_index],
                 static_cast<UINT>(image_description.Width),
                 image_description.Height);
         }
@@ -4219,6 +4269,8 @@ struct D3D12FrameSynthesizer::Impl {
                     image_description.DepthOrArraySize);
                 parameters.slice = slice;
                 parameters.view_index = view_index;
+                parameters.previous_mappings = view_mappings;
+                apply_synthetic_camera(parameters, output, view_index);
                 if (guides) {
                     // As record_game_motion_pair, but with the output
                     // rectangle packed 16 bits a value: the flow keeps its
@@ -4245,8 +4297,8 @@ struct D3D12FrameSynthesizer::Impl {
                         : std::array<float, 2>{};
                     if (nvidia_options.extrapolate) {
                         // The depth rectangle rides in the other view's
-                        // mapping, which this view's draw never reads.
-                        parameters.previous_mappings = view_mappings;
+                        // mapping, which this view's draw never reads, beside
+                        // any synthetic camera's rotation.
                         parameters.previous_mappings[1U - std::min(view_index, 1U)].source_rect = {
                             static_cast<float>(guide->depth_x), static_cast<float>(guide->depth_y),
                             static_cast<float>(guide->depth_width), static_cast<float>(guide->depth_height)};
@@ -4387,6 +4439,8 @@ struct D3D12FrameSynthesizer::Impl {
     [[nodiscard]] HRESULT record_repeated_pair(
         WorkSlot& slot,
         const RollingSource& retained_source,
+        // The camera metadata the repeated image arrived with this time.
+        std::span<const D3D12ReprojectionView> current_views,
         std::span<const D3D12ReprojectionView> target_views,
         std::uint32_t synthetic_destination_index,
         std::uint32_t current_destination_index,
@@ -4462,10 +4516,11 @@ struct D3D12FrameSynthesizer::Impl {
              ++view_index) {
             parameters.previous_mappings[view_index] = make_camera_mapping(
                 retained_source.views[view_index],
-                target_views[view_index],
+                current_views[view_index],
                 static_cast<UINT>(image_description.Width),
                 image_description.Height);
         }
+        const auto view_mappings = parameters.previous_mappings;
 
         const D3D12_GPU_DESCRIPTOR_HANDLE gpu_start =
             slot.descriptor_heap->GetGPUDescriptorHandleForHeapStart();
@@ -4487,6 +4542,8 @@ struct D3D12FrameSynthesizer::Impl {
                     image_description.DepthOrArraySize);
                 parameters.slice = slice;
                 parameters.view_index = view_index;
+                parameters.previous_mappings = view_mappings;
+                apply_synthetic_camera(parameters, output, view_index);
                 const UINT descriptor_base =
                     backend == D3D12OpticalFlowBackend::nvidia
                         ? slice * kDescriptorBlockSize
@@ -4946,28 +5003,28 @@ struct D3D12FrameSynthesizer::Impl {
         bool defer_current_copy,
         float interpolation_fraction,
         const std::optional<D3D12ExtraSynthetic>& extra_synthetic) noexcept {
-        // A degenerate interval says the pairing is not in a steady cadence;
-        // half is the safe answer there, not an extrapolation.
-        const auto usable_fraction = [](float fraction) noexcept {
-            return fraction > 0.05F && fraction < 0.95F ? fraction : 0.5F;
-        };
-        synthetic_fraction = nvidia_options.extrapolate
-            ? std::clamp(interpolation_fraction, 1.0F, 3.0F)
-            : usable_fraction(interpolation_fraction);
+        synthetic_fraction = usable_synthesis_fraction(
+            interpolation_fraction, nvidia_options.extrapolate);
         extra_synthetic_destination.reset();
+        synthetic_camera_turned = {};
         if (output_ticket == nullptr) {
             return E_POINTER;
         }
         *output_ticket = {};
+        // The extra synthetic's own camera, or the current capture's.
+        std::span<const D3D12ReprojectionView> extra_target_views =
+            current_source_views;
         if (extra_synthetic) {
             if (extra_synthetic->destination_index >= synthetic_destinations.size() ||
                 extra_synthetic->destination_index == synthetic_destination_index) {
                 return E_INVALIDARG;
             }
             extra_synthetic_destination = extra_synthetic->destination_index;
-            extra_synthetic_fraction = nvidia_options.extrapolate
-                ? std::clamp(extra_synthetic->interpolation_fraction, 1.0F, 3.0F)
-                : usable_fraction(extra_synthetic->interpolation_fraction);
+            extra_synthetic_fraction = usable_synthesis_fraction(
+                extra_synthetic->interpolation_fraction, nvidia_options.extrapolate);
+            if (!extra_synthetic->target_views.empty()) {
+                extra_target_views = extra_synthetic->target_views;
+            }
         }
         const bool repeated_capture =
             previous.active() && current.serial == previous.ticket.serial &&
@@ -4986,6 +5043,7 @@ struct D3D12FrameSynthesizer::Impl {
             previous.view_count !=
                 static_cast<UINT>(current_source_views.size()) ||
             synthetic_target_views.size() != current_source_views.size() ||
+            extra_target_views.size() != current_source_views.size() ||
             !valid_view_layout(
                 current_source_views,
                 static_cast<UINT>(image_description.Width),
@@ -4993,6 +5051,11 @@ struct D3D12FrameSynthesizer::Impl {
                 image_description.DepthOrArraySize) ||
             !valid_view_layout(
                 synthetic_target_views,
+                static_cast<UINT>(image_description.Width),
+                image_description.Height,
+                image_description.DepthOrArraySize) ||
+            !valid_view_layout(
+                extra_target_views,
                 static_cast<UINT>(image_description.Width),
                 image_description.Height,
                 image_description.DepthOrArraySize) ||
@@ -5010,27 +5073,44 @@ struct D3D12FrameSynthesizer::Impl {
             !same_view_layout(
                 current_source_views,
                 synthetic_target_views,
+                image_description.DepthOrArraySize) ||
+            !same_view_layout(
+                current_source_views,
+                extra_target_views,
                 image_description.DepthOrArraySize)) {
             return E_INVALIDARG;
         }
+        const std::array<std::span<const D3D12ReprojectionView>, 2> output_target_views{
+            synthetic_target_views,
+            extra_target_views,
+        };
         for (std::size_t view_index = 0;
              view_index < current_source_views.size();
              ++view_index) {
             const D3D12ReprojectionView& current_view =
                 current_source_views[view_index];
-            const D3D12ReprojectionView& target_view =
-                synthetic_target_views[view_index];
-            if (!valid_view(current_view) || !valid_view(target_view) ||
+            if (!valid_view(current_view) ||
                 !rect_within_resource(
                     current_view.image_rect,
                     static_cast<UINT>(image_description.Width),
-                    image_description.Height) ||
-                !rect_within_resource(
-                    target_view.image_rect,
-                    static_cast<UINT>(image_description.Width),
-                    image_description.Height) ||
-                !same_camera(current_view, target_view)) {
+                    image_description.Height)) {
                 return E_INVALIDARG;
+            }
+            for (std::size_t output = 0; output < output_target_views.size(); ++output) {
+                const D3D12ReprojectionView& target_view =
+                    output_target_views[output][view_index];
+                if (!valid_view(target_view) ||
+                    !rect_within_resource(
+                        target_view.image_rect,
+                        static_cast<UINT>(image_description.Width),
+                        image_description.Height) ||
+                    !same_projection(current_view, target_view)) {
+                    return E_INVALIDARG;
+                }
+                const auto rotation = target_to_current_rotation(current_view, target_view);
+                synthetic_camera_rotations[output][view_index] = rotation;
+                synthetic_camera_turned[output] =
+                    synthetic_camera_turned[output] || camera_turned(rotation);
             }
         }
         // Before anything is asked about outstanding work. A copy still
@@ -5085,6 +5165,7 @@ struct D3D12FrameSynthesizer::Impl {
             result = record_repeated_pair(
                 slot,
                 previous,
+                current_source_views,
                 synthetic_target_views,
                 synthetic_destination_index,
                 current_destination_index,
@@ -5132,6 +5213,7 @@ struct D3D12FrameSynthesizer::Impl {
             output_ticket->synthetic_destination_index =
                 synthetic_destination_index;
             output_ticket->current_destination_index = current_destination_index;
+            output_ticket->synthetics_in_target_camera = true;
             return S_OK;
         }
 
@@ -5248,6 +5330,8 @@ struct D3D12FrameSynthesizer::Impl {
         output_ticket->work_slot = work_slot_index;
         output_ticket->synthetic_destination_index = synthetic_destination_index;
         output_ticket->current_destination_index = current_destination_index;
+        // A skipped native pair copied B into its outputs.
+        output_ticket->synthetics_in_target_camera = !native_dlss || native_pair_generated;
         return S_OK;
     }
 

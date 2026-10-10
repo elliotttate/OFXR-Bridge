@@ -512,6 +512,10 @@ struct Dispatch {
     // and never consumes one; it records session state transitions so a
     // capture can say whether the runtime stopped asking for frames, and why.
     PFN_xrPollEvent poll_event{};
+    // Best-effort, like the two above: the recorder's reprojection_angle
+    // locates a VIEW space of the layer's own. Without them it is not written.
+    PFN_xrCreateReferenceSpace create_reference_space{};
+    PFN_xrLocateSpace locate_space{};
     // Best-effort, like the two above: forwarded unchanged unless a Vulkan
     // session was bridged to D3D12, where the runtime's DXGI list is shown
     // to the application as Vulkan formats.
@@ -1048,6 +1052,21 @@ struct SessionState {
     int extrapolate{};
     // Extrapolation with Meta's mesh warps rather than the gather.
     bool extrapolate_mesh{true};
+    // `[ofxr] synthetic_pose`: each synthetic is generated in and submitted
+    // with the head's pose at the instant it is shown, rather than the newer
+    // real frame's (synthetic_camera_snapshot). The application's xrEndFrame
+    // thread reads it; it is set at xrCreateSession, at control changes and
+    // by follow_synthetic_pose, which run on that thread too. Atomic for the
+    // presenter's reprojection_angle record, which only reports it.
+    std::atomic<bool> synthetic_pose_interpolated{true};
+    std::chrono::steady_clock::time_point synthetic_pose_poll_at{};
+    // The recorder's reprojection_angle: a VIEW space of the layer's own,
+    // made the first time a frame is handed over while the recorder runs, by
+    // the presenter or the application's thread, whichever hands frames over
+    // then; destroyed with the session.
+    std::mutex reprojection_space_mutex;
+    XrSpace reprojection_view_space{XR_NULL_HANDLE}; // reprojection_space_mutex
+    bool reprojection_space_attempted{}; // reprojection_space_mutex
     // One private swapchain per output with staging textures, where the
     // synthesizer writes D3D12 images directly; see kStagingSlotCount.
     // Read at xrCreateSession from `[ofxr] single_swapchain_rings`.
@@ -1757,6 +1776,106 @@ template <typename Call>
             ? nullptr
             : session.get(),
         std::forward<Call>(call));
+}
+
+// The recorder's reprojection_angle for a frame about to be handed to the
+// runtime (BridgeFlightOperation::reprojection_angle); kind is
+// presenter_submission's. Made before the hand-over rather than after it, so
+// the space the frame names cannot be destroyed under the locate: the layer
+// holds an application's xrDestroySpace until every frame naming that space
+// has gone down. Two xrLocateSpace calls a frame, and only while the
+// recorder runs.
+void log_reprojection_angle(
+    SessionState& state,
+    const XrFrameEndInfo& submitted,
+    std::uint32_t kind) noexcept {
+    try {
+        if (!xrfg::bridge_flight_logger().enabled() || submitted.layers == nullptr ||
+            state.dispatch->create_reference_space == nullptr ||
+            state.dispatch->locate_space == nullptr) {
+            return;
+        }
+        const XrCompositionLayerProjection* projection = nullptr;
+        for (std::uint32_t index = 0; index < submitted.layerCount && projection == nullptr; ++index) {
+            const XrCompositionLayerBaseHeader* layer = submitted.layers[index];
+            if (layer != nullptr && layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+            }
+        }
+        if (projection == nullptr || projection->viewCount == 0 || projection->views == nullptr) {
+            return;
+        }
+        XrSpace view_space = XR_NULL_HANDLE;
+        {
+            std::scoped_lock lock(state.reprojection_space_mutex);
+            if (!state.reprojection_space_attempted) {
+                state.reprojection_space_attempted = true;
+                XrReferenceSpaceCreateInfo info{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+                info.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+                info.poseInReferenceSpace.orientation.w = 1.0F;
+                XrSpace created = XR_NULL_HANDLE;
+                if (XR_SUCCEEDED(with_runtime_entry(&state, [&] {
+                        return state.dispatch->create_reference_space(state.handle, &info, &created);
+                    }))) {
+                    state.reprojection_view_space = created;
+                }
+            }
+            view_space = state.reprojection_view_space;
+        }
+        if (view_space == XR_NULL_HANDLE) {
+            return;
+        }
+        // The views' mean orientation: a headset that cants its eyes cants
+        // them symmetrically about the head, which this cancels, so a real
+        // frame shown when it was predicted for reads near zero.
+        const XrQuaternionf& first = projection->views[0].pose.orientation;
+        xrfg::Quaternion mean{0.0F, 0.0F, 0.0F, 0.0F};
+        for (std::uint32_t index = 0; index < projection->viewCount; ++index) {
+            const XrQuaternionf& view = projection->views[index].pose.orientation;
+            const float sign = view.x * first.x + view.y * first.y + view.z * first.z +
+                    view.w * first.w < 0.0F ? -1.0F : 1.0F;
+            mean.x += view.x * sign;
+            mean.y += view.y * sign;
+            mean.z += view.z * sign;
+            mean.w += view.w * sign;
+        }
+        const auto locate = [&](XrTime time, xrfg::Quaternion* orientation) {
+            XrSpaceLocation location{XR_TYPE_SPACE_LOCATION};
+            const XrResult result = with_runtime_entry(&state, [&] {
+                return state.dispatch->locate_space(view_space, projection->space, time, &location);
+            });
+            if (XR_FAILED(result) ||
+                (location.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT) == 0) {
+                return false;
+            }
+            *orientation = {location.pose.orientation.x, location.pose.orientation.y,
+                            location.pose.orientation.z, location.pose.orientation.w};
+            return true;
+        };
+        xrfg::Quaternion head{};
+        if (!locate(submitted.displayTime, &head)) {
+            return;
+        }
+        XrDuration period = 0;
+        {
+            std::scoped_lock lock(state.mutex);
+            period = state.minimum_runtime_display_period;
+        }
+        xrfg::Quaternion earlier{};
+        const bool turn_known = period > 0 && locate(submitted.displayTime - period, &earlier);
+        constexpr float kMillidegreesPerRadian = 180000.0F / 3.14159265F;
+        const auto millidegrees = [&](const xrfg::Quaternion& from, const xrfg::Quaternion& to) {
+            return static_cast<std::uint64_t>(
+                xrfg::rotation_angle(from, to) * kMillidegreesPerRadian + 0.5F);
+        };
+        xrfg::bridge_flight_logger().event(
+            xrfg::BridgeFlightOperation::reprojection_angle,
+            kind,
+            millidegrees(xrfg::normalize(mean), head),
+            turn_known ? millidegrees(earlier, head) : 0,
+            state.synthetic_pose_interpolated.load(std::memory_order_relaxed) ? 1U : 0U);
+    } catch (...) {
+    }
 }
 
 enum class PrivateOwnershipPhase {
@@ -4938,6 +5057,18 @@ XrResult layer_create_api_layer_instance_impl(
              "xrEnumerateSwapchainFormats",
              dispatch->enumerate_swapchain_formats)),
          true) &&
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrCreateReferenceSpace",
+             dispatch->create_reference_space)),
+         true) &&
+        (static_cast<void>(load_function(
+             next_get_instance_proc_addr,
+             created_instance,
+             "xrLocateSpace",
+             dispatch->locate_space)),
+         true) &&
         load_function(
             next_get_instance_proc_addr,
             created_instance,
@@ -5213,6 +5344,8 @@ XrResult layer_create_session_impl(
         xrfg::implicit_layer::read_extrapolate(current_layer_directory());
     state->extrapolate_mesh =
         xrfg::implicit_layer::read_extrapolate_mesh(current_layer_directory());
+    state->synthetic_pose_interpolated =
+        xrfg::implicit_layer::read_synthetic_pose_interpolated(current_layer_directory());
     {
         wchar_t value[8]{};
         const DWORD n =
@@ -5665,6 +5798,15 @@ XrResult layer_destroy_session_impl(XrSession session) {
             state->dispatch->destroy_space(grip);
         }
         grip = XR_NULL_HANDLE;
+    }
+    {
+        // The presenter, which also reads it, has stopped.
+        std::scoped_lock lock(state->reprojection_space_mutex);
+        if (state->reprojection_view_space != XR_NULL_HANDLE &&
+            state->dispatch->destroy_space != nullptr) {
+            state->dispatch->destroy_space(state->reprojection_view_space);
+        }
+        state->reprojection_view_space = XR_NULL_HANDLE;
     }
     for (const auto& swapchain_state : find_swapchains(state)) {
         std::scoped_lock call_lock(swapchain_state->call_mutex);
@@ -9077,6 +9219,8 @@ void continuous_presenter_main(
                     request ? request->sequence : 0,
                     fresh_synthetic ? 2u : (request ? 1u : 0u));
             }
+            log_reprojection_angle(
+                *state, submitted, request ? (fresh_synthetic ? 2U : 1U) : 0U);
             end_result = with_runtime_entry(state, [&] {
                 return state->fps_overlay
                     // No request is the presenter repeating what it already
@@ -10860,14 +11004,89 @@ build_reprojection_views(
 struct ProjectionResourceDestination {
     XrSwapchain application_swapchain{XR_NULL_HANDLE};
     XrSwapchain destination_swapchain{XR_NULL_HANDLE};
+    // The synthetic written there was generated in its own camera
+    // (D3D12FrameSynthesisTicket::synthetics_in_target_camera), so its views
+    // take their poses from that camera.
+    bool synthetic_camera{};
 };
 
+// A synthetic's own camera. A synthetic is shown between the two real frames
+// it is made from - after the newer one when extrapolating - and the runtime
+// reprojects every submitted image from the pose it was submitted with to the
+// head's pose when it is shown. Submitted with the newer frame's pose, a
+// synthetic shown a display period before that frame is turned back by the
+// head's motion over the period, and the edge it turns away from has no
+// pixels: under a head turn, black strips that flicker at the game's frame
+// rate (at 3X, 144 Hz and 120 degrees a second, 1.7 and 0.8 degrees of view
+// for the two synthetics). Here each view's pose is instead the one `fraction`
+// of the way from the previous frame's to the current one's - the share of
+// the span the synthetic's content is placed at, so the head's pose when it is
+// shown - with the current frame's field of view. The synthesizer generates
+// the synthetic in that camera and it is submitted with it.
+//
+// A turn or a move between the two frames that no head makes within a frame
+// - a recentre, a teleport - keeps the current frame's pose for every view:
+// what lies between two such poses is not a camera anyone looked from.
+constexpr float kMaxSyntheticCameraTurnRadians = 0.7853982F;  // 45 degrees
+constexpr float kMaxSyntheticCameraMoveMeters = 0.5F;
+
+[[nodiscard]] xrfg::Pose to_pose(const XrPosef& pose) noexcept {
+    return {
+        {pose.orientation.x, pose.orientation.y, pose.orientation.z, pose.orientation.w},
+        {pose.position.x, pose.position.y, pose.position.z},
+    };
+}
+
+[[nodiscard]] std::optional<ProjectionSnapshot> synthetic_camera_snapshot(
+    const ProjectionSnapshot& previous,
+    const ProjectionSnapshot& current,
+    float fraction) noexcept {
+    try {
+        if (previous.layers.size() != current.layers.size()) {
+            return std::nullopt;
+        }
+        ProjectionSnapshot camera = current;
+        for (std::size_t layer_index = 0; layer_index < camera.layers.size(); ++layer_index) {
+            auto& views = camera.layers[layer_index].views;
+            const auto& previous_views = previous.layers[layer_index].views;
+            if (previous_views.size() != views.size()) {
+                return std::nullopt;
+            }
+            for (std::size_t view_index = 0; view_index < views.size(); ++view_index) {
+                const xrfg::Pose from = to_pose(previous_views[view_index].pose);
+                const xrfg::Pose to = to_pose(views[view_index].pose);
+                const float move_x = to.position.x - from.position.x;
+                const float move_y = to.position.y - from.position.y;
+                const float move_z = to.position.z - from.position.z;
+                const float turn = xrfg::rotation_angle(from.orientation, to.orientation);
+                const float move = std::sqrt(move_x * move_x + move_y * move_y + move_z * move_z);
+                if (!(turn <= kMaxSyntheticCameraTurnRadians) ||
+                    !(move <= kMaxSyntheticCameraMoveMeters)) {
+                    return std::nullopt;
+                }
+                const xrfg::Pose shown = xrfg::pose_at_fraction(from, to, fraction);
+                views[view_index].pose = {
+                    {shown.orientation.x, shown.orientation.y, shown.orientation.z,
+                     shown.orientation.w},
+                    {shown.position.x, shown.position.y, shown.position.z},
+                };
+            }
+        }
+        return camera;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// camera: a synthetic's own camera (synthetic_camera_snapshot), whose poses
+// its views take where the destination says it was generated in it.
 [[nodiscard]] bool build_generated_frame_end_info(
     const XrFrameEndInfo* source,
     const ProjectionSnapshot& current_snapshot,
     bool synthetic,
     std::span<const ProjectionResourceDestination> destinations,
-    GeneratedFrameEndInfo* output) {
+    GeneratedFrameEndInfo* output,
+    const ProjectionSnapshot* camera = nullptr) {
     if (source == nullptr || output == nullptr || destinations.empty() ||
         source->layerCount == 0 || source->layers == nullptr ||
         current_snapshot.layers.empty()) {
@@ -10916,10 +11135,16 @@ struct ProjectionResourceDestination {
             }
             view.subImage.swapchain = destination->destination_swapchain;
             if (synthetic) {
-                // The V008 shader generates the synthetic image in B's camera
-                // reference. Its projection metadata must therefore remain
-                // B's render pose/FOV.
+                // The synthetic image is generated in B's field of view, and
+                // from B's pose or from a camera of its own: its projection
+                // metadata must say which. Nothing chained to B's view
+                // describes it.
                 view.next = nullptr;
+                if (camera != nullptr && destination->synthetic_camera &&
+                    projection_index < camera->layers.size() &&
+                    view_index < camera->layers[projection_index].views.size()) {
+                    view.pose = camera->layers[projection_index].views[view_index].pose;
+                }
             }
         }
         output->projections.push_back(std::move(copy));
@@ -11071,6 +11296,9 @@ struct PreparedGeneration {
     std::shared_ptr<xrfg::D3D12FrameSynthesizer> synthesizer;
     std::uint64_t copy_fence_value{};
     bool anchor_is_current{};
+    // The pair's synthetics were generated in the target cameras they were
+    // given; see D3D12FrameSynthesisTicket::synthetics_in_target_camera.
+    bool synthetics_in_target_camera{};
     // Set only when the release to the runtime is left to whoever hands the
     // frame over; the images stay acquired until then.
     std::shared_ptr<FrameGenerationSwapchainState> deferred_generation;
@@ -11100,12 +11328,18 @@ struct PreparedProjectionFrame {
     XrSwapchain failed_swapchain{XR_NULL_HANDLE};
     std::vector<PreparedProjectionResource> resources;
     bool anchor_is_current{};
+    // Every resource's synthetics were asked for in their own cameras.
+    bool synthetic_cameras{};
 };
 
 [[nodiscard]] PreparedGeneration prepare_frame_generation(
     XrSwapchain application_swapchain,
     bool request_pair,
     std::span<const xrfg::D3D12ReprojectionView> current_source_views,
+    // The cameras the synthetic and the second synthetic are generated in
+    // (synthetic_camera_snapshot). Empty: the current frame's.
+    std::span<const xrfg::D3D12ReprojectionView> synthetic_target_views,
+    std::span<const xrfg::D3D12ReprojectionView> extra_target_views,
     float interpolation_fraction,
     // Where a second synthetic belongs, for a session that makes one.
     std::optional<float> extra_interpolation_fraction,
@@ -11251,7 +11485,8 @@ struct PreparedProjectionFrame {
                     : static_cast<std::uint32_t>(extra_slot) *
                             generation->synthetic_images_per_slot +
                         extra_image.acquired_index,
-                *extra_interpolation_fraction};
+                *extra_interpolation_fraction,
+                extra_target_views};
         }
 
         // Deferring the current copy keeps a full-resolution copy the
@@ -11308,7 +11543,9 @@ struct PreparedProjectionFrame {
                                     ? generation->synthesizer->submit_pair(
                                           *capture,
                                           current_source_views,
-                                          current_source_views,
+                                          synthetic_target_views.empty()
+                                              ? current_source_views
+                                              : synthetic_target_views,
                                           synthetic_destination_index,
                                           current_destination_index,
                                           &ticket,
@@ -11445,6 +11682,8 @@ struct PreparedProjectionFrame {
         }
 
         output.anchor_is_current = true;
+        output.synthetics_in_target_camera =
+            request_pair && ticket.synthetics_in_target_camera;
         output.current_handle = current_image.handle;
         output.synthetic_handle = synthetic_image.handle;
         if (request_extra) {
@@ -11629,6 +11868,10 @@ struct PreparedProjectionFrame {
     bool request_pair,
     float interpolation_fraction,
     std::optional<float> extra_interpolation_fraction,
+    // The synthetics' own cameras (synthetic_camera_snapshot), or null for
+    // the current frame's.
+    const ProjectionSnapshot* synthetic_camera,
+    const ProjectionSnapshot* extra_synthetic_camera,
     bool release_at_handover) noexcept {
     PreparedProjectionFrame output{};
     try {
@@ -11641,8 +11884,31 @@ struct PreparedProjectionFrame {
             : PreparedGenerationKind::prime;
         bool all_expected_kind = true;
         bool all_anchor_current = true;
-        output.resources.reserve(mappings.size());
+        // The same views from the synthetics' own cameras, for every resource
+        // or none: the frame's views are submitted with one camera's poses,
+        // so a resource whose views could not be built would leave the frame
+        // half in one camera and half in the other.
+        using CameraViews = std::vector<xrfg::D3D12ReprojectionView>;
+        std::vector<CameraViews> synthetic_views;
+        std::vector<CameraViews> extra_views;
+        output.synthetic_cameras = request_pair && synthetic_camera != nullptr;
         for (const ProjectionResourceMapping& mapping : mappings) {
+            if (!output.synthetic_cameras) {
+                break;
+            }
+            auto views = build_reprojection_views(*synthetic_camera, mapping);
+            auto extra = extra_synthetic_camera
+                ? build_reprojection_views(*extra_synthetic_camera, mapping)
+                : std::optional<CameraViews>(CameraViews{});
+            output.synthetic_cameras = views.has_value() && extra.has_value();
+            if (output.synthetic_cameras) {
+                synthetic_views.push_back(std::move(*views));
+                extra_views.push_back(std::move(*extra));
+            }
+        }
+        output.resources.reserve(mappings.size());
+        for (std::size_t mapping_index = 0; mapping_index < mappings.size(); ++mapping_index) {
+            const ProjectionResourceMapping& mapping = mappings[mapping_index];
             const auto reprojection_views =
                 build_reprojection_views(snapshot, mapping);
             if (!reprojection_views) {
@@ -11650,12 +11916,19 @@ struct PreparedProjectionFrame {
                 output.failed_swapchain = mapping.application_swapchain;
                 return output;
             }
+            const auto camera_span = [&](const std::vector<CameraViews>& views) {
+                return output.synthetic_cameras
+                    ? std::span<const xrfg::D3D12ReprojectionView>(views[mapping_index])
+                    : std::span<const xrfg::D3D12ReprojectionView>();
+            };
             PreparedGeneration generation = prepare_frame_generation(
                 mapping.application_swapchain,
                 request_pair,
                 std::span<const xrfg::D3D12ReprojectionView>(
                     reprojection_views->data(),
                     reprojection_views->size()),
+                camera_span(synthetic_views),
+                camera_span(extra_views),
                 interpolation_fraction,
                 extra_interpolation_fraction,
                 release_at_handover);
@@ -11858,7 +12131,11 @@ struct InternalCycleResult {
     std::optional<XrFrameState> adopted_frame_state = std::nullopt,
     // The frame is a synthetic: 3X runs one cycle for its second synthetic
     // before the one for the real frame.
-    bool synthetic = false) {
+    bool synthetic = false,
+    // The frame is a synthetic for the recorder's reprojection_angle, where
+    // it differs from `synthetic`: extrapolating, this cycle carries the
+    // pair's synthetic, which the overlay has always counted as the real one.
+    std::optional<bool> recorded_synthetic = std::nullopt) {
     InternalCycleResult output{};
     if (state->dispatch->wait_frame == nullptr ||
         state->dispatch->begin_frame == nullptr ||
@@ -11933,6 +12210,7 @@ struct InternalCycleResult {
         submitted.layerCount);
     join_runtime_queue_to_application(
         state.get(), state->app_end_frame_release_value);
+    log_reprojection_angle(*state, submitted, recorded_synthetic.value_or(synthetic) ? 2U : 1U);
     const XrResult end_result = with_runtime_entry(state, [&] {
         return state->fps_overlay
             ? state->fps_overlay->end_frame(&submitted, synthetic)
@@ -12226,13 +12504,15 @@ void apply_embedded_control(
         static_cast<std::uint32_t>(control.desired.native_scale)};
     const bool dlss_motion_vectors =
         control.desired.motion_vectors == 1 || control.desired.frame_generation == 1;
-    // A control change also takes up the ini's choice of extrapolation warp
-    // and of the hybrid, so they can be compared with the other methods
-    // within one session.
+    // A control change also takes up the ini's choice of extrapolation warp,
+    // of the hybrid and of the synthetics' pose, so they can be compared with
+    // the other methods within one session.
     state->extrapolate_mesh =
         xrfg::implicit_layer::read_extrapolate_mesh(current_layer_directory());
     state->dlss_flow_hybrid =
         xrfg::implicit_layer::read_dlss_flow_hybrid(current_layer_directory());
+    state->synthetic_pose_interpolated =
+        xrfg::implicit_layer::read_synthetic_pose_interpolated(current_layer_directory());
     if (!state->dlss_vectors_published)
         state->dlss_vectors_published = xrfg::dlss_motion_vector_publications() != 0;
     synthesis_modes(*state, dlss_motion_vectors, options, backend);
@@ -12512,6 +12792,21 @@ struct PrivateDepthStrip {
     }
     storage.info.layers = storage.layers.data();
     return &storage.info;
+}
+
+// Follows `[ofxr] synthetic_pose` while the session runs, so the two can be
+// compared under the same head turn by editing the ini. Nothing has to be
+// drained: each pair takes its synthetics' cameras and the poses it submits
+// them with from one snapshot at its own xrEndFrame, so a pair already queued
+// keeps the setting it was made with. Read at most twice a second.
+void follow_synthetic_pose(SessionState& state) noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    if (now < state.synthetic_pose_poll_at) {
+        return;
+    }
+    state.synthetic_pose_poll_at = now + std::chrono::milliseconds(500);
+    state.synthetic_pose_interpolated =
+        xrfg::implicit_layer::read_synthetic_pose_interpolated(current_layer_directory());
 }
 
 // Follows the tray's "3X Frame Gen" switch while the session runs. Called at
@@ -12930,6 +13225,7 @@ XrResult layer_end_frame_impl(
     };
 
     apply_live_frame_multiplier(state, use_continuous_presenter);
+    follow_synthetic_pose(*state);
     log_video_memory_periodically(*state);
     apply_embedded_control(state, use_continuous_presenter);
     const bool manually_disarmed = state->manual_control.stop_requested();
@@ -13290,6 +13586,24 @@ XrResult layer_end_frame_impl(
                   ? synthetic_extrapolation_fraction(frames_per_frame, 1, game_step)
                   : synthetic_interpolation_fraction(frames_per_frame, 1))
             : std::nullopt;
+    // Each synthetic's own camera, at the share of the span its content is
+    // placed at (synthetic_camera_snapshot); none with `[ofxr]
+    // synthetic_pose=real`, or for a turn no head makes in a frame.
+    std::optional<ProjectionSnapshot> synthetic_camera;
+    std::optional<ProjectionSnapshot> extra_synthetic_camera;
+    if (previous_snapshot && metadata_pairable && state->synthetic_pose_interpolated) {
+        synthetic_camera = synthetic_camera_snapshot(
+            *previous_snapshot, current_snapshot,
+            xrfg::usable_synthesis_fraction(interpolation_fraction, extrapolating));
+        if (synthetic_camera && extra_interpolation_fraction) {
+            extra_synthetic_camera = synthetic_camera_snapshot(
+                *previous_snapshot, current_snapshot,
+                xrfg::usable_synthesis_fraction(*extra_interpolation_fraction, extrapolating));
+            if (!extra_synthetic_camera) {
+                synthetic_camera.reset();
+            }
+        }
+    }
     PreparedProjectionFrame prepared = prepare_projection_frame(
         current_snapshot,
         std::span<const ProjectionResourceMapping>(
@@ -13298,6 +13612,8 @@ XrResult layer_end_frame_impl(
         metadata_pairable,
         interpolation_fraction,
         extra_interpolation_fraction,
+        synthetic_camera ? &*synthetic_camera : nullptr,
+        extra_synthetic_camera ? &*extra_synthetic_camera : nullptr,
         // Released at the hand-over where the runtime has the layer's own
         // queue, in either pipeline: see the note on the release in
         // prepare_frame_generation. The shallow pipeline admits the next
@@ -13388,9 +13704,13 @@ XrResult layer_end_frame_impl(
     for (const PreparedProjectionResource& resource : prepared.resources) {
         extra_ready = extra_ready &&
             resource.generation.extra_synthetic_handle != XR_NULL_HANDLE;
+        // A synthetic generated in its own camera is submitted with it.
+        const bool synthetic_camera_used = prepared.synthetic_cameras &&
+            resource.generation.synthetics_in_target_camera;
         extra_destinations.push_back({
             resource.application_swapchain,
             resource.generation.extra_synthetic_handle,
+            synthetic_camera_used,
         });
         current_destinations.push_back({
             resource.application_swapchain,
@@ -13399,6 +13719,7 @@ XrResult layer_end_frame_impl(
         synthetic_destinations.push_back({
             resource.application_swapchain,
             resource.generation.synthetic_handle,
+            synthetic_camera_used,
         });
     }
     if (prepared.kind == PreparedGenerationKind::prime) {
@@ -13424,7 +13745,8 @@ XrResult layer_end_frame_impl(
             true,
             std::span<const ProjectionResourceDestination>(
                 synthetic_destinations.data(), synthetic_destinations.size()),
-            &first_generated);
+            &first_generated,
+            synthetic_camera ? &*synthetic_camera : nullptr);
         const bool current_built = build_generated_frame_end_info(
             end_info,
             current_snapshot,
@@ -13438,7 +13760,8 @@ XrResult layer_end_frame_impl(
             true,
             std::span<const ProjectionResourceDestination>(
                 extra_destinations.data(), extra_destinations.size()),
-            &extra_generated);
+            &extra_generated,
+            extra_synthetic_camera ? &*extra_synthetic_camera : nullptr);
         if (synthetic_built && current_built) {
             // The synthetic frame owns the deferred copies: they must reach
             // the queue after it has been handed to the runtime.
@@ -13678,6 +14001,12 @@ XrResult layer_end_frame_impl(
             extra_ready = false;
             prepare_reason = GenerationPrepareReason::private_release_failed;
         }
+        if (submitted_end_info != nullptr) {
+            // Extrapolating, the first frame down is the real one.
+            log_reprojection_angle(*state, *submitted_end_info,
+                submitted_end_info == &first_generated.info && first_generated.synthetic
+                    ? 2U : 1U);
+        }
         result = with_runtime_entry(state, [&] {
             return state->fps_overlay
                 ? state->fps_overlay->end_frame(submitted_end_info, pair_ready)
@@ -13879,7 +14208,9 @@ XrResult layer_end_frame_impl(
         current_generated.info,
         adopt_outstanding_wait && !extra_ready
             ? std::optional<XrFrameState>(state->last_inline_frame_state)
-            : std::nullopt);
+            : std::nullopt,
+        false,
+        current_generated.synthetic);
     if (adopt_outstanding_wait) {
         // frame_call_mutex is held on the inline path, so these are seen in
         // order by the application's next begin.

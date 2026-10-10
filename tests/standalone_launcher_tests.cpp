@@ -146,6 +146,14 @@ int main() {
         std::cerr << "diagnostics overrides not carried into the runtime ini\n";
         return 1;
     }
+    // `[ofxr] synthetic_pose=real`, set by hand, survives the rewrite; the
+    // default is the layer's own and is not written.
+    if (contains(default_runtime_ini, "synthetic_pose") ||
+        !contains(build_runtime_ini(release_defaults, 32, false, true),
+                  "\r\nsynthetic_pose=real\r\n\r\n[diagnostics]")) {
+        std::cerr << "synthetic_pose not carried into the runtime ini\n";
+        return 1;
+    }
 
     LauncherSettings settings;
     // Every value away from its default, so the round trip proves parsing.
