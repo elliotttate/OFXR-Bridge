@@ -958,6 +958,21 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                     -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
             set_tests_properties(xrfg_layer_shallow_${mode} PROPERTIES TIMEOUT 60)
         endforeach()
+        # `[ofxr] synthetic_pose=real`: the synthetics go down with the newer
+        # real frame's pose, as before the default gave each its own. The
+        # scenarios check the pose either way, reading the same ini.
+        foreach(mode default split-eye steamvr-presenter d3d11-bridge)
+            add_test(
+                NAME xrfg_layer_synthetic_pose_real_${mode}
+                COMMAND "${CMAKE_COMMAND}"
+                    "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                    "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                    "-DPIPELINE_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_synthetic_pose_real.ini"
+                    "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/synthetic-pose-real-${mode}"
+                    "-DMODE=${mode}"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_call_chain_depth.cmake")
+            set_tests_properties(xrfg_layer_synthetic_pose_real_${mode} PROPERTIES TIMEOUT 60)
+        endforeach()
         # Extrapolation, as Application SpaceWarp does: the real frame goes
         # down first and the synthetic a display period after it, inline, on
         # the presenter and pipelined.

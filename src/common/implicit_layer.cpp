@@ -319,6 +319,26 @@ bool read_dlss_flow_hybrid(const std::filesystem::path& module_directory) noexce
     }
 }
 
+bool read_synthetic_pose_interpolated(const std::filesystem::path& module_directory) noexcept {
+    try {
+        std::array<wchar_t, 32> value{};
+        DWORD length = GetEnvironmentVariableW(
+            L"XRFG_TEST_SYNTHETIC_POSE", value.data(), static_cast<DWORD>(value.size()));
+        if (length == 0 || length >= value.size()) {
+            if (module_directory.empty()) {
+                return true;
+            }
+            const auto ini_path = module_directory / L"ofxr_bridge.ini";
+            length = GetPrivateProfileStringW(L"ofxr", L"synthetic_pose", L"interpolated",
+                value.data(), static_cast<DWORD>(value.size()), ini_path.c_str());
+        }
+        // Only `real` turns it off: an unknown value keeps the default.
+        return !(length > 0 && length < value.size() && _wcsicmp(value.data(), L"real") == 0);
+    } catch (...) {
+        return true;
+    }
+}
+
 bool read_extrapolate_mesh(const std::filesystem::path& module_directory) noexcept {
     try {
         wchar_t value[8]{};
