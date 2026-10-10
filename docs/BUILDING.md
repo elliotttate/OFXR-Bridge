@@ -954,6 +954,28 @@ down at a promised time and every synthetic a period before one. The other
 call-chain scenarios pin the inline schedule as it was and run with the
 promise off.
 
+Both promises are measured against the time a real frame's poses were
+located for, not the time it is stamped with (`pose_time_of`): the layer
+keeps the application's last 64 xrLocateViews results (time, space, first
+view's pose) and takes the one whose pose the frame's first projection view
+carries, bit for bit, in the projection's space; a pose no recent locate
+returned leaves the stamp. UEVR locates a frame's poses on its game thread
+for the time its previous frame was promised (its pipeline state's frame
+state, moved a period on only when its game thread ran past the frame
+wait), and stamps the frame with its own wait's time: in Galactic Racer at
+2X every frame went down at its stamp, yet with the test head sway every
+frame needed a median 0.65 degrees of turning, and fitting the angles
+against the sway's known motion put the poses at -22.2 ms (RMS 53 against
+61 at +22.2 and 659 at 0). Measured against the poses, the presenter's
+correction settled at 5 periods instead of 3, real frames then needed 0
+degrees (median) and synthetics 0.004, and the fit moved to 0 ms. Its cap
+rose from 3 to 6. `xrfg_layer_promise_pose_lag` runs the promise call chain
+with an application that submits the poses it located for its previous
+frame's time (`XRFG_TEST_POSE_LAG=1`; the fake head moves there, since a
+still head gives every time the same poses): the correction moves two
+periods further and every real frame then goes down 20 ms before its stamp,
+at its poses' time.
+
 Two more test hooks move the runtime's own devices where it lists
 `XR_EXT_conformance_automation` (the Meta XR Simulator does), so that its
 compositor sees them: `XRFG_TEST_RUNTIME_FLIP_S=<period>` holds the right

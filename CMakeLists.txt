@@ -1203,6 +1203,18 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/promise-two-groups"
                 -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_promise_shown_time.cmake")
 
+        # An application whose poses are an application frame older than its
+        # stamp (UEVR): the promise follows the poses' time.
+        add_test(
+            NAME xrfg_layer_promise_pose_lag
+            COMMAND "${CMAKE_COMMAND}"
+                "-DLAYER_DLL=$<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>"
+                "-DCALL_CHAIN=$<TARGET_FILE:xrfg_layer_call_chain>"
+                "-DENABLED_INI=${CMAKE_CURRENT_SOURCE_DIR}/tests/ofxr_bridge_logging_enabled.ini"
+                "-DPOSE_LAG=1"
+                "-DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/promise-pose-lag"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/layer_promise_shown_time.cmake")
+
         add_test(
             NAME xrfg_layer_promise_shown_time_extrapolate
             COMMAND "${CMAKE_COMMAND}"
@@ -1241,6 +1253,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             xrfg_layer_promise_shown_time
             xrfg_layer_promise_shown_time_extrapolate
             xrfg_layer_promise_two_groups
+            xrfg_layer_promise_pose_lag
             xrfg_layer_rephase
             xrfg_layer_inline_promise
             PROPERTIES RESOURCE_LOCK xrfg_layer_long_call_chain RUN_SERIAL TRUE)

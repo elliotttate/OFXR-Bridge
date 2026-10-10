@@ -32,6 +32,15 @@ get_filename_component(layer_name "${LAYER_DLL}" NAME)
 if(DEFINED SLOW_FRAME_EVERY)
     set(ENV{XRFG_TEST_SLOW_FRAME_EVERY} ${SLOW_FRAME_EVERY})
 endif()
+# POSE_LAG: the application submits the poses it located for its previous
+# frame's time, as UEVR does. The promise follows those poses (pose_time_of),
+# so each real frame goes down an application frame - two 10 ms periods at
+# 2X - before the time it is stamped with, at the time its poses are for.
+set(expected_late 0)
+if(DEFINED POSE_LAG)
+    set(ENV{XRFG_TEST_POSE_LAG} 1)
+    set(expected_late -20000000)
+endif()
 # The correction follows two windows that agree: a run long enough that one
 # made late on a loaded machine still leaves frames to judge it by.
 set(ENV{XRFG_TEST_PROMISE_FRAMES} 400)
@@ -101,7 +110,7 @@ foreach(line IN LISTS lines)
     if(promised EQUAL 0)
         continue()
     endif()
-    math(EXPR late "${shown} - ${promised}")
+    math(EXPR late "${shown} - ${promised} - (${expected_late})")
     math(EXPR counted "${counted} + 1")
     if(late GREATER -5000000 AND late LESS 5000000)
         math(EXPR on_time "${on_time} + 1")

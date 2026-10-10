@@ -383,8 +383,12 @@ std::array<ComPtr<ID3D12Resource>, 3> g_synthetic_swapchain_right_b_images;
 
 [[nodiscard]] XrTime fake_camera_time(XrTime display_time) noexcept {
     if (g_promise_mode) {
-        // A still head: the scenario is about time, not motion.
-        return 0;
+        // A still head: the scenario is about time, not motion. Except where
+        // the poses carry the time (XRFG_TEST_POSE_LAG): the layer tells which
+        // locate a frame's poses came from by the poses, and a still head
+        // gives every time the same ones.
+        static const bool pose_lag = std::getenv("XRFG_TEST_POSE_LAG") != nullptr;
+        return pose_lag ? (display_time / kFakeDisplayPeriod) % 1000 : 0;
     }
     if (g_inline_promise_mode) {
         // Back and forth, so a long run keeps its field of view in bounds.
@@ -3441,10 +3445,17 @@ int main(int argc, char** argv) {
         reinterpret_cast<const XrCompositionLayerBaseHeader*>(&flight_quad),
     };
 
+    // XRFG_TEST_POSE_LAG=1 (promise-shown-time): the application submits the
+    // poses it located for its previous frame's time, as UEVR does, rather
+    // than poses of its own for the time it stamps the frame with.
+    static const bool pose_lag = std::getenv("XRFG_TEST_POSE_LAG") != nullptr;
+    XrTime previous_stamp_for_poses = 0;
     auto submit_frame = [&](XrTime display_time) {
         XrViewLocateInfo locate_info{XR_TYPE_VIEW_LOCATE_INFO};
         locate_info.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-        locate_info.displayTime = display_time;
+        locate_info.displayTime = pose_lag && previous_stamp_for_poses != 0
+            ? previous_stamp_for_poses : display_time;
+        previous_stamp_for_poses = display_time;
         locate_info.space = application_space;
         XrViewState view_state{XR_TYPE_VIEW_STATE};
         std::array<XrView, 2> views{{{XR_TYPE_VIEW}, {XR_TYPE_VIEW}}};
@@ -3463,7 +3474,7 @@ int main(int argc, char** argv) {
             const XrView submitted = fake_submitted_view_for_time(
                 display_time,
                 static_cast<std::uint32_t>(index));
-            projection_views[index].pose = submitted.pose;
+            projection_views[index].pose = pose_lag ? views[index].pose : submitted.pose;
             projection_views[index].fov = submitted.fov;
         }
 

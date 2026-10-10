@@ -566,6 +566,19 @@ hybrid under a new key and ignores the old one.
   When frames go down is unchanged; only the promise follows it.
   `xrfg_layer_promise_shown_time` checks it on the presenter, interpolating
   and extrapolating.
+- **UEVR games get head poses for the time they are shown.** UEVR locates a
+  frame's head pose on its game thread for the time its previous frame was
+  promised, so with frame generation every frame carried the head pose from
+  a whole game frame (22 ms at 2X on 90 Hz) before it was shown, and the
+  runtime turned it back by the head's motion since. With the head made to
+  turn up to 42 degrees a second in Galactic Racer, every frame needed a
+  median 0.65 degrees of turning, and the offset that fit was exactly -22.2
+  ms - the "fighting the camera" users reported in head turns. The promise
+  is now measured against the time the frame's poses were located for (the
+  xrLocateViews whose pose the frame carries) rather than the time it is
+  stamped with; there it settled one game frame later, and real frames then
+  needed 0 degrees (median) and generated ones 0.004. Games that render for
+  the time they stamp are unchanged (`xrfg_layer_promise_pose_lag`).
 - **Inline games are promised it too.** Where the bridge runs without its
   presenter thread (single-threaded D3D11 games, DCS, many titles on Virtual
   Desktop and Pimax), a pair goes down in the game's own frame - the generated

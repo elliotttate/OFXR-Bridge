@@ -1433,6 +1433,18 @@ struct SessionState {
     bool inline_promise{true};
     PromiseLateness presenter_promise;
     PromiseLateness inline_promise_lateness;
+    // The application's latest xrLocateViews results, for pose_time_of: the
+    // time asked for, the space and the first view's pose. Under
+    // located_mutex; written on the application's threads, read by whichever
+    // thread hands its real frames over.
+    struct LocatedViews {
+        XrTime time{};
+        XrSpace space{XR_NULL_HANDLE};
+        XrPosef pose{};
+    };
+    std::mutex located_mutex;
+    std::array<LocatedViews, 64> located{};
+    std::uint32_t located_next{};
     // Whether the runtime's last frame was at a multiple of the display
     // period, written by the presenter for the application's thread.
     std::atomic<bool> runtime_slowed{};
@@ -2011,6 +2023,52 @@ void drive_test_runtime_devices(SessionState& state, XrTime display_time) noexce
 
 [[nodiscard]] bool head_sway_enabled() noexcept;
 [[nodiscard]] float head_sway_yaw(XrTime time) noexcept;
+
+// The time the application located the poses a frame is submitted with:
+// that of the xrLocateViews whose first view's pose, in the frame's first
+// projection's space, is the frame's first view's, bit for bit. The promise
+// is measured against it (observe_promise_lateness), since a frame should be
+// rendered for the head pose at the time it is shown. Mostly that is the time
+// the frame is stamped with. UEVR locates a frame's poses on its game thread
+// for the time its previous frame was promised, so in Galactic Racer at 2X
+// every frame carried the head pose from 22.2 ms - an application frame -
+// before it was shown, in head turns one game frame of the turn, though it
+// went down at the time it was stamped with: with the test head sway, every
+// frame needed a median 0.65 degrees of turning, and the offset that fit the
+// angles was -22.2 ms. Measured against the pose time, the promise moves a
+// frame later, and the poses then land on the time they are shown at. A pose
+// no recent xrLocateViews returned leaves the stamp.
+[[nodiscard]] std::optional<XrTime> pose_time_of(
+    SessionState& state,
+    const XrFrameEndInfo& info) noexcept {
+    try {
+        const XrCompositionLayerProjection* projection = nullptr;
+        for (std::uint32_t index = 0; index < info.layerCount && info.layers != nullptr &&
+                                      projection == nullptr; ++index) {
+            const XrCompositionLayerBaseHeader* layer = info.layers[index];
+            if (layer != nullptr && layer->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+                projection = reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+            }
+        }
+        if (projection == nullptr || projection->viewCount == 0 || projection->views == nullptr) {
+            return std::nullopt;
+        }
+        const XrPosef& pose = projection->views[0].pose;
+        std::scoped_lock lock(state.located_mutex);
+        // Newest first: a pose located twice belongs to the later call.
+        for (std::size_t back = 1; back <= state.located.size(); ++back) {
+            const auto& entry = state.located[
+                (state.located_next + state.located.size() - back) % state.located.size()];
+            if (entry.time != 0 && entry.space == projection->space &&
+                std::memcmp(&entry.pose, &pose, sizeof(pose)) == 0) {
+                return entry.time;
+            }
+        }
+        return std::nullopt;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
 
 // The recorder's reprojection_angle for a frame about to be handed to the
 // runtime (BridgeFlightOperation::reprojection_angle); kind is
@@ -2920,7 +2978,9 @@ void observe_promise_lateness(
         --promise.settle;
         return;
     }
-    constexpr std::int32_t kMaximumCorrection = 3;
+    // Galactic Racer under UEVR with the deeper pipeline settles at five: the
+    // pipeline's three, and UEVR's poses an application frame early.
+    constexpr std::int32_t kMaximumCorrection = 6;
     const std::int32_t current =
         promise.correction_periods.load(std::memory_order_relaxed);
     const double periods =
@@ -9167,6 +9227,8 @@ void continuous_presenter_main(
         // The application's display time for the newest real frame this
         // submission is made from, for presenter_content.
         XrTime submitted_content_time = 0;
+        // The time its poses were located for (pose_time_of), else the stamp.
+        XrTime submitted_pose_time = 0;
         // Same, for the vsync lock. Recorded after presenter_mutex is released:
         // the presenter thread takes it every frame and logging under it has
         // deadlocked the layer twice.
@@ -9357,6 +9419,10 @@ void continuous_presenter_main(
             XrFrameEndInfo submitted{XR_TYPE_FRAME_END_INFO};
             if (source != nullptr) {
                 submitted_content_time = source->displayTime;
+                submitted_pose_time = request && request->owned_frame &&
+                        !request->owned_frame->synthetic
+                    ? pose_time_of(*state, *source).value_or(source->displayTime)
+                    : source->displayTime;
                 submitted = *source;
                 submitted.next = nullptr;
                 submitted.displayTime = frame_state.predictedDisplayTime;
@@ -10187,7 +10253,7 @@ void continuous_presenter_main(
             observe_promise_lateness(
                 *state,
                 state->presenter_promise,
-                frame_state.predictedDisplayTime - submitted_content_time,
+                frame_state.predictedDisplayTime - submitted_pose_time,
                 static_cast<XrDuration>(state->presenter_display_period),
                 frame_state.predictedDisplayPeriod);
         }
@@ -12655,8 +12721,9 @@ struct InternalCycleResult {
             period = state->minimum_runtime_display_period;
             applied = state->inline_promise_shift;
         }
-        const XrDuration uncorrected = frame_state.predictedDisplayTime -
-            (current_end_info.displayTime - applied);
+        const XrTime pose_time =
+            pose_time_of(*state, current_end_info).value_or(current_end_info.displayTime);
+        const XrDuration uncorrected = frame_state.predictedDisplayTime - (pose_time - applied);
         const auto correction = static_cast<XrDuration>(
             state->inline_promise_lateness.correction_periods.load(std::memory_order_relaxed));
         observe_promise_lateness(*state, state->inline_promise_lateness,
@@ -15054,6 +15121,16 @@ XRAPI_ATTR XrResult XRAPI_CALL layer_locate_views(
                 const XrVector3f turned = yaw_vector(yaw, offset);
                 views[i].pose.position = {centre.x + turned.x, centre.y + turned.y, centre.z + turned.z};
                 views[i].pose.orientation = yaw_then(yaw, views[i].pose.orientation);
+            }
+        }
+        if (XR_SUCCEEDED(result) && locate_info != nullptr && views != nullptr &&
+            view_count_output != nullptr && *view_count_output != 0 && view_capacity_input != 0) {
+            if (const auto state = find_session(session)) {
+                std::scoped_lock lock(state->located_mutex);
+                state->located[state->located_next % state->located.size()] = {
+                    locate_info->displayTime, locate_info->space, views[0].pose};
+                state->located_next = (state->located_next + 1) %
+                    static_cast<std::uint32_t>(state->located.size());
             }
         }
         if (locate_info != nullptr && xrfg::bridge_flight_logger().enabled()) {
