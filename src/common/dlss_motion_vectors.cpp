@@ -397,6 +397,7 @@ void publish_dlss_motion_vectors(
         frame->depth_height = publication.depth_height;
         frame->depth_resource_state = kSnapshotReadState;
         frame->frame_time_delta_ms = publication.frame_time_delta_ms;
+        frame->frame_time_known = publication.frame_time_known;
         frame->camera_near = publication.camera_near;
         frame->camera_far = publication.camera_far;
         frame->depth_inverted = publication.depth_inverted;

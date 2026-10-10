@@ -411,6 +411,21 @@ OpenXR session, and extrapolation wins if both are set.
   costs more of SteamVR's sixteen swapchains. Bootstrap Island uses OpenVR and
   is outside an OpenXR layer's reach; Hogwarts Legacy exits while this UEVR
   build hooks D3D12, before any OpenXR session.
+- **Extrapolation goes on by the game's own step.** The DLSS vectors span the
+  game's step from the previous frame - the frame time it gives DLSS - and a
+  frame extrapolated a display period on should show the scene a display
+  period of game time on: 1 + period / step, the fixed 1.5 only when the step
+  is the frame period. Galactic Racer's steps swing about the cadence (12-20
+  ms in one race at 60 frames a second) and back the next frame. Scored
+  against the game's own steps - the next frame's step spread over the
+  display until it is shown, which is what makes the shown motion even - the
+  layer's extrapolation erred 0.0596 on average where the fixed share erred
+  0.1103 and the stamps 0.1119 (0.0179 against 0.0266 in a steadier race).
+  Against display times alone, which assume the game steps evenly, the fixed
+  share stays closer (0.0050 against 0.0601); that assumption is what the
+  game's steps break. A game that gives DLSS no frame time, or a step outside
+  half to twice the frame period, keeps the fixed share. The flight log's
+  `dlss_evaluation` records carry the frame time.
 - **Only the images a projection uses are armed.** Any change from the tray -
   and the first one, at the start of every session - armed every swapchain
   the game had made that was still eligible, not only the ones a projection

@@ -181,6 +181,11 @@ void capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     g.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     g.depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
+    {
+        float given{};
+        g.frame_time_known=NVSDK_NGX_SUCCEED(p->Get(NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,&given))&&
+            std::isfinite(given)&&given>0.F;
+    }
     g.camera_near=get<float>(p,"DLSSG.CameraNear",camera_near);
     g.camera_far=get<float>(p,"DLSSG.CameraFar",camera_far);
     // Unknown flags defer to the camera's own depth convention.
@@ -204,7 +209,8 @@ void capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     }
     g.depth_infinite=infinite;
     publish_dlss_motion_vectors(g);
-    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_evaluation, 0,
+    xrfg::bridge_flight_logger().event(xrfg::BridgeFlightOperation::dlss_evaluation,
+        g.frame_time_known ? static_cast<std::int64_t>(std::lround(g.frame_time_delta_ms * 1000.0F)) : -1,
         g.stream, call, g.output_x);
     const HRESULT removed=md->GetDeviceRemovedReason();
     if(FAILED(removed))log("device_removed",static_cast<UINT>(removed),call);

@@ -778,7 +778,19 @@ release 14), at 3X a second race 0.0056 against 0.0187. Extrapolating, against
 the next frame's motion in hindsight (its hand-over interval spread over the
 display until it is shown), the cadence erred 0.0404 and the stamps 0.0451; a
 second race gave 0.0066 against 0.0091 against the last pair's motion and a
-tie against the next frame's (0.0335 against 0.0329).
+tie against the next frame's (0.0335 against 0.0329). Those two references
+judge extrapolation on display times and on hand-over times; the game's own
+steps are a third, and the right one: the DLSS vectors span the game's step
+from the previous frame (`FrameTimeDeltaInMsec`, recorded in
+`dlss_evaluation`), and the shown motion is even when the extrapolated frame
+sits midway in game time between the current frame and the next. Against
+that, scaling by the game's step (1 + period / step) erred 0.0179 where the
+fixed share erred 0.0266, the stamps 0.0303 and the hand-over interval
+0.0394, and live on that rule 0.0596 against 0.1103 in a race whose steps
+swung 12-20 ms; against display times alone the fixed share stays closer
+(0.0089 and 0.0050 against 0.0204 and 0.0601), as display times assume even
+steps. The layer extrapolates by the game's step where the game gives DLSS
+one between half and twice the frame period.
 `synthesis_fraction` records each pair's fraction and stamp gap in the flight
 log, and `xrfg_layer_cadence_fraction` checks on the fake runtime, with
 repeated stamps and the rate halved part way (`XRFG_TEST_REPEAT_STAMP_EVERY`,

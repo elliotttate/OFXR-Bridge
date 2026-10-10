@@ -244,9 +244,10 @@ enum class BridgeFlightOperation : std::uint32_t {
     // between the two frames' display times in microseconds, b the
     // frames per application frame, c the current frame's display time.
     synthesis_fraction,
-    // A game's DLSS evaluation, captured as a guide set: a the DLSS handle,
-    // b how many evaluations were captured to then, c its output rectangle's
-    // x offset.
+    // A game's DLSS evaluation, captured as a guide set: result the frame time
+    // the game gave DLSS (FrameTimeDeltaInMsec) in microseconds, -1 when it gave
+    // none, a the DLSS handle, b how many evaluations were captured to then, c
+    // its output rectangle's x offset.
     dlss_evaluation,
 };
 

@@ -48,6 +48,9 @@ struct DlssMotionVectorPublication {
     // A cooperating producer may supply the native D3D12 device after it has
     // unwrapped and identity-checked every object in the publication.
     ID3D12Device* verified_producer_device{};
+    // Whether the game gave DLSS its frame time (frame_time_delta_ms is
+    // otherwise a default).
+    bool frame_time_known{};
 };
 
 struct DlssMotionVectorFrame {
@@ -95,6 +98,8 @@ struct DlssMotionVectorFrame {
     // snapshot cropped them: what tells eyes sharing one target apart.
     std::uint32_t source_motion_x{};
     std::uint32_t source_depth_x{};
+    // Whether the game gave DLSS its frame time.
+    bool frame_time_known{};
 };
 
 constexpr std::uint32_t kDlssMotionVectorEyeCount = 2;

@@ -11371,10 +11371,67 @@ struct PreparedProjectionFrame {
     std::uint32_t index) noexcept {
     return static_cast<float>(index + 1) / static_cast<float>(frames);
 }
+// Extrapolating goes on from the current frame along its motion, which spans
+// the game's own step from the previous frame - the frame time it gives DLSS.
+// The synthetic should show the scene `periods` display periods of game time
+// on: 1 + periods / (the game's step in display periods), which is the
+// cadence's share when the step is the frame period. The game's step swings
+// about the cadence and back the next frame, so the fixed share overshoots
+// after a long step and falls short after a short one. In a Galactic Racer
+// race scored against the game's own frame times (the next frame's step
+// spread over the display until it is shown), this erred 0.0179 on average
+// where the fixed share erred 0.0266, the stamps 0.0303 and the hand-over
+// interval 0.0394. Without the game's frame time, or with a step outside
+// half to twice the frame period, the fixed share.
 [[nodiscard]] float synthetic_extrapolation_fraction(
     std::uint32_t frames,
-    std::uint32_t periods) noexcept {
-    return 1.0F + static_cast<float>(periods) / static_cast<float>(frames);
+    std::uint32_t periods,
+    float game_step_periods = 0.0F) noexcept {
+    const float frames_f = static_cast<float>(frames);
+    if (game_step_periods >= frames_f * 0.5F && game_step_periods <= frames_f * 2.0F) {
+        return 1.0F + static_cast<float>(periods) / game_step_periods;
+    }
+    return 1.0F + static_cast<float>(periods) / frames_f;
+}
+
+// The game's step to the current frame in display periods, from the frame
+// time it gave DLSS with this frame's vectors; 0 when it gave none.
+[[nodiscard]] float game_step_display_periods(
+    SessionState& state,
+    std::span<const ProjectionResourceMapping> mappings) noexcept {
+    try {
+        if (mappings.empty()) {
+            return 0.0F;
+        }
+        const auto swapchain = find_swapchain(mappings.front().application_swapchain);
+        if (!swapchain) {
+            return 0.0F;
+        }
+        std::shared_ptr<const xrfg::DlssMotionVectorSet> vectors;
+        {
+            std::scoped_lock lock(swapchain->mutex);
+            vectors = swapchain->last_released_motion_vectors;
+        }
+        if (!vectors || vectors->eye_count == 0 || !vectors->eyes[0] ||
+            !vectors->eyes[0]->frame_time_known) {
+            return 0.0F;
+        }
+        XrDuration period = 0;
+        {
+            std::scoped_lock lock(state.mutex);
+            period = state.minimum_runtime_display_period;
+        }
+        // While SteamVR has halved the rate a display period is two.
+        if (state.runtime_slowed.load(std::memory_order_relaxed)) {
+            period *= 2;
+        }
+        if (period <= 0) {
+            return 0.0F;
+        }
+        return vectors->eyes[0]->frame_time_delta_ms * 1.0e6F / static_cast<float>(period);
+    } catch (...) {
+        return 0.0F;
+    }
 }
 
 [[nodiscard]] PreparedProjectionFrame prepare_projection_frame(
@@ -12805,8 +12862,14 @@ XrResult layer_end_frame_impl(
     // frames - 1 periods after it, and a 3X second synthetic one period
     // after it.
     const bool extrapolating = !native_dlss && state->nvidia_options.extrapolate;
+    const float game_step = extrapolating
+        ? game_step_display_periods(
+              *state,
+              std::span<const ProjectionResourceMapping>(
+                  resource_mappings.mappings.data(), resource_mappings.mappings.size()))
+        : 0.0F;
     const float interpolation_fraction = extrapolating
-        ? synthetic_extrapolation_fraction(frames_per_frame, frames_per_frame - 1)
+        ? synthetic_extrapolation_fraction(frames_per_frame, frames_per_frame - 1, game_step)
         : synthetic_interpolation_fraction(frames_per_frame, 0);
     if (previous_snapshot && metadata_pairable && !native_dlss) {
         xrfg::bridge_flight_logger().event(
@@ -12823,7 +12886,7 @@ XrResult layer_end_frame_impl(
     const std::optional<float> extra_interpolation_fraction =
         frames_per_frame > 2
             ? std::optional<float>(extrapolating
-                  ? synthetic_extrapolation_fraction(frames_per_frame, 1)
+                  ? synthetic_extrapolation_fraction(frames_per_frame, 1, game_step)
                   : synthetic_interpolation_fraction(frames_per_frame, 1))
             : std::nullopt;
     PreparedProjectionFrame prepared = prepare_projection_frame(
