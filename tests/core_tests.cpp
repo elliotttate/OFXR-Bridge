@@ -52,6 +52,38 @@ int main() {
     expect(near(std::abs(same_rotation_other_sign.w), std::cos(std::numbers::pi_v<float> / 12.0F)),
            "quaternion sign uses shortest path");
 
+    // A synthetic's own pose: inside the span it is the interpolation, past
+    // it the same turn carries on - 1.5 of a 90-degree yaw is 135 degrees.
+    const xrfg::Pose third = xrfg::pose_at_fraction(start, end, 1.0F / 3.0F);
+    const xrfg::Pose third_slerp = xrfg::interpolate_pose(start, end, 1.0F / 3.0F);
+    expect(near(third.orientation.y, third_slerp.orientation.y) &&
+               near(third.orientation.w, third_slerp.orientation.w) &&
+               near(third.position.z, third_slerp.position.z),
+           "pose_at_fraction matches the interpolation inside the span");
+    const xrfg::Pose beyond = xrfg::pose_at_fraction(start, end, 1.5F);
+    expect(near(beyond.orientation.y, yaw(135.0F).y) && near(beyond.orientation.w, yaw(135.0F).w),
+           "pose_at_fraction carries the turn on past the second pose");
+    expect(near(beyond.position.x, 3.0F) && near(beyond.position.y, 4.0F) &&
+               near(beyond.position.z, 8.0F),
+           "pose_at_fraction carries the translation on past the second pose");
+    const xrfg::Pose tilted_start{{0.0F, 0.0F, std::sin(0.2F), std::cos(0.2F)}, {}};
+    const xrfg::Pose tilted_end{{std::sin(0.05F) * 0.6F, std::sin(0.05F) * 0.8F, 0.0F,
+                                 std::cos(0.05F)}, {}};
+    const xrfg::Pose tilted_half = xrfg::pose_at_fraction(tilted_start, tilted_end, 0.5F);
+    const xrfg::Pose tilted_slerp = xrfg::interpolate_pose(tilted_start, tilted_end, 0.5F);
+    expect(xrfg::rotation_angle(tilted_half.orientation, tilted_slerp.orientation) < 1.0e-4F,
+           "pose_at_fraction matches slerp about an arbitrary axis");
+    expect(near(xrfg::rotation_angle(yaw(10.0F), yaw(40.0F)),
+                30.0F * std::numbers::pi_v<float> / 180.0F),
+           "rotation_angle measures a yaw");
+    expect(near(xrfg::rotation_angle(yaw(10.0F), {-yaw(40.0F).x, -yaw(40.0F).y,
+                                                   -yaw(40.0F).z, -yaw(40.0F).w}),
+                30.0F * std::numbers::pi_v<float> / 180.0F),
+           "rotation_angle ignores the quaternion's sign");
+    expect(near(xrfg::rotation_angle(yaw(10.0F), yaw(10.002F)),
+                0.002F * std::numbers::pi_v<float> / 180.0F, 2.0e-6F),
+           "rotation_angle resolves thousandths of a degree");
+
     const xrfg::TimedPose timed_start{100, start};
     const xrfg::TimedPose timed_end{200, end};
     const auto timed_middle = xrfg::midpoint(timed_start, timed_end);

@@ -79,6 +79,58 @@ Pose interpolate_pose(const Pose& from, const Pose& to, float alpha) noexcept {
     };
 }
 
+Pose pose_at_fraction(const Pose& from, const Pose& to, float fraction) noexcept {
+    const float clamped = std::isfinite(fraction) ? std::max(fraction, 0.0F) : 0.0F;
+    const Quaternion start = normalize(from.orientation);
+    const Quaternion end = normalize(to.orientation);
+    // The rotation from `from` to `to` in from's own frame, the short way.
+    Quaternion delta = normalize({
+        start.w * end.x - start.x * end.w - start.y * end.z + start.z * end.y,
+        start.w * end.y + start.x * end.z - start.y * end.w - start.z * end.x,
+        start.w * end.z - start.x * end.y + start.y * end.x - start.z * end.w,
+        start.w * end.w + start.x * end.x + start.y * end.y + start.z * end.z,
+    });
+    if (delta.w < 0.0F) {
+        delta = {-delta.x, -delta.y, -delta.z, -delta.w};
+    }
+    const float axis_length =
+        std::sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    // Below a few microradians the axis is noise; the small-angle form is exact
+    // there to float precision.
+    Quaternion turned = normalize({delta.x * clamped, delta.y * clamped, delta.z * clamped, 1.0F});
+    if (axis_length > 1.0e-6F) {
+        const float half_angle = std::atan2(axis_length, delta.w) * clamped;
+        const float axis_scale = std::sin(half_angle) / axis_length;
+        turned = {delta.x * axis_scale, delta.y * axis_scale, delta.z * axis_scale,
+                  std::cos(half_angle)};
+    }
+    return {
+        normalize({
+            start.w * turned.x + start.x * turned.w + start.y * turned.z - start.z * turned.y,
+            start.w * turned.y - start.x * turned.z + start.y * turned.w + start.z * turned.x,
+            start.w * turned.z + start.x * turned.y - start.y * turned.x + start.z * turned.w,
+            start.w * turned.w - start.x * turned.x - start.y * turned.y - start.z * turned.z,
+        }),
+        {
+            from.position.x + (to.position.x - from.position.x) * clamped,
+            from.position.y + (to.position.y - from.position.y) * clamped,
+            from.position.z + (to.position.z - from.position.z) * clamped,
+        },
+    };
+}
+
+float rotation_angle(Quaternion from, Quaternion to) noexcept {
+    from = normalize(from);
+    to = normalize(to);
+    // A quaternion and its negation are one rotation: take the nearer.
+    const float sign = dot(from, to) < 0.0F ? -1.0F : 1.0F;
+    const Quaternion difference = scale_add(from, 1.0F, to, -sign);
+    // From the chord between them, which resolves thousandths of a degree,
+    // rather than the acos of a dot product within a float ulp of 1, which
+    // does not: the chord is 2 sin(angle / 4).
+    return 4.0F * std::asin(std::min(std::sqrt(dot(difference, difference)) * 0.5F, 1.0F));
+}
+
 std::optional<TimedPose> midpoint(const TimedPose& previous, const TimedPose& current) noexcept {
     if (current.time_ns <= previous.time_ns) {
         return std::nullopt;
