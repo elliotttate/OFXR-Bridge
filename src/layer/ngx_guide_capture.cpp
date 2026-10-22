@@ -4,19 +4,23 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/third_party/uevr_api.h"
 #include <windows.h>
+#include <psapi.h>
 #include <wrl/client.h>
 #include <nvsdk_ngx_params.h>
 #include <safetyhook.hpp>
 #include <d3d12sdklayers.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdio>
 #include <cmath>
+#include <cwctype>
 #include <share.h>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace xrfg { namespace {
@@ -33,10 +37,15 @@ struct Module {
     Create create{}; Evaluate evaluate{};
     HMODULE retained{};
 };
+// One slot per DLSS feature module found (install): the game's own and NGX's
+// store can both be loaded at once.
+constexpr UINT kModuleSlots=8;
 struct Capture {
     std::mutex mutex, log_mutex;
     ComPtr<ID3D12CommandQueue> queue;
-    std::array<Module,2> modules;
+    std::array<Module,kModuleSlots> modules;
+    // Modules without the two exports, or whose hooks failed: not tried again.
+    std::vector<HMODULE> refused;
     std::unordered_map<const NVSDK_NGX_Handle*,Feature> features;
     std::atomic_bool active{false}, started{false}, camera_ready{false};
     std::atomic_uint64_t calls{0};
@@ -180,6 +189,7 @@ void capture(ID3D12GraphicsCommandList* list,const NVSDK_NGX_Handle* handle,
     g.reset=get<int>(p,NVSDK_NGX_Parameter_Reset)!=0;
     g.resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     g.depth_resource_state=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    g.copy_output_tile=true;
     g.frame_time_delta_ms=get<float>(p,NVSDK_NGX_Parameter_FrameTimeDeltaInMsec,16.6667F);
     {
         float given{};
@@ -241,18 +251,81 @@ template<UINT slot> NVSDK_NGX_Result evaluate(ID3D12GraphicsCommandList* list,
     if(NVSDK_NGX_SUCCEED(result)) { try { capture(list,h,p); } catch(...) {log("capture_exception");} }
     return result;
 }
-void install(UINT i,const wchar_t* name,void* create_fn,void* eval_fn) {
-    auto& m=state().modules[i]; if(m.retained)return;
-    auto mod=GetModuleHandleW(name); if(!mod)return;
+// The modules a game's DLSS can run from: its own, by their shipped names, and
+// NGX's model store, NGX\models\<feature>\versions\<n>\files\, from which NGX
+// loads the newer model a DLSS override in the NVIDIA app puts in their place,
+// under a file name of its own. STALKER 2 with that override ran DLSS 310.9.16
+// as 160_E658700.bin from NGX\models\dlss\..., and its own nvngx_dlss.dll 310.4
+// was never evaluated. A game may keep its own module loaded beside the
+// store's, and a hook on the module nothing evaluates sees nothing, so every
+// candidate gets a slot of its own and whichever NGX calls is captured. The
+// NGX core and frame generation's module are left out: the core forwards to a
+// feature module, and capture() reads Super Resolution's parameters.
+bool dlss_module(const std::wstring& path,bool* from_store) {
+    const auto slash=path.find_last_of(L'\\');
+    const auto name=slash==std::wstring::npos?path:path.substr(slash+1);
+    *from_store=false;
+    if(name==L"nvngx_dlss.dll"||name==L"nvngx_dlssd.dll")return true;
+    *from_store=path.find(L"\\ngx\\models\\dlss\\")!=std::wstring::npos||
+        path.find(L"\\ngx\\models\\dlssd\\")!=std::wstring::npos;
+    return *from_store;
+}
+// The loaded candidates, by lowercased path. The list grows until it fits, as
+// modules load between two calls, and is walked whole on every call: a module
+// can unload and another load between two calls, which leaves the count as it
+// was. Measured with 300 modules: the names cost about 70 us, as much as the
+// enumeration itself.
+std::vector<std::pair<HMODULE,bool>> dlss_modules() {
+    std::vector<std::pair<HMODULE,bool>> found;
+    std::vector<HMODULE> modules(512); DWORD needed{};
+    for(;;) {
+        if(!K32EnumProcessModules(GetCurrentProcess(),modules.data(),
+            static_cast<DWORD>(modules.size()*sizeof(HMODULE)),&needed))return found;
+        if(needed<=modules.size()*sizeof(HMODULE))break;
+        modules.resize(needed/sizeof(HMODULE)+64);
+    }
+    modules.resize(needed/sizeof(HMODULE));
+    for(HMODULE module:modules) {
+        wchar_t path[MAX_PATH]{};
+        if(!GetModuleFileNameW(module,path,MAX_PATH))continue;
+        std::wstring lower=path; for(auto& c:lower)c=static_cast<wchar_t>(towlower(c));
+        bool from_store{}; if(dlss_module(lower,&from_store))found.emplace_back(module,from_store);
+    }
+    return found;
+}
+template<UINT... I> std::array<std::pair<void*,void*>,sizeof...(I)> slot_functions(
+    std::integer_sequence<UINT,I...>) {
+    return {{{reinterpret_cast<void*>(&create<I>),reinterpret_cast<void*>(&evaluate<I>)}...}};
+}
+// Hooks a candidate into the first free slot, once: a module is known by the
+// one its EvaluateFeature lives in, which an export forwarded elsewhere would
+// otherwise hook a second time.
+void install(HMODULE mod,bool from_store) {
+    static const auto functions=slot_functions(std::make_integer_sequence<UINT,kModuleSlots>{});
+    auto& s=state();
+    if(std::find(s.refused.begin(),s.refused.end(),mod)!=s.refused.end())return;
     auto c=GetProcAddress(mod,"NVSDK_NGX_D3D12_CreateFeature");
-    auto e=GetProcAddress(mod,"NVSDK_NGX_D3D12_EvaluateFeature"); if(!c||!e)return;
+    auto e=GetProcAddress(mod,"NVSDK_NGX_D3D12_EvaluateFeature");
+    HMODULE owner{};
+    if(!c||!e||!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCWSTR>(e),&owner)) {
+        s.refused.push_back(mod); return;
+    }
+    UINT i=0;
+    for(;i<kModuleSlots&&s.modules[i].retained;++i)if(s.modules[i].retained==owner)return;
+    if(i==kModuleSlots)return;
     HMODULE retained{}; if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
         reinterpret_cast<LPCWSTR>(e),&retained))return;
-    m.create_hook=safetyhook::create_inline(c,create_fn,SafetyHookInline::StartDisabled);
-    m.evaluate_hook=safetyhook::create_inline(e,eval_fn,SafetyHookInline::StartDisabled);
-    if(!m.create_hook||!m.evaluate_hook){FreeLibrary(retained);log("hook_failed",i);return;}
+    auto& m=s.modules[i];
+    m.create_hook=safetyhook::create_inline(c,functions[i].first,SafetyHookInline::StartDisabled);
+    m.evaluate_hook=safetyhook::create_inline(e,functions[i].second,SafetyHookInline::StartDisabled);
+    if(!m.create_hook||!m.evaluate_hook) {
+        m.create_hook={}; m.evaluate_hook={}; FreeLibrary(retained);
+        s.refused.push_back(mod); log("hook_failed",i); return;
+    }
     m.create=m.create_hook.original<Create>(); m.evaluate=m.evaluate_hook.original<Evaluate>();
-    m.retained=retained; (void)m.create_hook.enable(); (void)m.evaluate_hook.enable(); log("hook_installed",i);
+    m.retained=retained; (void)m.create_hook.enable(); (void)m.evaluate_hook.enable();
+    log("hook_installed",i,from_store?1:0);
 }
 // NGX looks for a feature's module only along the path list of the process's
 // first initialisation, which is usually the game's own DLSS: OFXR's later
@@ -386,13 +459,11 @@ void configure_ngx_guide_capture(ID3D12CommandQueue* queue,bool enabled) noexcep
             }
         }
         // NGX loads a feature module inside the game's first CreateFeature,
-        // so that creation can precede the hook; capture() recovers it.
+        // so that creation can precede the hook; capture() recovers it. The
+        // modules are looked for for as long as the capture runs: NGX may load
+        // an overridden model only when the game first creates the feature.
         std::thread([] {for(;;) {
-            if(state().active) {
-                install(0,L"nvngx_dlss.dll",reinterpret_cast<void*>(&create<0>),reinterpret_cast<void*>(&evaluate<0>));
-                install(1,L"nvngx_dlssd.dll",reinterpret_cast<void*>(&create<1>),reinterpret_cast<void*>(&evaluate<1>));
-                if(state().modules[0].retained&&state().modules[1].retained)return;
-            }
+            if(state().active)for(const auto& [module,from_store]:dlss_modules())install(module,from_store);
             Sleep(500);
         }}).detach(); log("enabled");
     } catch(...) {}
@@ -414,6 +485,9 @@ void update_ngx_guide_depth(float near_z,float far_z,float min_depth,float max_d
     s.camera_from_xr=true;
     s.camera_ready=true;
 }
+void log_ngx_guide_event(const char* message,UINT64 a,UINT64 b,UINT64 c,UINT64 d) noexcept {
+    try { log(message,a,b,c,d); } catch(...) {}
+}
 } // namespace xrfg
 #else
 namespace xrfg {
@@ -421,5 +495,6 @@ void configure_ngx_guide_capture(ID3D12CommandQueue*,bool) noexcept {}
 void stop_ngx_guide_capture(ID3D12CommandQueue*) noexcept {}
 void update_ngx_guide_depth(float,float,float,float) noexcept {}
 void prepare_ngx_feature_discovery(const wchar_t*) noexcept {}
+void log_ngx_guide_event(const char*,UINT64,UINT64,UINT64,UINT64) noexcept {}
 }
 #endif

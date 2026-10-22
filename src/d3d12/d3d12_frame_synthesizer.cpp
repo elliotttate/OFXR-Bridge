@@ -2,6 +2,7 @@
 #include "xrfg/bridge_flight_logger.hpp"
 #include "xrfg/d3d11_d3d12_interop.hpp"
 #include "xrfg/d3d12_guide_composer.hpp"
+#include "xrfg/d3d12_eye_check.hpp"
 #include "xrfg/d3d12_native_dlssg.hpp"
 #include "xrfg/frame_dump.hpp"
 
@@ -912,6 +913,9 @@ struct D3D12FrameSynthesizer::Impl {
     D3D12GuideComposer guide_composer;
     bool guide_composer_tried{};
     bool guide_composer_ready{};
+    D3D12EyeCheck eye_check;
+    bool eye_check_tried{};
+    bool eye_check_ready{};
     D3D12_RESOURCE_STATES release_state{};
     UINT descriptor_increment{};
     UINT rtv_increment{};
@@ -5470,6 +5474,21 @@ struct D3D12FrameSynthesizer::Impl {
                     {next.views.data(), next.view_count});
             }
         }
+        // And the images' own word on which stream is which eye (D3D12EyeCheck):
+        // the resolver's order is a sign, this is the thing itself. It records
+        // only for a pair whose eyes carry output tiles, which the resolver
+        // copies in bursts.
+        if (next.motion_vectors && next.motion_vectors->eye_count == 2 && next.view_count == 2) {
+            if (!eye_check_tried) {
+                eye_check_tried = true;
+                eye_check_ready = SUCCEEDED(eye_check.initialize(device.Get(), view_format));
+            }
+            if (eye_check_ready) {
+                eye_check.record(slot.command_list.Get(), static_cast<UINT>(work_slot_index),
+                    next.resource.Get(), {next.views.data(), next.view_count},
+                    *next.motion_vectors);
+            }
+        }
         bool used_game_motion = false;
         result = record_pair(
             slot,
@@ -5515,6 +5534,8 @@ struct D3D12FrameSynthesizer::Impl {
         // A skipped pair can still hold NGX history work, so every native
         // pair's fence guards the eye resources a later resize releases.
         if (native_dlss) native_dlss->submitted(fence.Get(), fence_value);
+        eye_check.submitted(static_cast<UINT>(work_slot_index), fence.Get(), fence_value);
+        eye_check.poll();
         if (frame_dump.wanted()) {
             frame_dump.capture(device.Get(), queue.Get(), next.resource.Get(), view_format,
                 {next.views.data(), next.view_count}, next.motion_vectors.get(),

@@ -124,6 +124,8 @@ constexpr std::uint64_t kMegabyte = 1024ull * 1024ull;
     case BridgeFlightOperation::promise_correction: return "promise_correction";
     case BridgeFlightOperation::synthesis_fraction: return "synthesis_fraction";
     case BridgeFlightOperation::dlss_evaluation: return "dlss_evaluation";
+    case BridgeFlightOperation::dlss_eye_order: return "dlss_eye_order";
+    case BridgeFlightOperation::dlss_eye_check: return "dlss_eye_check";
     case BridgeFlightOperation::status_panel: return "status_panel";
     case BridgeFlightOperation::reprojection_angle: return "reprojection_angle";
     case BridgeFlightOperation::app_locate_views: return "app_locate_views";

@@ -276,6 +276,7 @@ if(WIN32 AND XRFG_BUILD_LAYER)
         src/d3d12/d3d12_frame_synthesizer.cpp
         src/d3d12/d3d12_native_dlssg.cpp
         src/d3d12/d3d12_guide_composer.cpp
+        src/d3d12/d3d12_eye_check.cpp
         src/d3d12/d3d12_queue_probe.cpp
         src/d3d12/frame_dump.cpp
         src/common/dlss_motion_vectors.cpp
@@ -314,6 +315,14 @@ if(WIN32 AND XRFG_BUILD_LAYER)
             DEPENDS src/d3d12/guide_composer.hlsl VERBATIM)
         target_sources(xrfg_d3d12_history PRIVATE "${header}")
     endforeach()
+    set(XRFG_EYE_CHECK_HEADER "${XRFG_GENERATED_SHADER_DIR}/eye_check_compare_shader.hpp")
+    add_custom_command(OUTPUT "${XRFG_EYE_CHECK_HEADER}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${XRFG_GENERATED_SHADER_DIR}"
+        COMMAND "${XRFG_FXC_EXECUTABLE}" /nologo /T cs_5_1 /E Compare
+            /O3 /WX /Ges /Qstrip_debug /Qstrip_reflect /Fh "${XRFG_EYE_CHECK_HEADER}"
+            /Vn g_xrfg_eye_check_compare_shader "${CMAKE_CURRENT_SOURCE_DIR}/src/d3d12/eye_check.hlsl"
+        DEPENDS src/d3d12/eye_check.hlsl VERBATIM)
+    target_sources(xrfg_d3d12_history PRIVATE "${XRFG_EYE_CHECK_HEADER}")
     target_include_directories(xrfg_d3d12_history
         PUBLIC include "${XRFG_VULKAN_INCLUDE_DIR}"
         PRIVATE
@@ -945,6 +954,20 @@ if(WIN32 AND XRFG_BUILD_LAYER)
                 $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
                 "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-cropped-split-eye-call-chain-test.log"
                 cropped-split-eye)
+
+        add_test(
+            NAME xrfg_layer_moving_quad_call_chain
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-moving-quad-call-chain-test.log"
+                moving-quad-split-eye)
+
+        add_test(
+            NAME xrfg_layer_two_quads_call_chain
+            COMMAND xrfg_layer_call_chain
+                $<TARGET_FILE:XR_APILAYER_XRFrameBridge_diagnostic>
+                "${CMAKE_CURRENT_BINARY_DIR}/xrfg-layer-two-quads-call-chain-test.log"
+                two-quads-split-eye)
 
         add_test(
             NAME xrfg_layer_double_wide_call_chain

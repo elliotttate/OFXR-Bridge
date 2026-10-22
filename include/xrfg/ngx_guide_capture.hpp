@@ -12,4 +12,9 @@ void update_ngx_guide_depth(float near_z, float far_z, float min_depth, float ma
 // NGX before OFXR does. Call before the game's renderer starts, outside the
 // loader lock.
 void prepare_ngx_feature_discovery(const wchar_t* directory) noexcept;
+// A line in the capture's own log (ofxr-ngx-capture-pid<N>.log beside the
+// layer), where the evaluations it captured are, for what is decided about
+// them elsewhere.
+void log_ngx_guide_event(const char* message, UINT64 a, UINT64 b, UINT64 c,
+                         UINT64 d) noexcept;
 }

@@ -250,6 +250,15 @@ enum class BridgeFlightOperation : std::uint32_t {
     // none, a the DLSS handle, b how many evaluations were captured to then, c
     // its output rectangle's x offset.
     dlss_evaluation,
+    // Which of two DLSS streams at one input position is eye 0, decided from
+    // their evaluation order: result the decision's number in the session, a
+    // the DLSS handle given eye 0, b how long that order had held in
+    // milliseconds, c how long the pair had been seen in milliseconds.
+    dlss_eye_order,
+    // The same decided from the images themselves (D3D12EyeCheck): result
+    // the decision's number, a the DLSS handle given eye 0, b how long the
+    // pair had been seen in milliseconds.
+    dlss_eye_check,
     // The status panel's flip gesture. result is a selector:
     //   1  the layer's grip-pose action set was made: a= 1, or 0 when the
     //      runtime refused it and the game's input is left alone

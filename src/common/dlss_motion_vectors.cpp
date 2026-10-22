@@ -13,6 +13,16 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr std::uint64_t kMaximumStereoPublicationGap = 4;
+
+// D3D12EyeCheck reads the images in bursts: one every kEyeCheckIntervalMs,
+// and one at once when a stream appears, resets or the evaluation order
+// changes - the signs a swap may leave, though not always (a session began
+// with the eyes swapped and no sign at all, which the periodic burst covers).
+// The tiles it compares are copied only inside a burst, so outside one
+// nothing is copied or compared. A burst is long enough for the check's five
+// pairs at twenty frames a second.
+constexpr std::uint64_t kEyeCheckIntervalMs = 2000;
+constexpr std::uint64_t kEyeCheckBurstMs = 250;
 constexpr std::size_t kSnapshotSlotCount = 4;
 constexpr D3D12_RESOURCE_STATES kSnapshotReadState =
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
@@ -45,13 +55,56 @@ struct StreamState {
     std::size_t next_snapshot{};
     std::array<SnapshotSlot, kSnapshotSlotCount> depth_snapshots;
     std::size_t next_depth_snapshot{};
+    std::array<SnapshotSlot, kSnapshotSlotCount> tile_snapshots;
+    std::size_t next_tile_snapshot{};
+};
+
+// Which of two streams whose inputs sit at the same place is eye 0. First
+// seen is the start: a renderer that evaluates the left eye first does so in
+// its first frame too. It is not the end: Unreal's DLSS plugin hands its
+// features out anew on a level load, and in STALKER 2 under UEVR's Native
+// Stereo Fix the two came back the other way round - the same two handles,
+// the right eye's now evaluated first on every frame - so from the load on
+// each eye took the other's guides. What stays tied to the eyes is the order
+// the two are evaluated in, frame after frame: it replaces first seen once
+// it has held for kEvaluationOrderFrames frames in a row, and the same run
+// takes it back. One reversed frame, or an order that alternates, changes
+// nothing, so a game whose order wanders keeps first seen.
+constexpr std::uint64_t kEvaluationOrderFrames = 30;
+
+struct EvaluationOrder {
+    std::uint64_t streams[2]{};     // the pair learned about, lower id first
+    std::uint64_t first{};          // the stream evaluated first in the run
+    std::uint64_t run{};            // consecutive frames with that order
+    std::uint64_t counted{};        // newest publication counted: one count a frame
+    std::uint64_t leader{};         // the stream taken as eye 0, 0 until learned
+    std::uint64_t pair_started_ms{};  // when the pair was first counted
+    std::uint64_t run_started_ms{};   // when the current order began
+    // The stream the images themselves showed to be eye 0
+    // (report_dlss_eye_order_check), 0 until they have. It outranks the
+    // order: the images are the thing itself, the order a sign of it. Kept
+    // until the pair changes, the images say otherwise, or the order settles
+    // against it. A change of order opens an eye-check burst at once, so the
+    // images usually answer before the new order has held; where they cannot -
+    // a dark loading screen after the level load that turned the features
+    // round - the order that has since held is the newer word.
+    std::uint64_t checked{};
 };
 
 struct Registry {
     std::mutex mutex;
     std::unordered_map<std::uint64_t, StreamState> streams;
     DlssMotionVectorStatistics statistics;
+    EvaluationOrder order;
+    std::uint64_t burst_started_ms{};  // the last eye-check burst's start
+    std::uint64_t burst_until_ms{};    // its end: tiles are copied until then
 };
+
+// Opens an eye-check burst now.
+void start_eye_check_burst(Registry& state, std::uint64_t now) noexcept {
+    state.burst_started_ms = now;
+    state.burst_until_ms = now + kEyeCheckBurstMs;
+}
 
 Registry& registry() {
     static Registry value;
@@ -303,6 +356,65 @@ struct Candidate {
     return {frame.depth ? frame.source_depth_x : 0U, frame.source_motion_x};
 }
 
+// Counts this frame's evaluation order of two streams and returns the stream
+// their order makes eye 0, or 0 while no order has held long enough. Each
+// decision is timed into the statistics: how long the order had held, and
+// how long the pair had been seen - the frames until then had the eyes'
+// guides by the previous rule.
+std::uint64_t learn_evaluation_order(Registry& state,
+    const DlssMotionVectorFrame& a, const DlssMotionVectorFrame& b) noexcept {
+    auto& order = state.order;
+    const std::uint64_t now = GetTickCount64();
+    const std::uint64_t lower = std::min(a.stream, b.stream);
+    const std::uint64_t higher = std::max(a.stream, b.stream);
+    if (order.streams[0] != lower || order.streams[1] != higher) {
+        order = {};
+        order.streams[0] = lower;
+        order.streams[1] = higher;
+        order.pair_started_ms = now;
+    }
+    // Both eyes' images resolve against the same pair of evaluations: count
+    // the pair once.
+    const std::uint64_t newest = std::max(a.publication, b.publication);
+    if (newest == order.counted) return order.leader;
+    order.counted = newest;
+    const std::uint64_t first = a.publication < b.publication ? a.stream : b.stream;
+    if (first == order.first) {
+        ++order.run;
+    } else {
+        order.first = first;
+        order.run = 1;
+        order.run_started_ms = now;
+        start_eye_check_burst(state, now);
+    }
+    if (order.run >= kEvaluationOrderFrames && order.leader != first) {
+        order.leader = first;
+        if (order.checked != 0 && order.checked != first) order.checked = 0;
+        auto& statistics = state.statistics;
+        ++statistics.eye_order_decisions;
+        statistics.eye_order_stream = first;
+        statistics.eye_order_run_ms = now - order.run_started_ms;
+        statistics.eye_order_pair_ms = now - order.pair_started_ms;
+    }
+    return order.leader;
+}
+
+// Eye order of two streams: by where their inputs sit, then by what the
+// images showed, then by the evaluation order learned above, then by
+// first-seen order. First seen alone gave Galactic Racer under UEVR each eye
+// the other's guides whenever the right eye evaluated first.
+[[nodiscard]] bool eye_before(const Candidate& a, const Candidate& b,
+    const EvaluationOrder& order) noexcept {
+    const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
+    if (ao != bo) return ao < bo;
+    for (const std::uint64_t eye0 : {order.checked, order.leader}) {
+        if (eye0 != 0 && (a.frame->stream == eye0 || b.frame->stream == eye0)) {
+            return a.frame->stream == eye0;
+        }
+    }
+    return a.first_publication < b.first_publication;
+}
+
 }  // namespace
 
 void publish_dlss_motion_vectors(
@@ -362,6 +474,43 @@ void publish_dlss_motion_vectors(
             ++state.statistics.depth_publications;
         }
 
+        // The output tile for D3D12EyeCheck: the lower middle of the output
+        // rectangle, a quarter of its width by an eighth of its height. From
+        // a single 2D output alone, and only as a cropped copy; otherwise the
+        // frame goes without and the check stands aside.
+        ComPtr<ID3D12Resource> tile_snapshot;
+        std::uint32_t tile_x = 0, tile_y = 0, tile_width = 0, tile_height = 0;
+        const std::uint64_t now = GetTickCount64();
+        if (stream.first_publication == 0 || publication.reset ||
+            now - state.burst_started_ms >= kEyeCheckIntervalMs) {
+            start_eye_check_burst(state, now);
+        }
+        if (publication.copy_output_tile && now < state.burst_until_ms) {
+            const D3D12_RESOURCE_DESC od = publication.output->GetDesc();
+            tile_width = publication.output_width / 4;
+            tile_height = publication.output_height / 8;
+            tile_x = publication.output_width * 3 / 8;
+            tile_y = publication.output_height * 9 / 16;
+            bool tile_cropped = false;
+            if (od.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+                od.DepthOrArraySize == 1 && od.MipLevels == 1 && od.SampleDesc.Count == 1 &&
+                tile_width != 0 && tile_height != 0 &&
+                std::uint64_t(publication.output_x) + tile_x + tile_width <= od.Width &&
+                std::uint64_t(publication.output_y) + tile_y + tile_height <= od.Height &&
+                SUCCEEDED(snapshot_resource(stream.tile_snapshots, stream.next_tile_snapshot,
+                    publication.output, publication.output_resource_state,
+                    publication.producer_command_list, publication.producer_queue,
+                    publication.verified_producer_device, &tile_snapshot, false,
+                    {publication.output_x + tile_x, publication.output_y + tile_y,
+                     tile_width, tile_height},
+                    &tile_cropped)) &&
+                tile_cropped) {
+                ++state.statistics.tile_copies;
+            } else {
+                tile_snapshot.Reset();
+            }
+        }
+
         auto frame = std::make_shared<DlssMotionVectorFrame>();
         frame->stream = publication.stream;
         frame->epoch = stream.epoch;
@@ -399,6 +548,13 @@ void publish_dlss_motion_vectors(
         frame->depth_width = publication.depth_width;
         frame->depth_height = publication.depth_height;
         frame->depth_resource_state = kSnapshotReadState;
+        if (tile_snapshot) {
+            frame->output_tile = std::move(tile_snapshot);
+            frame->output_tile_x = tile_x;
+            frame->output_tile_y = tile_y;
+            frame->output_tile_width = tile_width;
+            frame->output_tile_height = tile_height;
+        }
         frame->frame_time_delta_ms = publication.frame_time_delta_ms;
         frame->frame_time_known = publication.frame_time_known;
         frame->camera_near = publication.camera_near;
@@ -449,7 +605,11 @@ void configure_dlss_motion_vector_tracking(bool enabled) noexcept {
             stream.previous.reset();
             stream.latest.reset();
         }
+        state.order = {};
+        state.burst_started_ms = state.burst_until_ms = 0;
+        const std::uint64_t generation = state.statistics.generation + 1;
         state.statistics = {};
+        state.statistics.generation = generation;
         state.statistics.status = DlssMotionVectorStatus::waiting_for_dlss;
     } catch (...) {
     }
@@ -461,7 +621,11 @@ void retire_disabled_dlss_motion_vector_resources() noexcept {
         std::scoped_lock lock(state.mutex);
         if (g_tracking_enabled.load(std::memory_order_acquire)) return;
         state.streams.clear();
+        state.order = {};
+        state.burst_started_ms = state.burst_until_ms = 0;
+        const std::uint64_t generation = state.statistics.generation + 1;
         state.statistics = {};
+        state.statistics.generation = generation;
         state.statistics.status = DlssMotionVectorStatus::disabled;
     } catch (...) {
     }
@@ -472,6 +636,9 @@ void retire_dlss_motion_vector_stream(std::uint64_t stream) noexcept {
         auto& state = registry();
         std::scoped_lock lock(state.mutex);
         state.streams.erase(stream);
+        if (state.order.streams[0] == stream || state.order.streams[1] == stream) {
+            state.order = {};
+        }
     } catch (...) {
     }
 }
@@ -483,6 +650,31 @@ std::uint64_t dlss_motion_vector_publications() noexcept {
         return state.statistics.published;
     } catch (...) {
         return 0;
+    }
+}
+
+void report_dlss_eye_order_check(std::uint64_t eye0_stream, std::uint64_t eye1_stream) noexcept {
+    try {
+        if (eye0_stream == 0 || eye1_stream == 0 || eye0_stream == eye1_stream) return;
+        auto& state = registry();
+        std::scoped_lock lock(state.mutex);
+        auto& order = state.order;
+        const std::uint64_t lower = std::min(eye0_stream, eye1_stream);
+        const std::uint64_t higher = std::max(eye0_stream, eye1_stream);
+        const std::uint64_t now = GetTickCount64();
+        if (order.streams[0] != lower || order.streams[1] != higher) {
+            // A pair the order has not counted yet: the images' word starts it.
+            order = {};
+            order.streams[0] = lower;
+            order.streams[1] = higher;
+            order.pair_started_ms = now;
+        }
+        if (order.checked == eye0_stream) return;
+        order.checked = eye0_stream;
+        ++state.statistics.eye_check_decisions;
+        state.statistics.eye_check_stream = eye0_stream;
+        state.statistics.eye_check_pair_ms = now - order.pair_started_ms;
+    } catch (...) {
     }
 }
 
@@ -661,11 +853,14 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
             if (chosen && other && chosen == other) {
                 if (candidates.size() >= 2) {
                     // Two streams: each stream's newest, in the stereo order.
+                    if (candidates.size() == 2) {
+                        learn_evaluation_order(state, *candidates[0].frame,
+                            *candidates[1].frame);
+                    }
+                    const EvaluationOrder& order = state.order;
                     std::sort(candidates.begin(), candidates.end(),
-                        [](const Candidate& a, const Candidate& b) {
-                            const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
-                            if (ao != bo) return ao < bo;
-                            return a.first_publication < b.first_publication;
+                        [&order](const Candidate& a, const Candidate& b) {
+                            return eye_before(a, b, order);
                         });
                     chosen = candidates[static_cast<std::size_t>(eye)].frame;
                 } else {
@@ -765,16 +960,15 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
         }
 
         // Eye order follows the two DLSS evaluation streams rather than the
-        // final colour resource, which survives any post-DLSS shader passes:
-        // by where each stream's inputs sit, then by first-seen order. First
-        // seen alone gave Galactic Racer under UEVR each eye the other's
-        // guides whenever the right eye evaluated first.
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& a,
-                                                           const Candidate& b) {
-            const auto ao = input_offset(*a.frame), bo = input_offset(*b.frame);
-            if (ao != bo) return ao < bo;
-            return a.first_publication < b.first_publication;
-        });
+        // final colour resource, which survives any post-DLSS shader passes.
+        if (eye_count == 2) {
+            learn_evaluation_order(state, *candidates[0].frame, *candidates[1].frame);
+        }
+        const EvaluationOrder& order = state.order;
+        std::sort(candidates.begin(), candidates.end(),
+            [&order](const Candidate& a, const Candidate& b) {
+                return eye_before(a, b, order);
+            });
 
         auto result = std::make_shared<DlssMotionVectorSet>();
         result->eye_count = eye_count;

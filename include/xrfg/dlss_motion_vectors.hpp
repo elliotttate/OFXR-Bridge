@@ -51,6 +51,14 @@ struct DlssMotionVectorPublication {
     // Whether the game gave DLSS its frame time (frame_time_delta_ms is
     // otherwise a default).
     bool frame_time_known{};
+    // Whether to copy a tile of the output with the guides, for telling which
+    // eye's image the evaluation made (DlssMotionVectorFrame::output_tile),
+    // and the output's state as the evaluation leaves it: NGX writes its
+    // output as an unordered-access view, and the capture publishes right
+    // after the evaluation, before the game moves it on. A producer that
+    // does not know the state leaves the tile off.
+    bool copy_output_tile{};
+    D3D12_RESOURCE_STATES output_resource_state{D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
 };
 
 struct DlssMotionVectorFrame {
@@ -98,6 +106,17 @@ struct DlssMotionVectorFrame {
     // snapshot cropped them: what tells eyes sharing one target apart.
     std::uint32_t source_motion_x{};
     std::uint32_t source_depth_x{};
+    // A tile of the output as this evaluation wrote it, copied with the
+    // guides, for telling which eye's image the evaluation made
+    // (D3D12EyeCheck): the lower middle of the output rectangle, where a
+    // first-person game's hands and ground are. Its origin is in the output
+    // rectangle's own coordinates; the tile holds that region at 0,0. Empty
+    // where the output could not be copied.
+    Microsoft::WRL::ComPtr<ID3D12Resource> output_tile;
+    std::uint32_t output_tile_x{};
+    std::uint32_t output_tile_y{};
+    std::uint32_t output_tile_width{};
+    std::uint32_t output_tile_height{};
     // Whether the game gave DLSS its frame time.
     bool frame_time_known{};
     // For an eye whose DLSS stream also evaluates the other eye: the stream's
@@ -159,6 +178,22 @@ struct DlssMotionVectorStatistics {
     // Latest queue-compatible DLSS output and requested eye image, for a
     // size-mismatch diagnostic. Internal only; the public getter ABI stays fixed.
     std::uint32_t dlss_width{}, dlss_height{}, eye_width{}, eye_height{};
+    // Eye 0 of two streams at one input position, decided from their
+    // evaluation order (resolve): decisions so far, the stream the last gave
+    // eye 0, how long that order had held when it was decided and how long
+    // the pair had been seen by then, both in milliseconds. Internal only.
+    std::uint64_t eye_order_decisions{}, eye_order_stream{}, eye_order_run_ms{},
+        eye_order_pair_ms{};
+    // The same decided from the images (report_dlss_eye_order_check): how
+    // many, the stream the last gave eye 0, and how long the pair had been
+    // seen by then in milliseconds. Internal only.
+    std::uint64_t eye_check_decisions{}, eye_check_stream{}, eye_check_pair_ms{};
+    // Output tiles copied for that check.
+    std::uint64_t tile_copies{};
+    // How many times the counts above have started over (tracking configured
+    // again, or its resources retired): a reader that remembers a count keys
+    // it on this too. Internal only.
+    std::uint64_t generation{};
 };
 
 void publish_dlss_motion_vectors(
@@ -181,6 +216,11 @@ std::shared_ptr<const DlssMotionVectorSet> resolve_dlss_motion_vectors(
     std::uint64_t other_released_at = 0) noexcept;
 // How many evaluations have been published so far.
 std::uint64_t dlss_motion_vector_publications() noexcept;
+// The two streams' eyes as the images show them (D3D12EyeCheck): the stream
+// whose output matched eye 0's image, and the one that matched eye 1's. It
+// outranks the evaluation order and first-seen, below only the inputs'
+// positions, until the evaluation order next settles the other way.
+void report_dlss_eye_order_check(std::uint64_t eye0_stream, std::uint64_t eye1_stream) noexcept;
 void report_dlss_motion_vector_status(DlssMotionVectorStatus status) noexcept;
 void report_dlss_motion_vector_use() noexcept;
 DlssMotionVectorStatistics dlss_motion_vector_statistics() noexcept;
