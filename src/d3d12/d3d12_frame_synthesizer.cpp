@@ -173,6 +173,9 @@ constexpr D3D12_RESOURCE_STATES kShaderReadState =
     DXGI_FORMAT resource_format,
     DXGI_FORMAT view_format) noexcept {
     switch (view_format) {
+        case DXGI_FORMAT_R16G16B16A16_FLOAT:
+            return resource_format == DXGI_FORMAT_R16G16B16A16_TYPELESS ||
+                   resource_format == view_format;
         case DXGI_FORMAT_R8G8B8A8_UNORM:
         case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
             return resource_format == DXGI_FORMAT_R8G8B8A8_TYPELESS ||
@@ -356,9 +359,11 @@ constexpr UINT kEncodeSrgbFlowInputFlag = 2U;
            format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
 }
 
-// The flag bits every pack dispatch carries; the composition ignores them.
+// Encode linear FP16 colour in the 8-bit flow input too. Composition still
+// samples the original FP16 textures.
 [[nodiscard]] constexpr UINT pack_input_flags(DXGI_FORMAT view_format) noexcept {
-    return srgb_view_format(view_format) ? kEncodeSrgbFlowInputFlag : 0U;
+    return (srgb_view_format(view_format) || view_format == DXGI_FORMAT_R16G16B16A16_FLOAT)
+        ? kEncodeSrgbFlowInputFlag : 0U;
 }
 
 // Packs the synthetic's position between the two captures into the spare
@@ -2340,6 +2345,12 @@ struct D3D12FrameSynthesizer::Impl {
             (description.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 ||
             !compatible_view_format(description.Format, input_view_format)) {
             return E_INVALIDARG;
+        }
+
+        // Native DLSS has a separate color pack that does not encode linear FP16.
+        if (input_nvidia_options.frame_generation == D3D12FrameGeneration::native_dlss &&
+            input_view_format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            return DXGI_ERROR_UNSUPPORTED;
         }
 
         D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support{};

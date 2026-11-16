@@ -2805,6 +2805,12 @@ enum class SwapchainEligibilityReason : std::int64_t {
     deep_pipeline_fallback = 23,
 };
 
+enum class SwapchainGenerationDecline {
+    none,
+    unavailable,
+    unsupported_native_format,
+};
+
 void log_swapchain_eligibility(
     const std::shared_ptr<SwapchainState>& state,
     SwapchainEligibilityReason reason,
@@ -2911,8 +2917,23 @@ struct SwapchainState {
     // An attempt that failed for its own reasons -- synthesis, interop -- is
     // not retried every frame. Cleared whenever the history is rebuilt, which
     // is the point at which the images themselves changed.
-    bool generation_declined{};
+    SwapchainGenerationDecline generation_decline{};
 };
+
+[[nodiscard]] bool unsupported_native_synthesis_format(
+    HRESULT result, const xrfg::D3D12NvidiaOpticalFlowOptions& options) noexcept {
+    return result == DXGI_ERROR_UNSUPPORTED &&
+           options.frame_generation == xrfg::D3D12FrameGeneration::native_dlss;
+}
+
+[[nodiscard]] SwapchainGenerationDecline swapchain_generation_decline(
+    SwapchainEligibilityReason reason, std::uint64_t detail,
+    const xrfg::D3D12NvidiaOpticalFlowOptions& options) noexcept {
+    return reason == SwapchainEligibilityReason::synthesis_initialize_failed &&
+           unsupported_native_synthesis_format(static_cast<HRESULT>(detail), options)
+        ? SwapchainGenerationDecline::unsupported_native_format
+        : SwapchainGenerationDecline::unavailable;
+}
 
 void log_swapchain_eligibility(
     const std::shared_ptr<SwapchainState>& state,
@@ -3722,7 +3743,8 @@ template <typename Initialize>
         return result;
     };
     HRESULT result = attempt(backend);
-    if (FAILED(result) && backend == xrfg::D3D12OpticalFlowBackend::nvidia) {
+    if (FAILED(result) && backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+        !unsupported_native_synthesis_format(result, session.nvidia_options)) {
         xrfg::bridge_flight_logger().event(
             xrfg::BridgeFlightOperation::synthesis_initialize,
             result,
@@ -4249,7 +4271,7 @@ void release_session_generation_budget(
         for (const auto& swapchain : find_swapchains(session)) {
             std::scoped_lock call_lock(swapchain->call_mutex);
             swapchain->generation_eligible_pending = false;
-            swapchain->generation_declined = true;
+            swapchain->generation_decline = SwapchainGenerationDecline::unavailable;
             drain_swapchain_gpu(swapchain);
             destroy_frame_generation_swapchains(swapchain);
         }
@@ -4505,7 +4527,8 @@ create_vulkan_frame_generation_swapchains(
             return true;
         }
         std::scoped_lock call_lock(state->call_mutex);
-        if (!state->generation_eligible_pending || state->generation_declined) {
+        if (!state->generation_eligible_pending ||
+            state->generation_decline != SwapchainGenerationDecline::none) {
             return true;
         }
         {
@@ -4618,7 +4641,8 @@ create_vulkan_frame_generation_swapchains(
             }
         }
         if (!candidate) {
-            state->generation_declined = true;
+            state->generation_decline =
+                swapchain_generation_decline(reason, detail, state->session->nvidia_options);
             log_swapchain_eligibility(state, reason, detail, auxiliary);
             return !budget_refusal(reason);
         }
@@ -4688,7 +4712,7 @@ create_vulkan_frame_generation_swapchains(
                 continue;
             }
             std::scoped_lock call_lock(swapchain->call_mutex);
-            swapchain->generation_declined = false;
+            swapchain->generation_decline = SwapchainGenerationDecline::none;
             swapchain->generation_eligible_pending = true;
         }
         return true;
@@ -4754,7 +4778,7 @@ create_vulkan_frame_generation_swapchains(
             }
             std::scoped_lock call_lock(swapchain->call_mutex);
             if (swapchain->generation_eligible_pending &&
-                !swapchain->generation_declined) {
+                swapchain->generation_decline == SwapchainGenerationDecline::none) {
                 return true;
             }
         }
@@ -7665,7 +7689,7 @@ XrResult layer_enumerate_swapchain_images_impl(
             const bool static_image =
                 (state->create_info.createFlags &
                  XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
-            if (!has_generation && !state->generation_declined &&
+            if (!has_generation && state->generation_decline == SwapchainGenerationDecline::none &&
                 !state->session->generation_budget_exhausted.load(
                     std::memory_order_acquire)) {
                 if (static_image) {
@@ -7755,7 +7779,7 @@ XrResult layer_enumerate_swapchain_images_impl(
                     state->last_released_motion_vectors.reset();
                 }
                 retired_history.reset();
-                state->generation_declined = false;
+                state->generation_decline = SwapchainGenerationDecline::none;
             }
             {
                 std::scoped_lock lock(state->mutex);
@@ -7769,7 +7793,7 @@ XrResult layer_enumerate_swapchain_images_impl(
             const bool static_image =
                 (state->create_info.createFlags &
                  XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
-            if (!has_generation && !state->generation_declined &&
+            if (!has_generation && state->generation_decline == SwapchainGenerationDecline::none &&
                 !state->session->generation_budget_exhausted.load(
                     std::memory_order_acquire)) {
                 if (!state->session->vulkan_support) {
@@ -7913,7 +7937,7 @@ XrResult layer_enumerate_swapchain_images_impl(
             retired_history.reset();
             // The images themselves changed, so an earlier refusal says
             // nothing about this set.
-            state->generation_declined = false;
+            state->generation_decline = SwapchainGenerationDecline::none;
         }
         state->enumerated_image_count = count;
 
@@ -7958,7 +7982,7 @@ XrResult layer_enumerate_swapchain_images_impl(
             (state->create_info.createFlags &
              XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT) != 0;
         if (history && release_state == D3D12_RESOURCE_STATE_RENDER_TARGET &&
-            !has_generation && !state->generation_declined &&
+            !has_generation && state->generation_decline == SwapchainGenerationDecline::none &&
             !state->session->generation_budget_exhausted.load(
                 std::memory_order_acquire)) {
             if (static_image) {
@@ -13765,7 +13789,7 @@ void apply_embedded_control(
         //
         // generation_eligible_pending is the projection-use gate: set at
         // enumeration, cleared once a projection layer has actually used the
-        // swapchain. generation_declined means creation already failed for this
+        // swapchain. generation_decline records a failed creation for this
         // one, and retrying it on every settings change is how a transient
         // refusal becomes a permanent budget leak. The budget flag latches when
         // a runtime refuses a private swapchain, which says something about the
@@ -13779,9 +13803,14 @@ void apply_embedded_control(
         // Alternating/AFR, whose eyes are images of their own; which way it
         // went depended on whether the revision came before the first
         // projection). The projection path arms the rest when they are named.
+        // A format refused by Native DLSS can still use OFXR in this session.
+        if (options.frame_generation == xrfg::D3D12FrameGeneration::ofxr &&
+            chain->generation_decline == SwapchainGenerationDecline::unsupported_native_format) {
+            chain->generation_decline = SwapchainGenerationDecline::none;
+        }
         const bool eligible = chain->generation_eligible_pending &&
             chain->projection_used.load(std::memory_order_relaxed) &&
-            !chain->generation_declined &&
+            chain->generation_decline == SwapchainGenerationDecline::none &&
             !state->generation_budget_exhausted.load(std::memory_order_acquire);
         if (!chain->frame_generation && control.desired.enabled && !paused && eligible) {
             std::vector<ID3D11Texture2D*> sources;
@@ -13817,7 +13846,7 @@ void apply_embedded_control(
                     auxiliary);
                 lock.lock();
             } else {
-                chain->generation_declined = true;
+                chain->generation_decline = swapchain_generation_decline(reason, detail, options);
                 if (reason == SwapchainEligibilityReason::synthesis_initialize_failed)
                     result = static_cast<HRESULT>(detail);
                 lock.unlock();
@@ -13831,7 +13860,8 @@ void apply_embedded_control(
             if (SUCCEEDED(result) && changed) {
                 result = synthesis->reconfigure(backend, options);
                 if (FAILED(result) &&
-                    backend == xrfg::D3D12OpticalFlowBackend::nvidia) {
+                    backend == xrfg::D3D12OpticalFlowBackend::nvidia &&
+                    !unsupported_native_synthesis_format(result, options)) {
                     // The menu switched to NVIDIA on a machine without it.
                     // Same fallback as at creation, and the tray is told the
                     // change applied: generation carries on, on FidelityFX.
@@ -14676,7 +14706,8 @@ void update_panel_cursor(
     std::uint32_t eye_height = 0;
     for (const auto& chain : find_swapchains(state)) {
         std::scoped_lock lock(chain->mutex);
-        if (chain->generation_declined && chain->projection_used.load(std::memory_order_relaxed)) {
+        if (chain->generation_decline != SwapchainGenerationDecline::none &&
+            chain->projection_used.load(std::memory_order_relaxed)) {
             ++input.declined_images;
         }
         if (chain->projection_used.load(std::memory_order_relaxed)) {
