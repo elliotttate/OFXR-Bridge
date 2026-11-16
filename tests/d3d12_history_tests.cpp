@@ -2212,13 +2212,16 @@ void test_synthesis_on_a_dedicated_queue(D3D12WarpFixture& fixture) {
     // crashed six call-chain tests at process teardown.
 }
 
-void test_native_dlss_rejects_fp16_synthesis(D3D12WarpFixture& fixture) {
-    constexpr auto format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+void test_fp16_synthesis_modes(D3D12WarpFixture& fixture, DXGI_FORMAT resource_format) {
+    constexpr auto view_format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     constexpr auto state = D3D12_RESOURCE_STATE_RENDER_TARGET;
     constexpr auto backend = xrfg::D3D12OpticalFlowBackend::fidelity_fx;
-    const auto source = create_source_texture(fixture, kWidth, kHeight, state, kEyeCount, format);
-    const auto current = create_source_texture(fixture, kWidth, kHeight, state, kEyeCount, format);
-    const auto synthetic = create_source_texture(fixture, kWidth, kHeight, state, kEyeCount, format);
+    const auto source = create_source_texture(
+        fixture, kWidth, kHeight, state, kEyeCount, resource_format);
+    const auto current = create_source_texture(
+        fixture, kWidth, kHeight, state, kEyeCount, resource_format);
+    const auto synthetic = create_source_texture(
+        fixture, kWidth, kHeight, state, kEyeCount, resource_format);
     const std::array source_images{source.Get()};
     const std::array current_images{current.Get()};
     const std::array synthetic_images{synthetic.Get()};
@@ -2230,11 +2233,11 @@ void test_native_dlss_rejects_fp16_synthesis(D3D12WarpFixture& fixture) {
     native.frame_generation = xrfg::D3D12FrameGeneration::native_dlss;
     xrfg::D3D12FrameSynthesizer synthesizer;
     require(synthesizer.initialize(fixture.device(), fixture.queue(), history, current_images,
-                                   synthetic_images, format, state, backend, native) ==
+                                   synthetic_images, view_format, state, backend, native) ==
                 DXGI_ERROR_UNSUPPORTED && !synthesizer.initialized(),
             "Native DLSS must decline FP16 synthesis before initialization");
     require_hresult(synthesizer.initialize(fixture.device(), fixture.queue(), history, current_images,
-                                           synthetic_images, format, state, backend),
+                                           synthetic_images, view_format, state, backend),
                     "OFXR FP16 synthesis initialization failed");
     require(synthesizer.reconfigure(backend, native) == DXGI_ERROR_UNSUPPORTED &&
                 synthesizer.initialized(),
@@ -7096,7 +7099,8 @@ int main() {
         test_capture_waits_for_a_busy_slot_within_its_limit(fixture);
         test_depth_capture_path(fixture);
         test_depth_private_history_allows_shader_resource_views(fixture);
-        test_native_dlss_rejects_fp16_synthesis(fixture);
+        test_fp16_synthesis_modes(fixture, DXGI_FORMAT_R16G16B16A16_FLOAT);
+        test_fp16_synthesis_modes(fixture, DXGI_FORMAT_R16G16B16A16_TYPELESS);
         test_rolling_frame_synthesizer(fixture);
         test_synthesis_on_a_dedicated_queue(fixture);
         test_double_wide_single_slice_views(fixture);
