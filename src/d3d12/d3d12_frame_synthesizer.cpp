@@ -2347,6 +2347,12 @@ struct D3D12FrameSynthesizer::Impl {
             return E_INVALIDARG;
         }
 
+        // Native DLSS has a separate color pack that does not encode linear FP16.
+        if (input_nvidia_options.frame_generation == D3D12FrameGeneration::native_dlss &&
+            input_view_format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            return DXGI_ERROR_UNSUPPORTED;
+        }
+
         D3D12_FEATURE_DATA_FORMAT_SUPPORT format_support{};
         format_support.Format = input_view_format;
         HRESULT result = input_device->CheckFeatureSupport(
